@@ -86,23 +86,52 @@ const (
 	ErrCodeTransactionFailed ErrorCode = 5004
 
 	// Validation errors (6000-6999)
-	ErrCodeValidation       ErrorCode = 6000
-	ErrCodeInvalidValue     ErrorCode = 6001
-	ErrCodeValueOutOfRange  ErrorCode = 6002
-	ErrCodeInvalidFormat    ErrorCode = 6003
-	ErrCodeMissingRequired  ErrorCode = 6004
+	ErrCodeValidation      ErrorCode = 6000
+	ErrCodeInvalidValue    ErrorCode = 6001
+	ErrCodeValueOutOfRange ErrorCode = 6002
+	ErrCodeInvalidFormat   ErrorCode = 6003
+	ErrCodeMissingRequired ErrorCode = 6004
+
+	// Cursor errors (7000-7999) - For SDK/Driver support
+	ErrCodeCursor            ErrorCode = 7000
+	ErrCodeCursorNotOpen     ErrorCode = 7001
+	ErrCodeCursorAlreadyOpen ErrorCode = 7002
+	ErrCodeCursorExhausted   ErrorCode = 7003
+	ErrCodeInvalidCursorPos  ErrorCode = 7004
+	ErrCodeCursorClosed      ErrorCode = 7005
+	ErrCodeFetchOutOfRange   ErrorCode = 7006
+
+	// Transaction errors (8000-8999) - For SDK/Driver support
+	ErrCodeTransaction         ErrorCode = 8000
+	ErrCodeTxNotActive         ErrorCode = 8001
+	ErrCodeTxAlreadyActive     ErrorCode = 8002
+	ErrCodeTxIsolationError    ErrorCode = 8003
+	ErrCodeTxDeadlock          ErrorCode = 8004
+	ErrCodeTxSerializationFail ErrorCode = 8005
+	ErrCodeTxReadOnly          ErrorCode = 8006
+
+	// Driver errors (9000-9999) - For SDK/Driver support
+	ErrCodeDriver            ErrorCode = 9000
+	ErrCodeDriverNotReady    ErrorCode = 9001
+	ErrCodeInvalidHandle     ErrorCode = 9002
+	ErrCodeFunctionSequence  ErrorCode = 9003
+	ErrCodeMemoryAllocation  ErrorCode = 9004
+	ErrCodeInvalidDescriptor ErrorCode = 9005
 )
 
 // Category represents the error category.
 type Category string
 
 const (
-	CategorySyntax     Category = "SYNTAX"
-	CategoryExecution  Category = "EXECUTION"
-	CategoryConnection Category = "CONNECTION"
-	CategoryAuth       Category = "AUTH"
-	CategoryStorage    Category = "STORAGE"
-	CategoryValidation Category = "VALIDATION"
+	CategorySyntax      Category = "SYNTAX"
+	CategoryExecution   Category = "EXECUTION"
+	CategoryConnection  Category = "CONNECTION"
+	CategoryAuth        Category = "AUTH"
+	CategoryStorage     Category = "STORAGE"
+	CategoryValidation  Category = "VALIDATION"
+	CategoryCursor      Category = "CURSOR"
+	CategoryTransaction Category = "TRANSACTION"
+	CategoryDriver      Category = "DRIVER"
 )
 
 // FlyDBError represents a structured error in FlyDB.
@@ -126,6 +155,11 @@ func (e *FlyDBError) Error() string {
 // Unwrap returns the underlying cause.
 func (e *FlyDBError) Unwrap() error {
 	return e.Cause
+}
+
+// SQLSTATE returns the SQLSTATE code for this error.
+func (e *FlyDBError) SQLSTATE() SQLSTATE {
+	return ToSQLSTATE(e.Code)
 }
 
 // UserMessage returns a user-friendly error message.
@@ -398,6 +432,146 @@ func MissingRequired(field string) *FlyDBError {
 }
 
 // ============================================================================
+// Cursor Error Constructors
+// ============================================================================
+
+// NewCursorError creates a new cursor error.
+func NewCursorError(message string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeCursor,
+		Category: CategoryCursor,
+		Message:  message,
+	}
+}
+
+// CursorNotOpen creates an error for operations on a closed cursor.
+func CursorNotOpen(cursorID string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeCursorNotOpen,
+		Category: CategoryCursor,
+		Message:  "cursor is not open",
+		Detail:   fmt.Sprintf("Cursor ID: %s", cursorID),
+		Hint:     "Open the cursor before fetching data",
+	}
+}
+
+// CursorAlreadyOpen creates an error for opening an already open cursor.
+func CursorAlreadyOpen(cursorID string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeCursorAlreadyOpen,
+		Category: CategoryCursor,
+		Message:  "cursor is already open",
+		Detail:   fmt.Sprintf("Cursor ID: %s", cursorID),
+		Hint:     "Close the cursor before reopening",
+	}
+}
+
+// CursorExhausted creates an error when no more rows are available.
+func CursorExhausted(cursorID string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeCursorExhausted,
+		Category: CategoryCursor,
+		Message:  "no more rows available",
+		Detail:   fmt.Sprintf("Cursor ID: %s", cursorID),
+	}
+}
+
+// InvalidCursorPosition creates an error for invalid cursor position.
+func InvalidCursorPosition(cursorID string, position int64) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeInvalidCursorPos,
+		Category: CategoryCursor,
+		Message:  "invalid cursor position",
+		Detail:   fmt.Sprintf("Cursor ID: %s, Position: %d", cursorID, position),
+	}
+}
+
+// ============================================================================
+// Transaction Error Constructors
+// ============================================================================
+
+// NewTransactionError creates a new transaction error.
+func NewTransactionError(message string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeTransaction,
+		Category: CategoryTransaction,
+		Message:  message,
+	}
+}
+
+// TransactionNotActive creates an error for operations requiring an active transaction.
+func TransactionNotActive() *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeTxNotActive,
+		Category: CategoryTransaction,
+		Message:  "no active transaction",
+		Hint:     "Use BEGIN to start a transaction",
+	}
+}
+
+// TransactionAlreadyActive creates an error when starting a transaction while one is active.
+func TransactionAlreadyActive() *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeTxAlreadyActive,
+		Category: CategoryTransaction,
+		Message:  "transaction already active",
+		Hint:     "COMMIT or ROLLBACK the current transaction first",
+	}
+}
+
+// TransactionReadOnly creates an error for write operations in read-only transaction.
+func TransactionReadOnly() *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeTxReadOnly,
+		Category: CategoryTransaction,
+		Message:  "cannot execute write operation in read-only transaction",
+		Hint:     "Start a read-write transaction for write operations",
+	}
+}
+
+// TransactionDeadlock creates an error for deadlock detection.
+func TransactionDeadlock() *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeTxDeadlock,
+		Category: CategoryTransaction,
+		Message:  "deadlock detected",
+		Hint:     "Retry the transaction",
+	}
+}
+
+// ============================================================================
+// Driver Error Constructors
+// ============================================================================
+
+// NewDriverError creates a new driver error.
+func NewDriverError(message string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeDriver,
+		Category: CategoryDriver,
+		Message:  message,
+	}
+}
+
+// InvalidHandle creates an error for invalid handle operations.
+func InvalidHandle(handleType string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeInvalidHandle,
+		Category: CategoryDriver,
+		Message:  fmt.Sprintf("invalid %s handle", handleType),
+	}
+}
+
+// FunctionSequenceError creates an error for incorrect function call sequence.
+func FunctionSequenceError(expected, actual string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeFunctionSequence,
+		Category: CategoryDriver,
+		Message:  "function sequence error",
+		Detail:   fmt.Sprintf("Expected: %s, Actual: %s", expected, actual),
+	}
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -425,6 +599,30 @@ func IsAuthError(err error) bool {
 	return false
 }
 
+// IsCursorError checks if an error is a cursor error.
+func IsCursorError(err error) bool {
+	if e, ok := err.(*FlyDBError); ok {
+		return e.Category == CategoryCursor
+	}
+	return false
+}
+
+// IsTransactionError checks if an error is a transaction error.
+func IsTransactionError(err error) bool {
+	if e, ok := err.(*FlyDBError); ok {
+		return e.Category == CategoryTransaction
+	}
+	return false
+}
+
+// IsDriverError checks if an error is a driver error.
+func IsDriverError(err error) bool {
+	if e, ok := err.(*FlyDBError); ok {
+		return e.Category == CategoryDriver
+	}
+	return false
+}
+
 // GetCode returns the error code if it's a FlyDBError, or 0 otherwise.
 func GetCode(err error) ErrorCode {
 	if e, ok := err.(*FlyDBError); ok {
@@ -439,5 +637,13 @@ func FormatError(err error) string {
 		return e.UserMessage()
 	}
 	return fmt.Sprintf("ERROR: %v", err)
+}
+
+// FormatErrorWithSQLSTATE formats an error with SQLSTATE for driver use.
+func FormatErrorWithSQLSTATE(err error) string {
+	if e, ok := err.(*FlyDBError); ok {
+		return fmt.Sprintf("[%s] %s", e.SQLSTATE(), e.UserMessage())
+	}
+	return fmt.Sprintf("[%s] ERROR: %v", SQLStateCLIError, err)
 }
 
