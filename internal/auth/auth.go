@@ -289,6 +289,75 @@ func (m *AuthManager) Grant(username, table string, rlsCol, rlsVal string) error
 	return m.store.Put(key, data)
 }
 
+// Revoke removes a permission from a user on a specific table.
+// This removes all access rights for the user on the specified table,
+// including any Row-Level Security conditions that were set.
+//
+// Parameters:
+//   - username: The user to revoke access from
+//   - table: The table name to revoke access on
+//
+// Returns an error if the user does not exist or has no permission on the table.
+//
+// Example:
+//
+//	err := authMgr.Revoke("alice", "products")
+func (m *AuthManager) Revoke(username, table string) error {
+	// Verify that the user exists before revoking permissions.
+	if _, err := m.store.Get(userKeyPrefix + username); err != nil {
+		return errors.New("user does not exist")
+	}
+
+	// Construct the permission storage key.
+	key := privKeyPrefix + username + ":" + table
+
+	// Check if the permission exists
+	if _, err := m.store.Get(key); err != nil {
+		return errors.New("permission does not exist")
+	}
+
+	// Delete the permission from the database.
+	return m.store.Delete(key)
+}
+
+// AlterUser modifies an existing user's password.
+// The new password is hashed using bcrypt before storage.
+//
+// Parameters:
+//   - username: The user to modify
+//   - newPassword: The new password for the user
+//
+// Returns an error if the user does not exist.
+//
+// Example:
+//
+//	err := authMgr.AlterUser("alice", "new_secret123")
+func (m *AuthManager) AlterUser(username, newPassword string) error {
+	// Construct the storage key for this user.
+	key := userKeyPrefix + username
+
+	// Check if the user exists.
+	if _, err := m.store.Get(key); err != nil {
+		return errors.New("user does not exist")
+	}
+
+	// Hash the new password using bcrypt for secure storage.
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), DefaultBcryptCost)
+	if err != nil {
+		return errors.New("failed to hash password: " + err.Error())
+	}
+
+	// Create the updated user record with new hashed password and serialize to JSON.
+	user := User{Username: username, PasswordHash: string(hashedPassword)}
+	data, err := json.Marshal(user)
+	if err != nil {
+		return err
+	}
+
+	// Store the updated user in the database.
+	return m.store.Put(key, data)
+}
+
 // CheckPermission checks if a user has access to a specific table.
 // Returns two values:
 //   - allowed: true if the user has permission, false otherwise

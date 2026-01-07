@@ -281,3 +281,153 @@ func TestAuthenticateTimingAttackPrevention(t *testing.T) {
 	t.Log("Timing attack prevention code paths executed successfully")
 }
 
+func TestAlterUser(t *testing.T) {
+	authMgr, cleanup := setupTestAuthManager(t)
+	defer cleanup()
+
+	// Create a user
+	err := authMgr.CreateUser("altertest", "oldpassword")
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	// Verify old password works
+	if !authMgr.Authenticate("altertest", "oldpassword") {
+		t.Error("Expected authentication to succeed with old password")
+	}
+
+	// Alter the user's password
+	err = authMgr.AlterUser("altertest", "newpassword")
+	if err != nil {
+		t.Fatalf("AlterUser failed: %v", err)
+	}
+
+	// Verify old password no longer works
+	if authMgr.Authenticate("altertest", "oldpassword") {
+		t.Error("Expected authentication to fail with old password after ALTER USER")
+	}
+
+	// Verify new password works
+	if !authMgr.Authenticate("altertest", "newpassword") {
+		t.Error("Expected authentication to succeed with new password")
+	}
+}
+
+func TestAlterUserNonExistent(t *testing.T) {
+	authMgr, cleanup := setupTestAuthManager(t)
+	defer cleanup()
+
+	// Try to alter a non-existent user
+	err := authMgr.AlterUser("nonexistent", "newpassword")
+	if err == nil {
+		t.Error("Expected error when altering non-existent user")
+	}
+	if err.Error() != "user does not exist" {
+		t.Errorf("Expected 'user does not exist' error, got: %v", err)
+	}
+}
+
+func TestRevoke(t *testing.T) {
+	authMgr, cleanup := setupTestAuthManager(t)
+	defer cleanup()
+
+	// Create a user
+	err := authMgr.CreateUser("revoketest", "pass")
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	// Grant permission
+	err = authMgr.Grant("revoketest", "products", "", "")
+	if err != nil {
+		t.Fatalf("Grant failed: %v", err)
+	}
+
+	// Verify permission exists
+	allowed, _ := authMgr.CheckPermission("revoketest", "products")
+	if !allowed {
+		t.Error("Expected permission to be granted")
+	}
+
+	// Revoke permission
+	err = authMgr.Revoke("revoketest", "products")
+	if err != nil {
+		t.Fatalf("Revoke failed: %v", err)
+	}
+
+	// Verify permission is revoked
+	allowed, _ = authMgr.CheckPermission("revoketest", "products")
+	if allowed {
+		t.Error("Expected permission to be revoked")
+	}
+}
+
+func TestRevokeWithRLS(t *testing.T) {
+	authMgr, cleanup := setupTestAuthManager(t)
+	defer cleanup()
+
+	// Create a user
+	err := authMgr.CreateUser("revokerls", "pass")
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	// Grant permission with RLS
+	err = authMgr.Grant("revokerls", "orders", "user_id", "revokerls")
+	if err != nil {
+		t.Fatalf("Grant failed: %v", err)
+	}
+
+	// Verify permission exists with RLS
+	allowed, rls := authMgr.CheckPermission("revokerls", "orders")
+	if !allowed || rls == nil {
+		t.Error("Expected permission with RLS to be granted")
+	}
+
+	// Revoke permission
+	err = authMgr.Revoke("revokerls", "orders")
+	if err != nil {
+		t.Fatalf("Revoke failed: %v", err)
+	}
+
+	// Verify permission is revoked
+	allowed, _ = authMgr.CheckPermission("revokerls", "orders")
+	if allowed {
+		t.Error("Expected permission to be revoked")
+	}
+}
+
+func TestRevokeNonExistentUser(t *testing.T) {
+	authMgr, cleanup := setupTestAuthManager(t)
+	defer cleanup()
+
+	// Try to revoke from non-existent user
+	err := authMgr.Revoke("nonexistent", "products")
+	if err == nil {
+		t.Error("Expected error when revoking from non-existent user")
+	}
+	if err.Error() != "user does not exist" {
+		t.Errorf("Expected 'user does not exist' error, got: %v", err)
+	}
+}
+
+func TestRevokeNonExistentPermission(t *testing.T) {
+	authMgr, cleanup := setupTestAuthManager(t)
+	defer cleanup()
+
+	// Create a user but don't grant any permissions
+	err := authMgr.CreateUser("revokenoperm", "pass")
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	// Try to revoke a permission that doesn't exist
+	err = authMgr.Revoke("revokenoperm", "products")
+	if err == nil {
+		t.Error("Expected error when revoking non-existent permission")
+	}
+	if err.Error() != "permission does not exist" {
+		t.Errorf("Expected 'permission does not exist' error, got: %v", err)
+	}
+}
+
