@@ -1507,44 +1507,52 @@ func (p *Parser) parseAggregate() (*AggregateExpr, error) {
 //
 // Supported targets:
 //   - USERS: List all database users
-//   - DATABASES: List database information
-//   - DATABASE <name>: Detailed info for a specific database
 //   - TABLES: List all tables with their schemas
 //   - TABLE <name>: Detailed info for a specific table
 //   - INDEXES: List all indexes
+//   - SERVER: Show server/daemon information
+//   - STATUS: Show overall database status and statistics
 //
 // Examples:
 //
 //	INTROSPECT USERS
 //	INTROSPECT TABLES
 //	INTROSPECT TABLE employees
-//	INTROSPECT DATABASE flydb
+//	INTROSPECT SERVER
+//	INTROSPECT STATUS
 //
 // Returns an IntrospectStmt AST node.
 func (p *Parser) parseIntrospect() (*IntrospectStmt, error) {
-	// Expect the target (USERS, DATABASES, DATABASE, TABLES, TABLE, INDEXES)
+	// Expect the target
 	// These are parsed as identifiers to avoid conflicts with table names
 	p.nextToken()
 	if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
-		return nil, errors.New("expected USERS, DATABASES, DATABASE, TABLES, TABLE, or INDEXES after INTROSPECT")
+		return nil, errors.New("expected USERS, TABLES, TABLE, INDEXES, SERVER, or STATUS after INTROSPECT")
 	}
 
 	// Normalize to uppercase for case-insensitive matching
 	target := strings.ToUpper(p.cur.Value)
 	switch target {
-	case "USERS", "DATABASES", "TABLES", "INDEXES":
+	case "USERS", "TABLES", "INDEXES", "SERVER", "STATUS":
 		// These targets don't take an object name
 		return &IntrospectStmt{Target: target}, nil
-	case "TABLE", "DATABASE":
-		// These targets require an object name
+	case "TABLE":
+		// This target requires an object name
 		p.nextToken()
 		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
-			return nil, fmt.Errorf("expected %s name after INTROSPECT %s", strings.ToLower(target), target)
+			return nil, fmt.Errorf("expected table name after INTROSPECT TABLE")
 		}
 		objectName := p.cur.Value
 		return &IntrospectStmt{Target: target, ObjectName: objectName}, nil
+	// Keep DATABASES and DATABASE for backward compatibility but they now redirect to STATUS
+	case "DATABASES", "DATABASE":
+		if target == "DATABASE" {
+			// Skip the database name argument since it's ignored
+			p.nextToken()
+		}
+		return &IntrospectStmt{Target: "STATUS"}, nil
 	default:
-		return nil, fmt.Errorf("unknown INTROSPECT target: %s (expected USERS, DATABASES, DATABASE, TABLES, TABLE, or INDEXES)", target)
+		return nil, fmt.Errorf("unknown INTROSPECT target: %s (expected USERS, TABLES, TABLE, INDEXES, SERVER, or STATUS)", target)
 	}
 }
 
