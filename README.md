@@ -48,10 +48,10 @@ FlyDB is a lightweight, distributed SQL database engine written in Go. It provid
 |----------|----------|
 | DDL | CREATE TABLE, DROP TABLE, ALTER TABLE, CREATE INDEX, CREATE VIEW |
 | DML | SELECT, INSERT, UPDATE, DELETE |
-| Queries | JOIN (INNER, LEFT, RIGHT, FULL), UNION, Subqueries, DISTINCT |
+| Queries | JOIN (INNER, LEFT, RIGHT, FULL), UNION, INTERSECT, EXCEPT, Subqueries, DISTINCT |
 | Clauses | WHERE, ORDER BY, GROUP BY, HAVING, LIMIT, OFFSET |
-| Functions | COUNT, SUM, AVG, MIN, MAX |
-| Advanced | Transactions, Prepared Statements, Stored Procedures, Views |
+| Functions | COUNT, SUM, AVG, MIN, MAX, String, Numeric, Date/Time functions |
+| Advanced | Transactions (with Savepoints), Prepared Statements, Stored Procedures, Views, Triggers |
 
 ### Data Types
 
@@ -95,6 +95,20 @@ PRIMARY KEY, FOREIGN KEY, NOT NULL, UNIQUE, AUTO_INCREMENT, DEFAULT, CHECK
 - Connection pooling
 - Query caching with LRU eviction and TTL
 - Binary wire protocol for efficient communication
+
+### Driver Development
+
+FlyDB provides a complete binary wire protocol for developing external database drivers:
+
+| Feature | Description |
+|---------|-------------|
+| JDBC/ODBC Support | Full protocol support for standard database drivers |
+| Server-Side Cursors | Scrollable cursors for large result sets |
+| Metadata Queries | GetTables, GetColumns, GetTypeInfo for schema discovery |
+| Transaction Control | BEGIN, COMMIT, ROLLBACK with isolation levels |
+| Session Management | Connection options, auto-commit, server info |
+
+See [Driver Development Guide](docs/driver-development.md) for complete protocol specification.
 
 ### Real-Time
 
@@ -479,6 +493,7 @@ ALTER USER admin IDENTIFIED BY 'new-secure-password'
 | [Implementation](docs/implementation.md) | WAL, B-Tree, SQL processing, transactions |
 | [Design Decisions](docs/design-decisions.md) | Rationale and trade-offs |
 | [API Reference](docs/api.md) | SQL syntax, protocol commands, configuration |
+| [Driver Development](docs/driver-development.md) | Binary protocol specification for JDBC/ODBC drivers |
 | [Changelog](CHANGELOG.md) | Version history and release notes |
 | [Roadmap](ROADMAP.md) | Completed and planned features |
 
@@ -522,7 +537,8 @@ flydb/
         errors/             Error handling
         logging/            Structured logging
         pool/               Connection pooling
-        protocol/           Binary wire protocol
+        protocol/           Binary wire protocol (JDBC/ODBC compatible)
+        sdk/                SDK types for driver development
         server/             TCP server and replication
         sql/                Lexer, parser, executor, catalog
         storage/            KVStore, WAL, B-Tree, encryption

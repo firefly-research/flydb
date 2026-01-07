@@ -17,25 +17,53 @@ This is the first public release of FlyDB, a lightweight SQL database written in
 
 #### Core Database Features
 - SQL query support: `CREATE TABLE`, `INSERT`, `SELECT`, `UPDATE`, `DELETE`
+- `DROP TABLE [IF EXISTS]` to remove tables
+- `DROP INDEX [IF EXISTS]` to remove indexes
+- `TRUNCATE TABLE` for fast table truncation
 - `SELECT * FROM` to retrieve all columns from a table
 - `DISTINCT` to remove duplicate rows from SELECT results
 - `UNION` and `UNION ALL` to combine results from multiple SELECT queries
+- `INTERSECT` and `INTERSECT ALL` to return rows common to both queries
+- `EXCEPT` and `EXCEPT ALL` to return rows in first query but not in second
 - Subqueries in WHERE clauses with `IN` and `EXISTS`
 - `INNER JOIN` with Nested Loop algorithm
 - `LEFT JOIN`, `RIGHT JOIN`, `FULL JOIN` support
-- `WHERE` clause filtering with equality and comparison operators
+- `WHERE` clause filtering with equality and comparison operators (`=`, `<>`, `<`, `>`, `<=`, `>=`)
+- `LIKE` and `NOT LIKE` pattern matching with `%` and `_` wildcards
+- `BETWEEN` range operator
+- `IS NULL` and `IS NOT NULL` null checks
+- `IN` and `NOT IN` operators for value lists
 - `ORDER BY` with `ASC`/`DESC` sorting
 - `LIMIT` and `OFFSET` for result set restriction
 - `GROUP BY` for grouping rows
 - `HAVING` for filtering groups after aggregation
 - Schema persistence across server restarts
 - Transactions: `BEGIN`, `COMMIT`, `ROLLBACK` for atomic operations
-- B-Tree indexing: `CREATE INDEX` for O(log N) lookups
+- Savepoints: `SAVEPOINT`, `RELEASE SAVEPOINT`, `ROLLBACK TO SAVEPOINT` for partial rollback
+- B-Tree indexing: `CREATE INDEX [IF NOT EXISTS]` for O(log N) lookups
 - Prepared statements: `PREPARE`, `EXECUTE`, `DEALLOCATE`
 - Aggregate functions: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`
-- `INTROSPECT` command for database metadata inspection
+- `INTROSPECT` command for database metadata inspection (USERS, TABLES, TABLE, INDEXES, SERVER, STATUS)
 - Pretty table formatting for SELECT results in CLI
 - Row count information in all query results
+
+#### INSERT Enhancements
+- Multi-row INSERT: `INSERT INTO table VALUES (row1), (row2), (row3)`
+- INSERT with column list: `INSERT INTO table (col1, col2) VALUES (val1, val2)`
+- UPSERT with `ON CONFLICT DO NOTHING` to skip conflicting rows
+- UPSERT with `ON CONFLICT DO UPDATE SET` to update conflicting rows
+
+#### DDL Enhancements
+- `IF NOT EXISTS` clause for `CREATE TABLE`, `CREATE INDEX`, `CREATE PROCEDURE`, `CREATE VIEW`, `CREATE TRIGGER`
+- `IF EXISTS` clause for `DROP TABLE`, `DROP INDEX`, `DROP PROCEDURE`, `DROP VIEW`, `DROP TRIGGER`
+- `OR REPLACE` clause for `CREATE PROCEDURE`, `CREATE VIEW`, `CREATE TRIGGER`
+
+#### SQL Functions
+- String functions: `UPPER`, `LOWER`, `LENGTH`, `CONCAT`, `SUBSTRING`, `TRIM`, `REPLACE`, `LEFT`, `RIGHT`, `REVERSE`, `REPEAT`
+- Numeric functions: `ABS`, `ROUND`, `CEIL`, `FLOOR`, `MOD`, `POWER`, `SQRT`
+- Date/Time functions: `NOW`, `CURRENT_DATE`, `CURRENT_TIME`, `YEAR`, `MONTH`, `DAY`, `HOUR`, `MINUTE`, `SECOND`, `DATE_ADD`, `DATE_SUB`, `DATEDIFF`
+- NULL handling functions: `COALESCE`, `NULLIF`, `IFNULL`
+- Type conversion: `CAST`, `CONVERT`
 
 #### Constraints
 - `PRIMARY KEY` constraint with uniqueness enforcement
@@ -69,6 +97,11 @@ This is the first public release of FlyDB, a lightweight SQL database written in
 - Transaction support with write buffering
 - AES-256-GCM encryption for data at rest (optional)
 
+#### User Management
+- `CREATE USER username IDENTIFIED BY 'password'` for creating new users
+- `ALTER USER username IDENTIFIED BY 'new_password'` for changing passwords
+- `DROP USER [IF EXISTS] username` for removing users
+
 #### Security
 - User authentication with username/password credentials
 - Secure password storage with bcrypt hashing
@@ -76,6 +109,8 @@ This is the first public release of FlyDB, a lightweight SQL database written in
 - Table-level access control via `GRANT`/`REVOKE` statements
 - Row-Level Security (RLS) with predicate-based filtering
 - Built-in administrator account for bootstrap operations
+- Secure admin password setup on first run (generated or user-specified)
+- Environment variable configuration for automated deployments (`FLYDB_ADMIN_PASSWORD`)
 
 #### Distributed Features
 - Leader-Follower replication topology
@@ -96,6 +131,13 @@ This is the first public release of FlyDB, a lightweight SQL database written in
 - `WATCH` command for real-time table change notifications
 - Event streaming for INSERT operations
 
+#### Driver Development (JDBC/ODBC Support)
+- Complete binary wire protocol for external driver development
+- Server-side cursors with scrollable result sets (Forward-Only, Static, Keyset, Dynamic)
+- Metadata queries: `GetTables`, `GetColumns`, `GetPrimaryKeys`, `GetForeignKeys`, `GetIndexes`, `GetTypeInfo`
+- Session management with connection options and auto-commit settings
+- Transaction control with isolation levels
+
 #### Observability
 - Structured logging with `DEBUG`, `INFO`, `WARN`, `ERROR` levels
 - JSON log output for log aggregation systems
@@ -111,13 +153,23 @@ This is the first public release of FlyDB, a lightweight SQL database written in
 - Thread-safe configuration access
 
 #### Tools
-- `flydb` - TCP database server
-- `fly-cli` - Interactive command-line client
+- `flydb` - TCP database server with interactive configuration wizard
+- `fly-cli` - Interactive command-line client with readline support
 - Professional startup banner with version display
+- Interactive configuration wizard for first-time setup
+
+#### CLI Enhancements
+- Readline support with command history persistence
+- Tab completion for SQL keywords and commands
+- Multi-line input support for complex queries
+- ANSI-aware formatting with color output
+- Multiple output formats: table, JSON, plain text
+- Progress indicators and spinners for long operations
+- Graceful handling of Ctrl+C and Ctrl+D
 
 ### Security Notes
 
-- Default admin credentials (`admin`/`admin`) should be changed in production
+- Default admin credentials (`admin`/generated password) should be saved securely
 - TLS is recommended for production deployments
 - Encryption at rest requires secure key management
 

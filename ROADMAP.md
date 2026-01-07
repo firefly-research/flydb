@@ -2,7 +2,7 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.2
+**Version:** 01.26.1
 **Last Updated:** January 7, 2026
 
 ---
@@ -14,13 +14,22 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Feature | Description | Version |
 |---------|-------------|---------|
 | SQL Query Support | CREATE TABLE, INSERT, SELECT, UPDATE, DELETE | 01.26.1 |
+| DROP TABLE | Remove tables with optional IF EXISTS clause | 01.26.1 |
+| DROP INDEX | Remove indexes with optional IF EXISTS clause | 01.26.1 |
+| TRUNCATE TABLE | Fast table truncation | 01.26.1 |
 | SELECT * FROM | Retrieve all columns from a table | 01.26.1 |
 | INNER JOIN | Nested Loop algorithm for table joins | 01.26.1 |
-| WHERE Clause | Filtering with equality and comparison operators | 01.26.1 |
+| LEFT/RIGHT/FULL JOIN | Outer join support for all join types | 01.26.1 |
+| WHERE Clause | Filtering with =, <>, <, >, <=, >= operators | 01.26.1 |
+| LIKE/NOT LIKE | Pattern matching with % and _ wildcards | 01.26.1 |
+| BETWEEN | Range operator for value ranges | 01.26.1 |
+| IS NULL/IS NOT NULL | NULL value checks | 01.26.1 |
+| IN/NOT IN | Value list membership operators | 01.26.1 |
 | ORDER BY | ASC/DESC sorting | 01.26.1 |
 | LIMIT/OFFSET | Result set restriction and pagination | 01.26.1 |
 | Schema Persistence | Schemas survive server restarts | 01.26.1 |
 | Transactions | BEGIN, COMMIT, ROLLBACK for atomic operations | 01.26.1 |
+| Savepoints | SAVEPOINT, RELEASE SAVEPOINT, ROLLBACK TO SAVEPOINT | 01.26.1 |
 | B-Tree Indexing | CREATE INDEX for O(log N) lookups | 01.26.1 |
 | Prepared Statements | PREPARE, EXECUTE, DEALLOCATE for query reuse | 01.26.1 |
 | Aggregate Functions | COUNT, SUM, AVG, MIN, MAX | 01.26.1 |
@@ -28,14 +37,41 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | HAVING | Filter groups after aggregation | 01.26.1 |
 | DISTINCT | Remove duplicate rows from SELECT results | 01.26.1 |
 | UNION/UNION ALL | Combine results from multiple SELECT queries | 01.26.1 |
+| INTERSECT/INTERSECT ALL | Return rows common to both queries | 01.26.1 |
+| EXCEPT/EXCEPT ALL | Return rows in first query but not in second | 01.26.1 |
 | Subqueries | Nested SELECT statements in WHERE clauses | 01.26.1 |
 | Stored Procedures | CREATE PROCEDURE, CALL, DROP PROCEDURE | 01.26.1 |
 | Views | Virtual tables (CREATE VIEW, DROP VIEW) | 01.26.1 |
 | Triggers | Automatic actions on INSERT/UPDATE/DELETE (BEFORE/AFTER) | 01.26.1 |
 | ALTER TABLE | ADD/DROP/RENAME/MODIFY COLUMN | 01.26.1 |
-| INTROSPECT Command | Database metadata inspection | 01.26.1 |
+| INTROSPECT Command | Database metadata inspection (USERS, TABLES, TABLE, INDEXES, SERVER, STATUS) | 01.26.1 |
 | Row Count Information | All queries return affected row counts | 01.26.1 |
 | Pretty Table Formatting | Formatted table output in CLI | 01.26.1 |
+
+### INSERT Enhancements
+
+| Feature | Description | Version |
+|---------|-------------|---------|
+| Multi-row INSERT | INSERT INTO table VALUES (row1), (row2), (row3) | 01.26.1 |
+| INSERT with Column List | INSERT INTO table (col1, col2) VALUES (val1, val2) | 01.26.1 |
+| ON CONFLICT DO NOTHING | Skip conflicting rows during INSERT (UPSERT) | 01.26.1 |
+| ON CONFLICT DO UPDATE | Update conflicting rows during INSERT (UPSERT) | 01.26.1 |
+
+### DDL Enhancements
+
+| Feature | Description | Version |
+|---------|-------------|---------|
+| IF NOT EXISTS | Clause for CREATE TABLE, INDEX, PROCEDURE, VIEW, TRIGGER | 01.26.1 |
+| IF EXISTS | Clause for DROP TABLE, INDEX, PROCEDURE, VIEW, TRIGGER | 01.26.1 |
+| OR REPLACE | Clause for CREATE PROCEDURE, VIEW, TRIGGER | 01.26.1 |
+
+### User Management
+
+| Feature | Description | Version |
+|---------|-------------|---------|
+| CREATE USER | Create new database users with password | 01.26.1 |
+| ALTER USER | Change user passwords | 01.26.1 |
+| DROP USER | Remove users with optional IF EXISTS clause | 01.26.1 |
 
 ### Constraints
 
@@ -48,6 +84,16 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | AUTO_INCREMENT/SERIAL | Automatic sequence generation | 01.26.1 |
 | DEFAULT | Default values for columns | 01.26.1 |
 | CHECK | Custom validation expressions | 01.26.1 |
+
+### SQL Functions
+
+| Category | Functions | Version |
+|----------|-----------|---------|
+| String Functions | UPPER, LOWER, LENGTH, CONCAT, SUBSTRING, TRIM, REPLACE, LEFT, RIGHT, REVERSE, REPEAT | 01.26.1 |
+| Numeric Functions | ABS, ROUND, CEIL, FLOOR, MOD, POWER, SQRT | 01.26.1 |
+| Date/Time Functions | NOW, CURRENT_DATE, CURRENT_TIME, YEAR, MONTH, DAY, HOUR, MINUTE, SECOND, DATE_ADD, DATE_SUB, DATEDIFF | 01.26.1 |
+| NULL Handling | COALESCE, NULLIF, IFNULL | 01.26.1 |
+| Type Conversion | CAST, CONVERT | 01.26.1 |
 
 ### Extended Column Types
 
@@ -84,6 +130,8 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Table-Level Access Control | GRANT/REVOKE statements | 01.26.1 |
 | Row-Level Security (RLS) | Predicate-based row filtering | 01.26.1 |
 | Built-in Admin Account | Bootstrap operations | 01.26.1 |
+| Secure Admin Password Setup | Generated or user-specified on first run | 01.26.1 |
+| Environment Variable Config | FLYDB_ADMIN_PASSWORD for automated deployments | 01.26.1 |
 
 ### Distributed Features
 
@@ -128,6 +176,28 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Configuration Precedence | CLI flags > env vars > file > defaults | 01.26.1 |
 | Runtime Reload | Hot reload of configuration without restart | 01.26.1 |
 
+### Driver Development (JDBC/ODBC Support)
+
+| Feature | Description | Version |
+|---------|-------------|---------|
+| Binary Wire Protocol | Complete protocol for external driver development | 01.26.1 |
+| Server-Side Cursors | Scrollable cursors (Forward-Only, Static, Keyset, Dynamic) | 01.26.1 |
+| Metadata Queries | GetTables, GetColumns, GetPrimaryKeys, GetForeignKeys, GetIndexes, GetTypeInfo | 01.26.1 |
+| Session Management | Connection options, auto-commit settings | 01.26.1 |
+| Transaction Control | Isolation levels support | 01.26.1 |
+
+### CLI Features
+
+| Feature | Description | Version |
+|---------|-------------|---------|
+| Interactive Configuration Wizard | First-time setup wizard for server configuration | 01.26.1 |
+| Readline Support | Command history persistence and line editing | 01.26.1 |
+| Tab Completion | Auto-complete for SQL keywords and commands | 01.26.1 |
+| Multi-line Input | Support for complex multi-line queries | 01.26.1 |
+| ANSI-aware Formatting | Color output with proper terminal handling | 01.26.1 |
+| Multiple Output Formats | Table, JSON, and plain text output | 01.26.1 |
+| Progress Indicators | Spinners and progress bars for long operations | 01.26.1 |
+
 ---
 
 ## Planned Features
@@ -155,10 +225,7 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Feature | Description | Status |
 |---------|-------------|--------|
 | Window Functions | OVER, PARTITION BY, ROW_NUMBER, RANK, DENSE_RANK | Planned |
-| String Functions | UPPER, LOWER, CONCAT, SUBSTRING, TRIM, LENGTH | Planned |
-| Date/Time Functions | NOW(), CURRENT_DATE, DATE_ADD, DATE_DIFF, EXTRACT | Planned |
 | CASE Expressions | CASE WHEN ... THEN ... ELSE ... END support | Planned |
-| TRUNCATE TABLE | Fast table truncation without logging individual deletes | Planned |
 | Multi-column Indexes | CREATE INDEX on multiple columns for composite lookups | Planned |
 | Index Range Queries | Use B-Tree indexes for BETWEEN, >, <, >=, <= operators | Planned |
 | Prometheus Metrics | Export database metrics in Prometheus format | Planned |

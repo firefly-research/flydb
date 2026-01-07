@@ -131,7 +131,8 @@ The storage layer provides persistence and data management:
 |---------|---------|
 | `internal/cache/` | LRU query result cache with TTL expiration |
 | `internal/pool/` | Client-side connection pooling |
-| `internal/protocol/` | Binary protocol message definitions |
+| `internal/protocol/` | Binary wire protocol for JDBC/ODBC drivers |
+| `internal/sdk/` | SDK types for driver development (cursors, sessions, transactions) |
 | `internal/errors/` | Structured error handling with codes |
 | `internal/logging/` | Structured logging framework |
 | `internal/banner/` | Startup banner display |
@@ -266,13 +267,26 @@ Commands:
 
 ### Binary Protocol (Port 8889)
 
-Length-prefixed JSON for efficient client libraries:
+The binary protocol provides a complete wire protocol for developing external JDBC/ODBC drivers:
 
 ```
-┌──────────────┬─────────────────────────────────────┐
-│ Length (4B)  │ JSON Payload (variable)             │
-└──────────────┴─────────────────────────────────────┘
+┌───────────┬─────────┬──────────┬───────────┬────────────┬─────────────────┐
+│ Magic (1B)│ Ver (1B)│ Type (1B)│ Flags (1B)│ Length (4B)│ Payload (var)   │
+│   0xFD    │   0x01  │          │           │ Big-endian │                 │
+└───────────┴─────────┴──────────┴───────────┴────────────┴─────────────────┘
 ```
+
+**Message Categories:**
+
+| Category | Types | Purpose |
+|----------|-------|---------|
+| Core | Query, Prepare, Execute, Deallocate | SQL execution |
+| Cursors | CursorOpen, CursorFetch, CursorClose | Large result sets |
+| Metadata | GetTables, GetColumns, GetTypeInfo | Schema discovery |
+| Transactions | BeginTx, CommitTx, RollbackTx | Transaction control |
+| Sessions | SetOption, GetOption, GetServerInfo | Connection management |
+
+See [Driver Development Guide](driver-development.md) for complete protocol specification.
 
 ## Cluster Architecture
 

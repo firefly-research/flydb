@@ -5,9 +5,27 @@ This document provides a complete reference for FlyDB's SQL syntax, protocol com
 ## Table of Contents
 
 1. [Protocol Commands](#protocol-commands)
+   - [Text Protocol Commands](#text-protocol-commands)
+   - [Binary Protocol](#binary-protocol)
 2. [SQL Statements](#sql-statements)
+   - [Data Definition Language (DDL)](#data-definition-language-ddl)
+   - [Data Manipulation Language (DML)](#data-manipulation-language-dml)
+   - [Transactions](#transactions)
+   - [Stored Procedures](#stored-procedures)
+   - [Triggers](#triggers)
+   - [User Management](#user-management)
+   - [Prepared Statements](#prepared-statements)
+   - [Database Introspection](#database-introspection)
 3. [Data Types](#data-types)
 4. [Operators and Functions](#operators-and-functions)
+   - [Comparison Operators](#comparison-operators)
+   - [Logical Operators](#logical-operators)
+   - [Aggregate Functions](#aggregate-functions)
+   - [String Functions](#string-functions)
+   - [Numeric Functions](#numeric-functions)
+   - [Date/Time Functions](#datetime-functions)
+   - [NULL Handling Functions](#null-handling-functions)
+   - [Type Conversion Functions](#type-conversion-functions)
 5. [Configuration](#configuration)
    - [Interactive Wizard](#interactive-wizard)
    - [Server Configuration](#server-configuration)
@@ -68,51 +86,65 @@ WATCH <table>
 → EVENT DELETE users 42
 ```
 
-#### UNWATCH
-
-Unsubscribe from table notifications.
-
-```
-UNWATCH <table>
-→ UNWATCH OK
-```
-
-#### QUIT
-
-Close the connection.
-
-```
-QUIT
-→ BYE
-```
-
 ### Binary Protocol
 
-The binary protocol uses length-prefixed JSON messages:
+The binary protocol provides a complete wire protocol for developing external JDBC/ODBC drivers.
+
+#### Message Frame Format
 
 ```
-┌──────────────┬─────────────────────────────────────┐
-│ Length (4B)  │ JSON Payload (variable)             │
-│ Big-endian   │                                     │
-└──────────────┴─────────────────────────────────────┘
+┌───────────┬─────────┬──────────┬───────────┬────────────┬─────────────────┐
+│ Magic (1B)│ Ver (1B)│ Type (1B)│ Flags (1B)│ Length (4B)│ Payload (var)   │
+│   0xFD    │   0x01  │          │           │ Big-endian │                 │
+└───────────┴─────────┴──────────┴───────────┴────────────┴─────────────────┘
 ```
 
-**Request Format:**
-```json
-{
-  "type": "query",
-  "sql": "SELECT * FROM users"
-}
-```
+- **Magic Byte**: `0xFD` identifies FlyDB protocol
+- **Version**: Protocol version (currently `0x01`)
+- **Type**: Message type (see table below)
+- **Flags**: Reserved for compression/encryption
+- **Length**: Payload length in bytes (max 16 MB)
 
-**Response Format:**
-```json
-{
-  "success": true,
-  "result": "id|name|age\n1|Alice|30",
-  "error": ""
-}
-```
+#### Message Types
+
+| Type | Code | Direction | Description |
+|------|------|-----------|-------------|
+| Query | 0x01 | Request | Execute SQL query |
+| QueryResult | 0x02 | Response | Query results |
+| Error | 0x03 | Response | Error response |
+| Prepare | 0x04 | Request | Prepare statement |
+| PrepareResult | 0x05 | Response | Prepare confirmation |
+| Execute | 0x06 | Request | Execute prepared statement |
+| Deallocate | 0x07 | Request | Deallocate prepared statement |
+| Auth | 0x08 | Request | Authentication |
+| AuthResult | 0x09 | Response | Auth result |
+| Ping | 0x0A | Request | Keepalive |
+| Pong | 0x0B | Response | Keepalive response |
+| CursorOpen | 0x10 | Request | Open server-side cursor |
+| CursorFetch | 0x11 | Request | Fetch rows from cursor |
+| CursorClose | 0x12 | Request | Close cursor |
+| CursorResult | 0x14 | Response | Cursor operation result |
+| GetTables | 0x20 | Request | Get table metadata |
+| GetColumns | 0x21 | Request | Get column metadata |
+| GetTypeInfo | 0x25 | Request | Get type information |
+| MetadataResult | 0x26 | Response | Metadata query result |
+| BeginTx | 0x30 | Request | Begin transaction |
+| CommitTx | 0x31 | Request | Commit transaction |
+| RollbackTx | 0x32 | Request | Rollback transaction |
+| TxResult | 0x34 | Response | Transaction result |
+| SetOption | 0x40 | Request | Set session option |
+| GetOption | 0x41 | Request | Get session option |
+| GetServerInfo | 0x42 | Request | Get server information |
+| SessionResult | 0x43 | Response | Session operation result |
+
+#### Connection Lifecycle
+
+1. **Connect**: Open TCP connection to binary port (default 8889)
+2. **Authenticate**: Send Auth message with username/password
+3. **Execute**: Send Query, Prepare, Execute, or other messages
+4. **Disconnect**: Close TCP connection
+
+See [Driver Development Guide](driver-development.md) for complete protocol specification and code examples.
 
 ---
 
@@ -123,54 +155,193 @@ The binary protocol uses length-prefixed JSON messages:
 #### CREATE TABLE
 
 ```sql
-CREATE TABLE table_name (
-    column1 TYPE [PRIMARY KEY] [NOT NULL] [DEFAULT value],
-    column2 TYPE,
+CREATE TABLE [IF NOT EXISTS] table_name (
+    column1 TYPE [constraints],
+    column2 TYPE [constraints],
     ...
 )
 ```
 
-**Supported Types:** `INT`, `INTEGER`, `TEXT`, `VARCHAR(n)`, `BOOLEAN`, `FLOAT`, `DOUBLE`, `DATE`, `TIMESTAMP`
+**Supported Constraints:**
+
+| Constraint | Description | Example |
+|------------|-------------|---------|
+| `PRIMARY KEY` | Unique identifier for rows | `id INT PRIMARY KEY` |
+| `NOT NULL` | Column cannot be NULL | `name TEXT NOT NULL` |
+| `UNIQUE` | Values must be unique | `email TEXT UNIQUE` |
+| `DEFAULT value` | Default value if not specified | `active BOOLEAN DEFAULT true` |
+| `AUTO_INCREMENT` | Auto-incrementing integer | `id INT AUTO_INCREMENT` |
+| `REFERENCES table(col)` | Foreign key constraint | `user_id INT REFERENCES users(id)` |
+| `CHECK (condition)` | Value must satisfy condition | `age INT CHECK (age >= 0)` |
+
+**Supported Types:** See [Data Types](#data-types) section for complete list.
 
 **Examples:**
 ```sql
+-- Basic table with primary key and constraints
 CREATE TABLE users (
     id INT PRIMARY KEY,
     name TEXT NOT NULL,
-    email VARCHAR(255),
+    email VARCHAR(255) UNIQUE,
     active BOOLEAN DEFAULT true,
     created_at TIMESTAMP
 )
 
+-- Table with foreign key reference
 CREATE TABLE orders (
-    id INT PRIMARY KEY,
-    user_id INT NOT NULL,
-    total FLOAT,
-    status TEXT DEFAULT 'pending'
+    id SERIAL PRIMARY KEY,
+    user_id INT NOT NULL REFERENCES users(id),
+    total DECIMAL,
+    status TEXT DEFAULT 'pending',
+    CHECK (total >= 0)
+)
+
+-- Table with auto-increment
+CREATE TABLE logs (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    message TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 ```
 
 #### DROP TABLE
 
+Removes a table and all its data from the database.
+
 ```sql
-DROP TABLE table_name
+DROP TABLE [IF EXISTS] table_name
 ```
 
-#### CREATE INDEX
+**Examples:**
+```sql
+-- Drop a table
+DROP TABLE users
+
+-- Drop a table only if it exists (no error if table doesn't exist)
+DROP TABLE IF EXISTS temp_data
+```
+
+**Notes:**
+- Requires admin privileges
+- Cannot drop a table that is referenced by foreign keys in other tables
+- Automatically removes all indexes and triggers associated with the table
+- Resets any auto-increment sequences for the table
+
+#### TRUNCATE TABLE
+
+Removes all rows from a table but keeps the table structure intact.
 
 ```sql
-CREATE INDEX index_name ON table_name (column_name)
+TRUNCATE TABLE table_name
 ```
 
 **Example:**
 ```sql
+TRUNCATE TABLE logs
+```
+
+**Notes:**
+- Requires admin privileges
+- Faster than `DELETE FROM table_name` for removing all rows
+- Resets auto-increment sequences
+- Cannot truncate a table that is referenced by foreign keys with existing data in other tables
+
+#### CREATE INDEX
+
+```sql
+CREATE INDEX [IF NOT EXISTS] index_name ON table_name (column_name)
+```
+
+**Examples:**
+```sql
+-- Create an index
 CREATE INDEX idx_users_email ON users (email)
+
+-- Create an index only if it doesn't already exist
+CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)
 ```
 
 #### DROP INDEX
 
 ```sql
-DROP INDEX index_name ON table_name
+DROP INDEX [IF EXISTS] index_name ON table_name
+```
+
+**Examples:**
+```sql
+-- Drop an index
+DROP INDEX idx_users_email ON users
+
+-- Drop an index only if it exists (no error if index doesn't exist)
+DROP INDEX IF EXISTS idx_users_email ON users
+```
+
+#### CREATE VIEW
+
+```sql
+CREATE [OR REPLACE] VIEW [IF NOT EXISTS] view_name AS
+SELECT columns FROM table [WHERE condition]
+```
+
+**Examples:**
+```sql
+-- Create a view
+CREATE VIEW active_users AS
+SELECT id, name, email FROM users WHERE active = true
+
+-- Create a view only if it doesn't already exist
+CREATE VIEW IF NOT EXISTS active_users AS
+SELECT id, name, email FROM users WHERE active = true
+
+-- Replace an existing view or create a new one
+CREATE OR REPLACE VIEW active_users AS
+SELECT id, name, email, created_at FROM users WHERE active = true
+```
+
+Views can be queried like tables:
+```sql
+SELECT * FROM active_users
+```
+
+#### DROP VIEW
+
+```sql
+DROP VIEW [IF EXISTS] view_name
+```
+
+**Examples:**
+```sql
+-- Drop a view
+DROP VIEW active_users
+
+-- Drop a view only if it exists (no error if view doesn't exist)
+DROP VIEW IF EXISTS active_users
+```
+
+#### ALTER TABLE
+
+Modify the structure of an existing table.
+
+```sql
+-- Add a new column
+ALTER TABLE table_name ADD COLUMN column_name TYPE [constraints]
+
+-- Drop a column
+ALTER TABLE table_name DROP COLUMN column_name
+
+-- Rename a column
+ALTER TABLE table_name RENAME COLUMN old_name TO new_name
+
+-- Modify a column type
+ALTER TABLE table_name MODIFY COLUMN column_name NEW_TYPE
+```
+
+**Examples:**
+```sql
+ALTER TABLE users ADD COLUMN phone TEXT
+ALTER TABLE users DROP COLUMN phone
+ALTER TABLE users RENAME COLUMN email TO email_address
+ALTER TABLE users MODIFY COLUMN age BIGINT
 ```
 
 ### Data Manipulation Language (DML)
@@ -178,7 +349,7 @@ DROP INDEX index_name ON table_name
 #### SELECT
 
 ```sql
-SELECT column1, column2, ...
+SELECT [DISTINCT] column1, column2, ...
 FROM table_name
 [WHERE condition]
 [ORDER BY column [ASC|DESC]]
@@ -192,6 +363,9 @@ FROM table_name
 ```sql
 -- Basic select
 SELECT * FROM users
+
+-- With DISTINCT (removes duplicate rows)
+SELECT DISTINCT status FROM orders
 
 -- With WHERE clause
 SELECT name, email FROM users WHERE active = true
@@ -237,26 +411,88 @@ INNER JOIN products p ON o.product_id = p.id
 
 #### UNION
 
+Combines results from two SELECT statements, removing duplicates by default.
+
 ```sql
 SELECT columns FROM table1
 UNION [ALL]
 SELECT columns FROM table2
 ```
 
-**Example:**
+**Examples:**
 ```sql
+-- UNION removes duplicates
 SELECT name FROM customers
 UNION
 SELECT name FROM suppliers
+
+-- UNION ALL keeps all rows including duplicates
+SELECT name FROM customers
+UNION ALL
+SELECT name FROM suppliers
+```
+
+#### INTERSECT
+
+Returns only rows that appear in both result sets.
+
+```sql
+SELECT columns FROM table1
+INTERSECT [ALL]
+SELECT columns FROM table2
+```
+
+**Examples:**
+```sql
+-- Find names that exist in both tables
+SELECT name FROM employees
+INTERSECT
+SELECT name FROM managers
+
+-- INTERSECT ALL keeps duplicates up to the minimum count
+SELECT name FROM employees
+INTERSECT ALL
+SELECT name FROM managers
+```
+
+#### EXCEPT
+
+Returns rows from the first query that are not in the second query.
+
+```sql
+SELECT columns FROM table1
+EXCEPT [ALL]
+SELECT columns FROM table2
+```
+
+**Examples:**
+```sql
+-- Find employees who are not managers
+SELECT name FROM employees
+EXCEPT
+SELECT name FROM managers
+
+-- EXCEPT ALL subtracts counts
+SELECT name FROM employees
+EXCEPT ALL
+SELECT name FROM managers
 ```
 
 #### Subqueries
 
+Subqueries can be used in WHERE clauses and FROM clauses.
+
 ```sql
--- In WHERE clause
+-- IN subquery
 SELECT * FROM users WHERE id IN (SELECT user_id FROM orders WHERE total > 100)
 
--- In FROM clause
+-- NOT IN subquery
+SELECT * FROM users WHERE id NOT IN (SELECT user_id FROM inactive_users)
+
+-- EXISTS subquery
+SELECT * FROM users u WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)
+
+-- In FROM clause (derived table)
 SELECT * FROM (SELECT user_id, SUM(total) as sum FROM orders GROUP BY user_id) AS subq
 WHERE sum > 500
 ```
@@ -323,6 +559,8 @@ DELETE FROM temp_data
 
 ### Transactions
 
+#### BEGIN / COMMIT / ROLLBACK
+
 ```sql
 BEGIN
 -- statements
@@ -343,51 +581,106 @@ UPDATE accounts SET balance = balance + 100 WHERE id = 2
 COMMIT
 ```
 
+#### SAVEPOINT
+
+Create a savepoint within a transaction to allow partial rollback.
+
+```sql
+SAVEPOINT savepoint_name
+```
+
+#### RELEASE SAVEPOINT
+
+Remove a savepoint (the changes remain).
+
+```sql
+RELEASE SAVEPOINT savepoint_name
+```
+
+#### ROLLBACK TO SAVEPOINT
+
+Roll back to a specific savepoint without aborting the entire transaction.
+
+```sql
+ROLLBACK TO SAVEPOINT savepoint_name
+```
+
+**Example with Savepoints:**
+```sql
+BEGIN
+INSERT INTO orders (id, total) VALUES (1, 100)
+SAVEPOINT order_created
+
+INSERT INTO order_items (order_id, product_id) VALUES (1, 10)
+-- Oops, wrong product! Roll back just the item insert
+ROLLBACK TO SAVEPOINT order_created
+
+INSERT INTO order_items (order_id, product_id) VALUES (1, 20)
+COMMIT
+```
+
 ### Stored Procedures
 
 #### CREATE PROCEDURE
 
 ```sql
-CREATE PROCEDURE procedure_name AS
+CREATE [OR REPLACE] PROCEDURE [IF NOT EXISTS] procedure_name AS
 BEGIN
     statement1;
     statement2;
 END
 ```
 
-**Example:**
+**Examples:**
 ```sql
+-- Create a procedure
 CREATE PROCEDURE deactivate_old_users AS
 BEGIN
     UPDATE users SET active = false WHERE last_login < '2023-01-01';
     DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE active = false);
 END
+
+-- Create a procedure only if it doesn't already exist
+CREATE PROCEDURE IF NOT EXISTS deactivate_old_users AS
+BEGIN
+    UPDATE users SET active = false WHERE last_login < '2023-01-01';
+END
+
+-- Replace an existing procedure or create a new one
+CREATE OR REPLACE PROCEDURE deactivate_old_users AS
+BEGIN
+    UPDATE users SET active = false WHERE last_login < '2024-01-01';
+END
 ```
 
 #### CALL
+
+Execute a stored procedure.
 
 ```sql
 CALL procedure_name
 ```
 
-### Views
-
-#### CREATE VIEW
-
-```sql
-CREATE VIEW view_name AS
-SELECT columns FROM table [WHERE condition]
-```
-
 **Example:**
 ```sql
-CREATE VIEW active_users AS
-SELECT id, name, email FROM users WHERE active = true
+CALL deactivate_old_users
 ```
 
-Views can be queried like tables:
+#### DROP PROCEDURE
+
+Remove a stored procedure.
+
 ```sql
-SELECT * FROM active_users
+DROP PROCEDURE [IF EXISTS] procedure_name
+```
+
+**Examples:**
+```sql
+-- Drop a procedure
+DROP PROCEDURE deactivate_old_users
+
+-- Drop a procedure only if it exists (no error if procedure doesn't exist)
+DROP PROCEDURE IF EXISTS deactivate_old_users
 ```
 
 ### Triggers
@@ -397,7 +690,7 @@ Triggers are automatic actions that execute in response to INSERT, UPDATE, or DE
 #### CREATE TRIGGER
 
 ```sql
-CREATE TRIGGER trigger_name
+CREATE [OR REPLACE] TRIGGER [IF NOT EXISTS] trigger_name
   BEFORE|AFTER INSERT|UPDATE|DELETE ON table_name
   FOR EACH ROW
   EXECUTE action_sql
@@ -413,6 +706,12 @@ CREATE TRIGGER validate_update BEFORE UPDATE ON products FOR EACH ROW EXECUTE IN
 
 -- Log deletions
 CREATE TRIGGER log_delete AFTER DELETE ON orders FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ( 'delete' , 'orders' )
+
+-- Create a trigger only if it doesn't already exist
+CREATE TRIGGER IF NOT EXISTS log_insert AFTER INSERT ON users FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ( 'insert' , 'users' )
+
+-- Replace an existing trigger or create a new one
+CREATE OR REPLACE TRIGGER log_insert AFTER INSERT ON users FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ( 'new_insert' , 'users' )
 ```
 
 **Timing:**
@@ -427,90 +726,243 @@ CREATE TRIGGER log_delete AFTER DELETE ON orders FOR EACH ROW EXECUTE INSERT INT
 #### DROP TRIGGER
 
 ```sql
-DROP TRIGGER trigger_name ON table_name
+DROP TRIGGER [IF EXISTS] trigger_name ON table_name
 ```
 
-**Example:**
+**Examples:**
 ```sql
+-- Drop a trigger
 DROP TRIGGER log_insert ON users
+
+-- Drop a trigger only if it exists (no error if trigger doesn't exist)
+DROP TRIGGER IF EXISTS log_insert ON users
 ```
 
 ### User Management
 
 #### CREATE USER
 
-```sql
-CREATE USER 'username' WITH PASSWORD 'password'
-```
-
-#### GRANT
+Create a new database user with the specified credentials.
 
 ```sql
-GRANT permission ON table TO user
-```
-
-**Permissions:** `SELECT`, `INSERT`, `UPDATE`, `DELETE`, `ALL`
-
-**Examples:**
-```sql
-GRANT SELECT ON users TO readonly_user
-GRANT SELECT, INSERT, UPDATE ON orders TO sales_user
-GRANT ALL ON products TO admin_user
-```
-
-#### REVOKE
-
-```sql
-REVOKE permission ON table FROM user
-```
-
-### Row-Level Security
-
-#### CREATE POLICY
-
-```sql
-CREATE POLICY ON table USING (column operator value)
+CREATE USER username IDENTIFIED BY 'password'
 ```
 
 **Example:**
 ```sql
--- Users can only see their own orders
-CREATE POLICY ON orders USING (user_id = CURRENT_USER)
+CREATE USER alice IDENTIFIED BY 'secret123'
 ```
+
+#### ALTER USER
+
+Modify an existing user's password.
+
+```sql
+ALTER USER username IDENTIFIED BY 'new_password'
+```
+
+**Example:**
+```sql
+ALTER USER alice IDENTIFIED BY 'new_secret456'
+```
+
+#### GRANT
+
+Grant table access to a user, optionally with Row-Level Security (RLS).
+
+```sql
+GRANT [SELECT] ON table [WHERE column = value] TO user
+```
+
+**Examples:**
+```sql
+-- Grant full access to a table
+GRANT SELECT ON users TO readonly_user
+
+-- Grant access with Row-Level Security (RLS)
+-- User can only see rows where the condition matches
+GRANT SELECT ON orders WHERE user_id = 'alice' TO alice
+```
+
+**Note:** FlyDB uses a simplified permission model where GRANT provides full table access. Row-Level Security is applied via the optional WHERE clause in the GRANT statement.
+
+#### REVOKE
+
+Remove table access from a user.
+
+```sql
+REVOKE ON table FROM user
+```
+
+**Example:**
+```sql
+-- Remove alice's access to the orders table
+REVOKE ON orders FROM alice
+```
+
+**Note:** REVOKE removes all access rights for the user on the specified table, including any Row-Level Security conditions that were set.
 
 ### Prepared Statements
 
 #### PREPARE
 
+Create a prepared statement with parameter placeholders.
+
 ```sql
-PREPARE stmt_name AS SELECT * FROM users WHERE id = ?
+PREPARE stmt_name AS SELECT * FROM users WHERE id = $1
 ```
 
+**Note:** Use `$1`, `$2`, etc. for parameter placeholders.
+
 #### EXECUTE
+
+Execute a prepared statement with parameter values.
 
 ```sql
 EXECUTE stmt_name (value1, value2, ...)
 ```
 
+#### DEALLOCATE
+
+Remove a prepared statement.
+
+```sql
+DEALLOCATE stmt_name
+```
+
 **Example:**
 ```sql
-PREPARE get_user AS SELECT * FROM users WHERE id = ?
+-- Create a prepared statement
+PREPARE get_user AS SELECT * FROM users WHERE id = $1
+
+-- Execute it multiple times with different values
 EXECUTE get_user (42)
+EXECUTE get_user (123)
+
+-- Clean up when done
+DEALLOCATE get_user
+```
+
+### Database Introspection
+
+The INTROSPECT command provides metadata about database objects. Requires admin privileges.
+
+#### INTROSPECT USERS
+
+List all database users.
+
+```sql
+INTROSPECT USERS
+```
+
+#### INTROSPECT TABLES
+
+List all tables with their column schemas.
+
+```sql
+INTROSPECT TABLES
+```
+
+#### INTROSPECT TABLE
+
+Get detailed information about a specific table.
+
+```sql
+INTROSPECT TABLE table_name
+```
+
+#### INTROSPECT INDEXES
+
+List all indexes in the database.
+
+```sql
+INTROSPECT INDEXES
+```
+
+#### INTROSPECT SERVER
+
+Show server information (version, status, etc.).
+
+```sql
+INTROSPECT SERVER
+```
+
+#### INTROSPECT STATUS
+
+Show overall database status and statistics.
+
+```sql
+INTROSPECT STATUS
+```
+
+**Examples:**
+```sql
+INTROSPECT USERS
+-- Returns: username
+--          admin
+--          alice
+--          bob
+--          (3 rows)
+
+INTROSPECT TABLE users
+-- Returns detailed schema information for the users table
 ```
 
 ---
 
 ## Data Types
 
-| Type | Description | Example |
-|------|-------------|---------|
-| `INT` / `INTEGER` | 64-bit signed integer | `42`, `-100` |
-| `FLOAT` / `DOUBLE` | 64-bit floating point | `3.14`, `-0.001` |
-| `TEXT` | Variable-length string | `'Hello World'` |
-| `VARCHAR(n)` | String with max length n | `'Hello'` |
-| `BOOLEAN` | True or false | `true`, `false` |
-| `DATE` | Date (YYYY-MM-DD) | `'2024-01-15'` |
-| `TIMESTAMP` | Date and time | `'2024-01-15 10:30:00'` |
+### Numeric Types
+
+| Type | Aliases | Description | Example |
+|------|---------|-------------|---------|
+| `INT` | `INTEGER` | 32-bit signed integer | `42`, `-100` |
+| `BIGINT` | - | 64-bit signed integer | `9223372036854775807` |
+| `SMALLINT` | `TINYINT` | 16-bit signed integer | `32767` |
+| `SERIAL` | - | Auto-incrementing integer | (auto-generated) |
+| `FLOAT` | - | 64-bit floating point | `3.14`, `-0.001` |
+| `DOUBLE` | - | 64-bit floating point | `3.14159265359` |
+| `REAL` | - | 64-bit floating point | `2.718` |
+| `DECIMAL` | `NUMERIC` | Arbitrary precision decimal | `123.456` |
+
+### String Types
+
+| Type | Aliases | Description | Example |
+|------|---------|-------------|---------|
+| `TEXT` | - | Variable-length string (unlimited) | `'Hello World'` |
+| `VARCHAR(n)` | - | String with max length n | `'Hello'` |
+| `CHAR(n)` | `CHARACTER` | Fixed-length string | `'ABC'` |
+
+### Boolean Type
+
+| Type | Aliases | Description | Example |
+|------|---------|-------------|---------|
+| `BOOLEAN` | `BOOL` | True or false | `true`, `false`, `1`, `0` |
+
+### Date/Time Types
+
+| Type | Aliases | Description | Example |
+|------|---------|-------------|---------|
+| `TIMESTAMP` | - | Date and time with timezone | `'2024-01-15T10:30:00Z'` |
+| `DATETIME` | - | Date and time | `'2024-01-15 10:30:00'` |
+| `DATE` | - | Date only (YYYY-MM-DD) | `'2024-01-15'` |
+| `TIME` | - | Time only (HH:MM:SS) | `'10:30:00'` |
+
+### Binary Types
+
+| Type | Aliases | Description | Example |
+|------|---------|-------------|---------|
+| `BLOB` | - | Binary large object (base64 encoded) | `'SGVsbG8='` |
+| `BYTEA` | - | Binary data (base64 encoded) | `'SGVsbG8='` |
+| `BINARY` | - | Fixed-length binary (base64 encoded) | `'SGVsbG8='` |
+| `VARBINARY` | - | Variable-length binary (base64 encoded) | `'SGVsbG8='` |
+
+### Structured Types
+
+| Type | Aliases | Description | Example |
+|------|---------|-------------|---------|
+| `UUID` | - | Universally unique identifier (RFC 4122) | `'550e8400-e29b-41d4-a716-446655440000'` |
+| `JSONB` | `JSON` | Binary JSON for structured data | `'{"key": "value"}'` |
 
 ---
 
@@ -557,7 +1009,63 @@ EXECUTE get_user (42)
 |----------|-------------|---------|
 | `UPPER(str)` | Convert to uppercase | `SELECT UPPER(name) FROM users` |
 | `LOWER(str)` | Convert to lowercase | `SELECT LOWER(email) FROM users` |
-| `LENGTH(str)` | String length | `SELECT LENGTH(name) FROM users` |
+| `LENGTH(str)` / `LEN(str)` | String length | `SELECT LENGTH(name) FROM users` |
+| `CONCAT(str1, str2, ...)` | Concatenate strings | `SELECT CONCAT(first, ' ', last) FROM users` |
+| `SUBSTRING(str, start, len)` / `SUBSTR` | Extract substring | `SELECT SUBSTRING(name, 1, 3) FROM users` |
+| `TRIM(str)` | Remove leading/trailing whitespace | `SELECT TRIM(name) FROM users` |
+| `LTRIM(str)` | Remove leading whitespace | `SELECT LTRIM(name) FROM users` |
+| `RTRIM(str)` | Remove trailing whitespace | `SELECT RTRIM(name) FROM users` |
+| `REPLACE(str, from, to)` | Replace occurrences | `SELECT REPLACE(name, 'old', 'new') FROM users` |
+| `LEFT(str, n)` | Get leftmost n characters | `SELECT LEFT(name, 5) FROM users` |
+| `RIGHT(str, n)` | Get rightmost n characters | `SELECT RIGHT(name, 5) FROM users` |
+| `REVERSE(str)` | Reverse string | `SELECT REVERSE(name) FROM users` |
+| `REPEAT(str, n)` | Repeat string n times | `SELECT REPEAT('*', 5) FROM users` |
+
+### Numeric Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `ABS(n)` | Absolute value | `SELECT ABS(balance) FROM accounts` |
+| `ROUND(n, decimals)` | Round to decimals | `SELECT ROUND(price, 2) FROM products` |
+| `CEIL(n)` / `CEILING(n)` | Round up | `SELECT CEIL(rating) FROM reviews` |
+| `FLOOR(n)` | Round down | `SELECT FLOOR(rating) FROM reviews` |
+| `MOD(n, m)` | Modulo (remainder) | `SELECT MOD(id, 10) FROM users` |
+| `POWER(n, m)` / `POW(n, m)` | Power | `SELECT POWER(2, 8) FROM dual` |
+| `SQRT(n)` | Square root | `SELECT SQRT(area) FROM shapes` |
+
+### Date/Time Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `NOW()` | Current timestamp | `SELECT NOW()` |
+| `CURRENT_DATE` | Current date | `SELECT CURRENT_DATE` |
+| `CURRENT_TIME` | Current time | `SELECT CURRENT_TIME` |
+| `CURRENT_TIMESTAMP` | Current timestamp | `SELECT CURRENT_TIMESTAMP` |
+| `DATE_ADD(date, interval)` / `DATEADD` | Add to date | `SELECT DATE_ADD(created_at, 7)` |
+| `DATE_SUB(date, interval)` | Subtract from date | `SELECT DATE_SUB(created_at, 7)` |
+| `DATEDIFF(date1, date2)` | Days between dates | `SELECT DATEDIFF(end_date, start_date)` |
+| `EXTRACT(part FROM date)` | Extract date part | `SELECT EXTRACT(YEAR FROM created_at)` |
+| `YEAR(date)` | Extract year | `SELECT YEAR(created_at) FROM users` |
+| `MONTH(date)` | Extract month | `SELECT MONTH(created_at) FROM users` |
+| `DAY(date)` | Extract day | `SELECT DAY(created_at) FROM users` |
+| `HOUR(time)` | Extract hour | `SELECT HOUR(created_at) FROM users` |
+| `MINUTE(time)` | Extract minute | `SELECT MINUTE(created_at) FROM users` |
+| `SECOND(time)` | Extract second | `SELECT SECOND(created_at) FROM users` |
+
+### NULL Handling Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `COALESCE(val1, val2, ...)` | First non-null value | `SELECT COALESCE(nickname, name) FROM users` |
+| `NULLIF(val1, val2)` | NULL if values equal | `SELECT NULLIF(status, 'unknown') FROM users` |
+| `IFNULL(val, default)` / `NVL` / `ISNULL` | Default if null | `SELECT IFNULL(email, 'N/A') FROM users` |
+
+### Type Conversion Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `CAST(val AS type)` | Convert to type | `SELECT CAST(id AS TEXT) FROM users` |
+| `CONVERT(val, type)` | Convert to type | `SELECT CONVERT(price, INT) FROM products` |
 
 ---
 
