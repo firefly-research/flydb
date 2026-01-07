@@ -333,6 +333,62 @@ The wizard prompts for all relevant settings based on your selected mode and dis
 | `master` | Leader node with replication | Production leader |
 | `slave` | Follower node | Read replicas, failover |
 
+### Configuration File
+
+FlyDB supports TOML configuration files for easier deployment and management. The configuration file is automatically loaded from these locations (in order of precedence):
+
+1. Path specified by `--config` flag
+2. Path specified by `FLYDB_CONFIG_FILE` environment variable
+3. `/etc/flydb/flydb.conf` (system-wide)
+4. `~/.flydb/flydb.conf` (user-specific)
+5. `./flydb.conf` (current directory)
+
+Example configuration file:
+
+```toml
+# Server role: standalone, master, or slave
+role = "standalone"
+
+# Network ports
+port = 8888
+binary_port = 8889
+replication_port = 9999
+
+# Storage
+db_path = "/var/lib/flydb/data.wal"
+
+# Logging
+log_level = "info"
+log_json = false
+
+# Master address for slave mode
+# master_addr = "localhost:9999"
+```
+
+### Configuration Precedence
+
+Configuration values are applied in the following order (highest priority first):
+
+1. **Command-line flags** - Override all other sources
+2. **Environment variables** - Override file and defaults
+3. **Configuration file** - Override defaults
+4. **Default values** - Built-in defaults
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `FLYDB_PORT` | Server port for text protocol |
+| `FLYDB_BINARY_PORT` | Server port for binary protocol |
+| `FLYDB_REPL_PORT` | Replication port |
+| `FLYDB_ROLE` | Server role (standalone, master, slave) |
+| `FLYDB_MASTER_ADDR` | Master address for slave mode |
+| `FLYDB_DB_PATH` | Path to database file |
+| `FLYDB_LOG_LEVEL` | Log level (debug, info, warn, error) |
+| `FLYDB_LOG_JSON` | Enable JSON logging (true/false) |
+| `FLYDB_ADMIN_PASSWORD` | Initial admin password (first-time setup) |
+| `FLYDB_CONFIG_FILE` | Path to configuration file |
+
 ### Server Options
 
 | Flag | Default | Description |
@@ -345,6 +401,7 @@ The wizard prompts for all relevant settings based on your selected mode and dis
 | `-master` | - | Leader address for followers |
 | `-log-level` | `info` | Log level: debug, info, warn, error |
 | `-log-json` | `false` | JSON log output |
+| `-config` | - | Path to configuration file |
 
 ### Client Options
 
@@ -461,6 +518,7 @@ flydb/
         auth/               Authentication and authorization
         banner/             Startup banner display
         cache/              Query caching
+        config/             Configuration management
         errors/             Error handling
         logging/            Structured logging
         pool/               Connection pooling

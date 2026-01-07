@@ -119,27 +119,234 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | JSON Log Output | For log aggregation systems | 01.26.1 |
 | Error Codes & Hints | Comprehensive error handling | 01.26.1 |
 
+### Configuration
+
+| Feature | Description | Version |
+|---------|-------------|---------|
+| Configuration File Support | TOML configuration file with auto-discovery | 01.26.1 |
+| Environment Variables | FLYDB_* environment variable support | 01.26.1 |
+| Configuration Precedence | CLI flags > env vars > file > defaults | 01.26.1 |
+| Runtime Reload | Hot reload of configuration without restart | 01.26.1 |
+
 ---
 
 ## Planned Features
+
+### Critical Priority
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| WAL Compaction | Implement checkpointing and WAL compaction to prevent unbounded file growth | Planned |
+| Backup and Restore | BACKUP DATABASE and RESTORE DATABASE commands for data protection | Planned |
+| Transaction Atomicity Fix | Improve commit mechanism to prevent partial commits on failure | Planned |
 
 ### High Priority
 
 | Feature | Description | Status |
 |---------|-------------|--------|
-| - | All high-priority features completed | ✅ |
+| ALTER TABLE ADD/DROP CONSTRAINT | Complete ALTER TABLE support for adding and dropping constraints | Planned |
+| EXPLAIN Command | Query plan visualization for debugging and optimization | Planned |
+| Health Check Endpoint | HTTP endpoint for load balancer health checks | Planned |
+| Connection Limits | Configurable max connections and rate limiting | Planned |
+| Slow Query Logging | Log queries exceeding configurable time threshold | Planned |
 
 ### Medium Priority
 
 | Feature | Description | Status |
 |---------|-------------|--------|
-| - | All medium-priority features completed | ✅ |
+| Window Functions | OVER, PARTITION BY, ROW_NUMBER, RANK, DENSE_RANK | Planned |
+| String Functions | UPPER, LOWER, CONCAT, SUBSTRING, TRIM, LENGTH | Planned |
+| Date/Time Functions | NOW(), CURRENT_DATE, DATE_ADD, DATE_DIFF, EXTRACT | Planned |
+| CASE Expressions | CASE WHEN ... THEN ... ELSE ... END support | Planned |
+| TRUNCATE TABLE | Fast table truncation without logging individual deletes | Planned |
+| Multi-column Indexes | CREATE INDEX on multiple columns for composite lookups | Planned |
+| Index Range Queries | Use B-Tree indexes for BETWEEN, >, <, >=, <= operators | Planned |
+| Prometheus Metrics | Export database metrics in Prometheus format | Planned |
 
 ### Low Priority
 
 | Feature | Description | Status |
 |---------|-------------|--------|
-| Window Functions | OVER, PARTITION BY, ROW_NUMBER | 📋 Planned |
+| Point-in-Time Recovery | Restore database to specific timestamp using WAL | Planned |
+| Query Plan Caching | Cache parsed query plans for repeated queries | Planned |
+| Hash Join Algorithm | Alternative join algorithm for large table joins | Planned |
+| Merge Join Algorithm | Sorted merge join for pre-sorted data | Planned |
+| Table Statistics | Collect and maintain table statistics for query optimization | Planned |
+| Cost-Based Optimizer | Use statistics to choose optimal query execution plans | Planned |
+| Go Benchmark Tests | Performance regression testing with Go benchmarks | Planned |
+| COPY Command | Bulk data import/export in CSV format | Planned |
+| Materialized Views | Precomputed views with automatic refresh | Planned |
+
+---
+
+## Strategic Initiative: Hybrid Disk-Based Storage Engine
+
+<!--
+This initiative enables FlyDB to handle datasets larger than available RAM, similar to PostgreSQL's
+architecture. Currently, FlyDB requires all data to fit in memory, which limits its use cases to
+smaller datasets. By implementing a disk-based storage engine with an in-memory buffer pool, FlyDB
+can scale to handle terabytes of data while maintaining high performance for frequently accessed data.
+-->
+
+### Overview
+
+**Current Architecture Limitation:**
+FlyDB currently uses an in-memory key-value store with Write-Ahead Logging (WAL) for durability. While this provides excellent read/write performance, it requires all data to fit in available RAM, limiting FlyDB to datasets smaller than system memory.
+
+**Target Architecture (PostgreSQL-style):**
+A hybrid storage engine where disk-based storage serves as the primary data store, with an intelligent in-memory buffer pool/cache for frequently accessed data. This enables FlyDB to handle databases significantly larger than available RAM while maintaining high performance.
+
+### Architecture Comparison
+
+| Aspect | Current (In-Memory) | Target (Disk-Based) |
+|--------|---------------------|---------------------|
+| Primary Storage | RAM | Disk (pages/blocks) |
+| Data Capacity | Limited by RAM | Limited by disk space |
+| Read Performance | O(1) memory access | O(1) for cached, O(disk) for uncached |
+| Write Performance | O(1) + WAL append | Buffer pool + WAL + background flush |
+| Crash Recovery | Full WAL replay | Checkpoint + partial WAL replay |
+| Memory Usage | 100% of data | Configurable buffer pool size |
+
+### Implementation Phases
+
+#### Phase 1: Storage Abstraction Layer
+
+**Priority:** High | **Status:** Planned
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| Storage Interface | Define abstract `StorageEngine` interface supporting both engines | Planned |
+| Engine Registry | Runtime engine selection via configuration | Planned |
+| Dual-Engine Support | Allow both engines to coexist in the same binary | Planned |
+| Configuration Options | `--storage-engine=memory\|disk` flag and config file support | Planned |
+
+**Deliverable:** FlyDB can be configured to use either storage engine at startup.
+
+#### Phase 2: Page-Based Storage
+
+**Priority:** High | **Status:** Planned
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| Page Format | Fixed-size pages (8KB default) with header, slots, and tuples | Planned |
+| Page Manager | Read/write pages to disk with page ID addressing | Planned |
+| Free Space Map | Track available space in each page for insertions | Planned |
+| Heap File Structure | Organize table data as a collection of pages | Planned |
+| Slotted Page Layout | Variable-length tuple storage within pages | Planned |
+
+**Deliverable:** Tables can be stored as page files on disk.
+
+#### Phase 3: Buffer Pool Manager
+
+**Priority:** High | **Status:** Planned
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| Buffer Pool | Fixed-size in-memory cache for disk pages | Planned |
+| Page Replacement | LRU-K or Clock algorithm for eviction | Planned |
+| Pin/Unpin Semantics | Prevent eviction of pages in active use | Planned |
+| Dirty Page Tracking | Track modified pages for write-back | Planned |
+| Background Flusher | Async write-back of dirty pages | Planned |
+| Buffer Pool Sizing | Configurable via `--buffer-pool-size` | Planned |
+
+**Deliverable:** Frequently accessed pages are cached in memory with configurable pool size.
+
+#### Phase 4: Disk-Based Indexes
+
+**Priority:** Medium | **Status:** Planned
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| B+Tree on Disk | Persistent B+Tree index structure | Planned |
+| Index Page Format | Internal nodes and leaf nodes as pages | Planned |
+| Index Buffer Integration | Index pages managed by buffer pool | Planned |
+| Index-Only Scans | Return results directly from index when possible | Planned |
+
+**Deliverable:** Indexes persist to disk and support datasets larger than RAM.
+
+#### Phase 5: Checkpointing and Recovery
+
+**Priority:** Medium | **Status:** Planned
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| Checkpoint Manager | Periodic flush of all dirty pages to disk | Planned |
+| Checkpoint WAL Record | Mark checkpoint position in WAL | Planned |
+| Fast Recovery | Replay WAL only from last checkpoint | Planned |
+| Fuzzy Checkpoints | Non-blocking checkpoint with concurrent writes | Planned |
+
+**Deliverable:** Crash recovery is fast regardless of total data size.
+
+#### Phase 6: Migration Tools
+
+**Priority:** Medium | **Status:** Planned
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| Online Migration | `MIGRATE TO DISK ENGINE` command | Planned |
+| Progress Tracking | Report migration progress for large databases | Planned |
+| Rollback Support | Ability to revert to in-memory engine | Planned |
+| Data Verification | Checksum validation during migration | Planned |
+
+**Deliverable:** Existing FlyDB deployments can migrate to disk-based storage without downtime.
+
+### Configuration Options
+
+```yaml
+# flydb.yaml configuration example
+storage:
+  # Engine selection: "memory" (default) or "disk"
+  engine: disk
+
+  # Disk engine settings (only used when engine=disk)
+  disk:
+    # Directory for data files
+    data_directory: /var/lib/flydb/data
+
+    # Page size in bytes (default: 8192)
+    page_size: 8192
+
+    # Buffer pool size (default: 25% of system RAM)
+    buffer_pool_size: 2GB
+
+    # Background flusher interval
+    flush_interval: 1s
+
+    # Checkpoint interval
+    checkpoint_interval: 5m
+
+  # Memory engine settings (only used when engine=memory)
+  memory:
+    # Maximum memory usage (default: unlimited)
+    max_memory: 8GB
+```
+
+### Performance Trade-offs
+
+| Workload | In-Memory Engine | Disk-Based Engine |
+|----------|------------------|-------------------|
+| Small datasets (< RAM) | Optimal | Good (slight overhead) |
+| Large datasets (> RAM) | Not supported | Optimal |
+| Read-heavy (hot data) | Optimal | Optimal (cached) |
+| Read-heavy (cold data) | Optimal | Disk I/O bound |
+| Write-heavy | Optimal | Good (buffered writes) |
+| Mixed workloads | Optimal | Good to Optimal |
+| Memory-constrained | Limited | Optimal |
+
+### Migration Strategy
+
+1. **Backward Compatibility:** The in-memory engine remains the default and is fully supported
+2. **Gradual Adoption:** Users can test disk engine on non-production workloads first
+3. **Online Migration:** Production databases can migrate without downtime
+4. **Hybrid Operation:** Different tables could potentially use different engines (future)
+
+### Success Criteria
+
+- [ ] Disk-based engine passes all existing integration tests
+- [ ] Performance within 2x of in-memory engine for cached workloads
+- [ ] Successfully handles 10x RAM dataset size
+- [ ] Migration completes without data loss
+- [ ] Crash recovery completes in < 30 seconds regardless of data size
 
 ---
 

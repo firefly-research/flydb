@@ -101,6 +101,15 @@ This is the first public release of FlyDB, a lightweight SQL database written in
 - JSON log output for log aggregation systems
 - Comprehensive error handling with error codes and hints
 
+#### Configuration Management
+- TOML configuration file support with auto-discovery
+- Configuration file locations: `/etc/flydb/flydb.conf`, `~/.flydb/flydb.conf`, `./flydb.conf`
+- Environment variable support with `FLYDB_*` prefix
+- Configuration precedence: CLI flags > environment variables > config file > defaults
+- Runtime configuration reload with callback support
+- Configuration validation with detailed error messages
+- Thread-safe configuration access
+
 #### Tools
 - `flydb` - TCP database server
 - `fly-cli` - Interactive command-line client
