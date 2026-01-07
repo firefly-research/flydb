@@ -84,17 +84,27 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/chzyer/readline"
+	"golang.org/x/term"
 
 	"flydb/internal/banner"
 	"flydb/internal/protocol"
 	"flydb/pkg/cli"
 )
+
+// isTerminal returns true if stdin is a terminal.
+func isTerminal() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
 
 // Connection configuration constants
 const (
@@ -127,6 +137,71 @@ type CLIConfig struct {
 var sqlKeywords = []string{
 	"SELECT", "INSERT", "CREATE", "GRANT", "UPDATE", "DELETE", "INTROSPECT",
 	"BEGIN", "COMMIT", "ROLLBACK", "PREPARE", "EXECUTE", "DEALLOCATE",
+}
+
+// allCompletions contains all completable commands and keywords for tab completion.
+var allCompletions = []string{
+	// Local commands
+	"\\q", "\\quit", "\\h", "\\help", "\\c", "\\clear", "\\s", "\\status", "\\v", "\\version",
+	// Server commands
+	"PING", "AUTH",
+	// SQL keywords
+	"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "GRANT", "REVOKE",
+	"BEGIN", "COMMIT", "ROLLBACK", "PREPARE", "EXECUTE", "DEALLOCATE",
+	"FROM", "WHERE", "AND", "OR", "NOT", "IN", "LIKE", "ORDER", "BY", "ASC", "DESC",
+	"LIMIT", "OFFSET", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON", "AS",
+	"VALUES", "INTO", "SET", "TABLE", "INDEX", "USER", "DATABASE",
+	"PRIMARY", "KEY", "UNIQUE", "NULL", "DEFAULT", "AUTO_INCREMENT",
+	"INT", "INTEGER", "TEXT", "VARCHAR", "BOOLEAN", "FLOAT", "DOUBLE", "TIMESTAMP",
+	// Introspection
+	"INTROSPECT USERS", "INTROSPECT TABLES", "INTROSPECT TABLE", "INTROSPECT INDEXES",
+	"INTROSPECT SERVER", "INTROSPECT STATUS",
+}
+
+// getHistoryFilePath returns the path to the history file.
+func getHistoryFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".flydb_history")
+}
+
+// createCompleter creates a readline completer for tab completion.
+func createCompleter() *readline.PrefixCompleter {
+	// Build completion items
+	items := make([]readline.PrefixCompleterInterface, 0, len(allCompletions))
+	for _, cmd := range allCompletions {
+		items = append(items, readline.PcItem(cmd))
+	}
+	return readline.NewPrefixCompleter(items...)
+}
+
+// createReadlineInstance creates a configured readline instance.
+func createReadlineInstance() (*readline.Instance, error) {
+	historyFile := getHistoryFilePath()
+
+	config := &readline.Config{
+		Prompt:          cli.Info("flydb") + cli.Dimmed(">") + " ",
+		HistoryFile:     historyFile,
+		AutoComplete:    createCompleter(),
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+
+		HistorySearchFold:   true,
+		FuncFilterInputRune: filterInput,
+	}
+
+	return readline.NewEx(config)
+}
+
+// filterInput filters input runes for readline.
+func filterInput(r rune) (rune, bool) {
+	switch r {
+	case readline.CharCtrlZ:
+		return r, false // Disable Ctrl+Z
+	}
+	return r, true
 }
 
 // BinaryClient wraps the binary protocol connection.
@@ -336,58 +411,61 @@ func parseFlags() CLIFlags {
 // printUsage prints comprehensive help information.
 func printUsage() {
 	fmt.Println()
-	fmt.Println("╔══════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║" + cli.Highlight("           FlyDB CLI - Interactive Database Client              ") + "║")
-	fmt.Printf("║                       Version %-36s║\n", banner.Version)
-	fmt.Println("╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Println("  " + cli.Highlight("FlyDB CLI - Interactive Database Client") + " " + cli.Dimmed("(v"+banner.Version+")"))
+	fmt.Println("  " + cli.Separator(50))
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("USAGE:"))
-	fmt.Println("  fly-cli [flags]")
-	fmt.Println("  fly-cli -e \"<command>\"")
+	fmt.Println()
+	fmt.Println("    fly-cli [flags]")
+	fmt.Println("    fly-cli -e \"<command>\"")
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("FLAGS:"))
-	fmt.Printf("  %s, %s <host>      Server hostname or IP (default: localhost)\n", cli.Info("-H"), cli.Info("--host"))
-	fmt.Printf("  %s, %s <port>      Server port number (default: 8889)\n", cli.Info("-p"), cli.Info("--port"))
-	fmt.Printf("  %s, %s          Print version information and exit\n", cli.Info("-v"), cli.Info("--version"))
-	fmt.Printf("      %s             Show this help message\n", cli.Info("--help"))
-	fmt.Printf("      %s          Enable verbose output with timing\n", cli.Info("--verbose"))
-	fmt.Printf("      %s            Enable debug mode with detailed logging\n", cli.Info("--debug"))
-	fmt.Printf("  %s, %s <format>  Output format: table, json, plain\n", cli.Info("-f"), cli.Info("--format"))
-	fmt.Printf("      %s         Disable colored output\n", cli.Info("--no-color"))
-	fmt.Printf("  %s, %s <cmd>    Execute a command and exit\n", cli.Info("-e"), cli.Info("--execute"))
-	fmt.Printf("  %s, %s <file>    Path to configuration file\n", cli.Info("-c"), cli.Info("--config"))
+	fmt.Println("  " + cli.Highlight("Flags"))
+	fmt.Println()
+	fmt.Printf("    %s, %s <host>      Server hostname or IP (default: localhost)\n", cli.Info("-H"), cli.Info("--host"))
+	fmt.Printf("    %s, %s <port>      Server port number (default: 8889)\n", cli.Info("-p"), cli.Info("--port"))
+	fmt.Printf("    %s, %s          Print version information and exit\n", cli.Info("-v"), cli.Info("--version"))
+	fmt.Printf("        %s             Show this help message\n", cli.Info("--help"))
+	fmt.Printf("        %s          Enable verbose output with timing\n", cli.Info("--verbose"))
+	fmt.Printf("        %s            Enable debug mode with detailed logging\n", cli.Info("--debug"))
+	fmt.Printf("    %s, %s <format>  Output format: table, json, plain\n", cli.Info("-f"), cli.Info("--format"))
+	fmt.Printf("        %s         Disable colored output\n", cli.Info("--no-color"))
+	fmt.Printf("    %s, %s <cmd>    Execute a command and exit\n", cli.Info("-e"), cli.Info("--execute"))
+	fmt.Printf("    %s, %s <file>    Path to configuration file\n", cli.Info("-c"), cli.Info("--config"))
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("EXAMPLES:"))
-	fmt.Println(cli.Dimmed("  # Connect to local server"))
-	fmt.Println("  " + cli.Success("fly-cli"))
+	fmt.Println("  " + cli.Highlight("Examples"))
 	fmt.Println()
-	fmt.Println(cli.Dimmed("  # Connect to remote server"))
-	fmt.Println("  " + cli.Success("fly-cli -H 192.168.1.100 -p 8889"))
+	fmt.Println("    " + cli.Dimmed("# Connect to local server"))
+	fmt.Println("    " + cli.Success("fly-cli"))
 	fmt.Println()
-	fmt.Println(cli.Dimmed("  # Execute a query and exit"))
-	fmt.Println("  " + cli.Success("fly-cli -e \"SELECT * FROM users\""))
+	fmt.Println("    " + cli.Dimmed("# Connect to remote server"))
+	fmt.Println("    " + cli.Success("fly-cli -H 192.168.1.100 -p 8889"))
 	fmt.Println()
-	fmt.Println(cli.Dimmed("  # Get JSON output"))
-	fmt.Println("  " + cli.Success("fly-cli -f json -e \"SELECT * FROM users\""))
+	fmt.Println("    " + cli.Dimmed("# Execute a query and exit"))
+	fmt.Println("    " + cli.Success("fly-cli -e \"SELECT * FROM users\""))
 	fmt.Println()
-
-	fmt.Println(cli.Highlight("INTERACTIVE COMMANDS:"))
-	fmt.Printf("  %s, %s              Exit the CLI\n", cli.Info("\\q"), cli.Info("\\quit"))
-	fmt.Printf("  %s, %s              Display help information\n", cli.Info("\\h"), cli.Info("\\help"))
-	fmt.Printf("  %s, %s             Clear the screen\n", cli.Info("\\c"), cli.Info("\\clear"))
-	fmt.Printf("  %s, %s            Show connection status\n", cli.Info("\\s"), cli.Info("\\status"))
+	fmt.Println("    " + cli.Dimmed("# Get JSON output"))
+	fmt.Println("    " + cli.Success("fly-cli -f json -e \"SELECT * FROM users\""))
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("ENVIRONMENT VARIABLES:"))
-	fmt.Printf("  %s             Default server host\n", cli.Info("FLYDB_HOST"))
-	fmt.Printf("  %s             Default server port\n", cli.Info("FLYDB_PORT"))
-	fmt.Printf("  %s               Disable colored output\n", cli.Info("NO_COLOR"))
+	fmt.Println("  " + cli.Highlight("Interactive Commands"))
+	fmt.Println()
+	fmt.Printf("    %s, %s         Exit the CLI\n", cli.Info("\\q"), cli.Info("\\quit"))
+	fmt.Printf("    %s, %s         Display help information\n", cli.Info("\\h"), cli.Info("\\help"))
+	fmt.Printf("    %s, %s        Clear the screen\n", cli.Info("\\c"), cli.Info("\\clear"))
+	fmt.Printf("    %s, %s       Show connection status\n", cli.Info("\\s"), cli.Info("\\status"))
 	fmt.Println()
 
-	fmt.Println(cli.Dimmed("For more information, visit: https://github.com/flydb/flydb"))
+	fmt.Println("  " + cli.Highlight("Environment Variables"))
+	fmt.Println()
+	fmt.Printf("    %s        Default server host\n", cli.Info("FLYDB_HOST"))
+	fmt.Printf("    %s        Default server port\n", cli.Info("FLYDB_PORT"))
+	fmt.Printf("    %s          Disable colored output\n", cli.Info("NO_COLOR"))
+	fmt.Println()
+
+	fmt.Println("  " + cli.Dimmed("For more information, visit: https://github.com/flydb/flydb"))
+	fmt.Println()
 }
 
 // main is the entry point for the fly-cli application.
@@ -395,8 +473,8 @@ func printUsage() {
 func main() {
 	flags := parseFlags()
 
-	// Handle --no-color flag
-	if flags.NoColor {
+	// Handle --no-color flag (also check NO_COLOR env var and terminal detection)
+	if flags.NoColor || os.Getenv("NO_COLOR") != "" || !isTerminal() {
 		cli.SetColorsEnabled(false)
 	}
 
@@ -413,7 +491,15 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Check environment variables for defaults
+	// Load configuration from file if specified
+	if flags.ConfigFile != "" {
+		if err := loadConfigFile(flags.ConfigFile, &flags); err != nil {
+			cli.PrintError("Failed to load config file: %v", err)
+			os.Exit(1)
+		}
+	}
+
+	// Check environment variables for defaults (override config file)
 	if envHost := os.Getenv("FLYDB_HOST"); envHost != "" && flags.Host == "localhost" {
 		flags.Host = envHost
 	}
@@ -432,6 +518,52 @@ func main() {
 	}
 
 	startREPL(config)
+}
+
+// loadConfigFile loads CLI configuration from a file.
+func loadConfigFile(path string, flags *CLIFlags) error {
+	path = os.ExpandEnv(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("cannot read config file: %w", err)
+	}
+
+	// Parse simple key=value format
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+		// Remove quotes if present
+		value = strings.Trim(value, "\"'")
+
+		switch key {
+		case "host":
+			flags.Host = value
+		case "port":
+			flags.Port = value
+		case "format":
+			flags.Format = value
+		case "verbose":
+			flags.Verbose = value == "true"
+		case "debug":
+			flags.Debug = value == "true"
+		case "no_color":
+			flags.NoColor = value == "true"
+		}
+	}
+
+	return nil
 }
 
 // connectWithRetry attempts to connect to the server with exponential backoff.
@@ -545,28 +677,89 @@ func startREPL(config CLIConfig) {
 	}
 
 	fmt.Println()
+	// If not running in a terminal (piped input), use simple REPL
+	if !isTerminal() {
+		runSimpleREPL(config, client, addr)
+		return
+	}
+
 	fmt.Println(cli.Success("✓ Connected to FlyDB server"))
-	fmt.Printf("  Type %s to quit, %s for help\n",
+	fmt.Printf("  Type %s to quit, %s for help, %s for completion\n",
 		cli.Highlight("\\q"),
-		cli.Highlight("\\h"))
+		cli.Highlight("\\h"),
+		cli.Highlight("Tab"))
 	fmt.Println()
 
-	// Create scanner for reading user input
-	scanner := bufio.NewScanner(os.Stdin)
+	// Create readline instance for advanced line editing
+	rl, err := createReadlineInstance()
+	if err != nil {
+		// Fall back to simple scanner if readline fails
+		cli.PrintWarning("Advanced line editing unavailable: %v", err)
+		runSimpleREPL(config, client, addr)
+		return
+	}
+	defer rl.Close()
+
+	// Multi-line input buffer
+	var multiLineBuffer strings.Builder
+	inMultiLine := false
 
 	// Main REPL loop: continuously read, evaluate, and print.
 	for {
-		// Display the prompt and read user input.
-		fmt.Print(cli.Info("flydb") + cli.Dimmed(">") + " ")
-		if !scanner.Scan() {
-			// EOF or error reading input - exit gracefully.
+		// Set prompt based on multi-line state
+		if inMultiLine {
+			rl.SetPrompt(cli.Dimmed("     -> "))
+		} else {
+			rl.SetPrompt(cli.Info("flydb") + cli.Dimmed(">") + " ")
+		}
+
+		// Read user input with readline (supports history, completion, editing)
+		line, err := rl.Readline()
+		if err != nil {
+			if err == readline.ErrInterrupt {
+				// Ctrl+C pressed
+				if inMultiLine {
+					// Cancel multi-line input
+					multiLineBuffer.Reset()
+					inMultiLine = false
+					fmt.Println()
+					continue
+				}
+				// Ask for confirmation to exit
+				fmt.Println()
+				fmt.Println(cli.Dimmed("(Use \\q to quit or Ctrl+D to exit)"))
+				continue
+			}
+			if err == io.EOF {
+				// Ctrl+D pressed - exit gracefully
+				fmt.Println()
+				cli.PrintInfo("Goodbye!")
+				break
+			}
+			// Other error - exit
 			fmt.Println()
 			cli.PrintInfo("Goodbye!")
 			break
 		}
 
 		// Trim whitespace from input for clean processing.
-		input := strings.TrimSpace(scanner.Text())
+		input := strings.TrimSpace(line)
+
+		// Handle multi-line input (lines ending with \)
+		if strings.HasSuffix(input, "\\") {
+			multiLineBuffer.WriteString(strings.TrimSuffix(input, "\\"))
+			multiLineBuffer.WriteString(" ")
+			inMultiLine = true
+			continue
+		}
+
+		// If in multi-line mode, append this line
+		if inMultiLine {
+			multiLineBuffer.WriteString(input)
+			input = strings.TrimSpace(multiLineBuffer.String())
+			multiLineBuffer.Reset()
+			inMultiLine = false
+		}
 
 		// Skip empty lines to avoid sending unnecessary requests.
 		if input == "" {
@@ -600,6 +793,69 @@ func startREPL(config CLIConfig) {
 				client = newClient
 				spinner.StopWithSuccess("Reconnected successfully!")
 				// Retry the command
+				response, err = processCommand(client, input, config)
+				if err != nil {
+					printErrorMessage(err.Error())
+					continue
+				}
+			} else {
+				printErrorMessage(err.Error())
+				continue
+			}
+		}
+
+		printResponseWithFormat(response, config.Format)
+	}
+}
+
+// runSimpleREPL runs a simple REPL without readline (fallback/piped mode).
+func runSimpleREPL(config CLIConfig, client *BinaryClient, addr string) {
+	scanner := bufio.NewScanner(os.Stdin)
+	interactive := isTerminal()
+
+	for {
+		// Only show prompt in interactive mode
+		if interactive {
+			fmt.Print(cli.Info("flydb") + cli.Dimmed(">") + " ")
+		}
+		if !scanner.Scan() {
+			if interactive {
+				fmt.Println()
+				cli.PrintInfo("Goodbye!")
+			}
+			break
+		}
+
+		input := strings.TrimSpace(scanner.Text())
+		if input == "" {
+			continue
+		}
+
+		// Skip local commands in piped mode (except quit)
+		if strings.HasPrefix(input, "\\") {
+			if !interactive && input != "\\q" && input != "\\quit" {
+				continue
+			}
+			handleLocalCommand(input, config, client)
+			continue
+		}
+
+		response, err := processCommand(client, input, config)
+		if err != nil {
+			if isConnectionError(err) && interactive {
+				cli.PrintWarning("Connection lost. Attempting to reconnect...")
+				client.Close()
+
+				spinner := cli.NewSpinner("Reconnecting...")
+				spinner.Start()
+				newClient, reconnErr := connectWithRetry(addr)
+				if reconnErr != nil {
+					spinner.StopWithError("Failed to reconnect")
+					cli.PrintError("Exiting...")
+					os.Exit(1)
+				}
+				client = newClient
+				spinner.StopWithSuccess("Reconnected successfully!")
 				response, err = processCommand(client, input, config)
 				if err != nil {
 					printErrorMessage(err.Error())
@@ -759,9 +1015,9 @@ func handleLocalCommand(cmd string, config CLIConfig, client *BinaryClient) {
 // printStatus displays the current connection status.
 func printStatus(config CLIConfig, client *BinaryClient) {
 	fmt.Println()
-	fmt.Println("╔════════════════════════════════════════╗")
-	fmt.Println("║" + cli.Highlight("        Connection Status              ") + "║")
-	fmt.Println("╠════════════════════════════════════════╣")
+	fmt.Println("  " + cli.Highlight("Connection Status"))
+	fmt.Println("  " + cli.Separator(30))
+	fmt.Println()
 
 	// Check connection status
 	var statusIcon, statusText string
@@ -773,11 +1029,10 @@ func printStatus(config CLIConfig, client *BinaryClient) {
 		statusText = cli.Error("Disconnected")
 	}
 
-	fmt.Printf("║  Status:        %s %-19s║\n", statusIcon, statusText)
-	fmt.Printf("║  Server:        %-22s║\n", config.Host+":"+config.Port)
-	fmt.Printf("║  Protocol:      %-22s║\n", "Binary")
-	fmt.Printf("║  Output Format: %-22s║\n", string(config.Format))
-	fmt.Println("╚════════════════════════════════════════╝")
+	fmt.Printf("    %s %s %s\n", cli.Dimmed("Status:"), statusIcon, statusText)
+	fmt.Printf("    %s %s\n", cli.Dimmed("Server:"), config.Host+":"+config.Port)
+	fmt.Printf("    %s %s\n", cli.Dimmed("Protocol:"), "Binary")
+	fmt.Printf("    %s %s\n", cli.Dimmed("Format:"), string(config.Format))
 	fmt.Println()
 }
 
@@ -785,76 +1040,81 @@ func printStatus(config CLIConfig, client *BinaryClient) {
 // This function provides users with a quick reference for available commands.
 func printHelp() {
 	fmt.Println()
-	fmt.Println("╔══════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║" + cli.Highlight("                    FlyDB CLI Help                              ") + "║")
-	fmt.Printf("║                    Version %-39s║\n", banner.Version)
-	fmt.Println("╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Println("  " + cli.Highlight("FlyDB CLI Help") + " " + cli.Dimmed("(v"+banner.Version+")"))
+	fmt.Println("  " + cli.Separator(50))
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("┌─ Local Commands ─────────────────────────────────────────────────┐"))
-	fmt.Println("│  " + cli.Info("\\q") + ", " + cli.Info("\\quit") + "      Exit the CLI                                   │")
-	fmt.Println("│  " + cli.Info("\\h") + ", " + cli.Info("\\help") + "      Display this help message                       │")
-	fmt.Println("│  " + cli.Info("\\c") + ", " + cli.Info("\\clear") + "     Clear the screen                                 │")
-	fmt.Println("│  " + cli.Info("\\s") + ", " + cli.Info("\\status") + "    Show connection status                           │")
-	fmt.Println("│  " + cli.Info("\\v") + ", " + cli.Info("\\version") + "   Show version information                         │")
-	fmt.Println("└──────────────────────────────────────────────────────────────────┘")
+	// Local Commands
+	fmt.Println("  " + cli.Highlight("Local Commands"))
+	fmt.Println()
+	fmt.Printf("    %s, %s         Exit the CLI\n", cli.Info("\\q"), cli.Info("\\quit"))
+	fmt.Printf("    %s, %s         Display this help message\n", cli.Info("\\h"), cli.Info("\\help"))
+	fmt.Printf("    %s, %s        Clear the screen\n", cli.Info("\\c"), cli.Info("\\clear"))
+	fmt.Printf("    %s, %s       Show connection status\n", cli.Info("\\s"), cli.Info("\\status"))
+	fmt.Printf("    %s, %s      Show version information\n", cli.Info("\\v"), cli.Info("\\version"))
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("┌─ Server Commands ────────────────────────────────────────────────┐"))
-	fmt.Println("│  " + cli.Info("PING") + "                Test server connectivity                   │")
-	fmt.Println("│  " + cli.Info("AUTH") + " <user> <pwd>   Authenticate with the server               │")
-	fmt.Println("└──────────────────────────────────────────────────────────────────┘")
+	// Server Commands
+	fmt.Println("  " + cli.Highlight("Server Commands"))
+	fmt.Println()
+	fmt.Printf("    %s                   Test server connectivity\n", cli.Info("PING"))
+	fmt.Printf("    %s <user> <pwd>      Authenticate with the server\n", cli.Info("AUTH"))
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("┌─ SQL Commands ") + cli.Dimmed("(auto-detected)") + cli.Highlight(" ────────────────────────────────────┐"))
-	fmt.Println("│  " + cli.Info("SELECT") + " ...          Query data from tables                     │")
-	fmt.Println("│  " + cli.Info("INSERT") + " ...          Insert new rows                            │")
-	fmt.Println("│  " + cli.Info("UPDATE") + " ...          Modify existing rows                       │")
-	fmt.Println("│  " + cli.Info("DELETE") + " ...          Remove rows                                │")
-	fmt.Println("│  " + cli.Info("CREATE TABLE") + " ...    Create a new table                         │")
-	fmt.Println("│  " + cli.Info("CREATE INDEX") + " ...    Create an index on a column                │")
-	fmt.Println("│  " + cli.Info("CREATE USER") + " ...     Create a new user                          │")
-	fmt.Println("│  " + cli.Info("GRANT") + " ...           Grant permissions to a user                │")
-	fmt.Println("└──────────────────────────────────────────────────────────────────┘")
+	// SQL Commands
+	fmt.Println("  " + cli.Highlight("SQL Commands") + " " + cli.Dimmed("(auto-detected)"))
+	fmt.Println()
+	fmt.Printf("    %s ...             Query data from tables\n", cli.Info("SELECT"))
+	fmt.Printf("    %s ...             Insert new rows\n", cli.Info("INSERT"))
+	fmt.Printf("    %s ...             Modify existing rows\n", cli.Info("UPDATE"))
+	fmt.Printf("    %s ...             Remove rows\n", cli.Info("DELETE"))
+	fmt.Printf("    %s ...       Create a new table\n", cli.Info("CREATE TABLE"))
+	fmt.Printf("    %s ...       Create an index on a column\n", cli.Info("CREATE INDEX"))
+	fmt.Printf("    %s ...        Create a new user\n", cli.Info("CREATE USER"))
+	fmt.Printf("    %s ...              Grant permissions to a user\n", cli.Info("GRANT"))
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("┌─ Prepared Statements ────────────────────────────────────────────┐"))
-	fmt.Println("│  " + cli.Info("PREPARE") + " <name> AS <query>   Compile a query for reuse         │")
-	fmt.Println("│  " + cli.Info("EXECUTE") + " <name> [USING ...]  Run a prepared statement          │")
-	fmt.Println("│  " + cli.Info("DEALLOCATE") + " <name>           Remove a prepared statement       │")
-	fmt.Println("└──────────────────────────────────────────────────────────────────┘")
+	// Prepared Statements
+	fmt.Println("  " + cli.Highlight("Prepared Statements"))
+	fmt.Println()
+	fmt.Printf("    %s <name> AS <query>    Compile a query for reuse\n", cli.Info("PREPARE"))
+	fmt.Printf("    %s <name> [USING ...]   Run a prepared statement\n", cli.Info("EXECUTE"))
+	fmt.Printf("    %s <name>            Remove a prepared statement\n", cli.Info("DEALLOCATE"))
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("┌─ Transactions ────────────────────────────────────────────────────┐"))
-	fmt.Println("│  " + cli.Info("BEGIN") + "               Start a transaction                        │")
-	fmt.Println("│  " + cli.Info("COMMIT") + "              Commit the transaction                     │")
-	fmt.Println("│  " + cli.Info("ROLLBACK") + "            Rollback the transaction                   │")
-	fmt.Println("└───────────────────────────────────────────────────────────────────┘")
+	// Transactions
+	fmt.Println("  " + cli.Highlight("Transactions"))
+	fmt.Println()
+	fmt.Printf("    %s                  Start a transaction\n", cli.Info("BEGIN"))
+	fmt.Printf("    %s                 Commit the transaction\n", cli.Info("COMMIT"))
+	fmt.Printf("    %s               Rollback the transaction\n", cli.Info("ROLLBACK"))
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("┌─ Introspection ───────────────────────────────────────────────────┐"))
-	fmt.Println("│  " + cli.Info("INTROSPECT USERS") + "            List all database users            │")
-	fmt.Println("│  " + cli.Info("INTROSPECT TABLES") + "           List all tables with schemas       │")
-	fmt.Println("│  " + cli.Info("INTROSPECT TABLE") + " <name>     Detailed info for a table          │")
-	fmt.Println("│  " + cli.Info("INTROSPECT INDEXES") + "          List all indexes                   │")
-	fmt.Println("│  " + cli.Info("INTROSPECT SERVER") + "           Show server/daemon information     │")
-	fmt.Println("│  " + cli.Info("INTROSPECT STATUS") + "           Show database status & statistics  │")
-	fmt.Println("└───────────────────────────────────────────────────────────────────┘")
+	// Introspection
+	fmt.Println("  " + cli.Highlight("Introspection"))
+	fmt.Println()
+	fmt.Printf("    %s           List all database users\n", cli.Info("INTROSPECT USERS"))
+	fmt.Printf("    %s          List all tables with schemas\n", cli.Info("INTROSPECT TABLES"))
+	fmt.Printf("    %s <name>    Detailed info for a table\n", cli.Info("INTROSPECT TABLE"))
+	fmt.Printf("    %s         List all indexes\n", cli.Info("INTROSPECT INDEXES"))
+	fmt.Printf("    %s          Show server/daemon information\n", cli.Info("INTROSPECT SERVER"))
+	fmt.Printf("    %s          Show database status & statistics\n", cli.Info("INTROSPECT STATUS"))
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("┌─ Quick Examples ──────────────────────────────────────────────────┐"))
-	fmt.Println("│  " + cli.Dimmed("# Create a table") + "                                               │")
-	fmt.Println("│  " + cli.Success("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)") + "            │")
-	fmt.Println("│                                                                   │")
-	fmt.Println("│  " + cli.Dimmed("# Insert data") + "                                                  │")
-	fmt.Println("│  " + cli.Success("INSERT INTO users VALUES (1, 'Alice')") + "                         │")
-	fmt.Println("│                                                                   │")
-	fmt.Println("│  " + cli.Dimmed("# Query data") + "                                                   │")
-	fmt.Println("│  " + cli.Success("SELECT * FROM users WHERE id = 1") + "                              │")
-	fmt.Println("└───────────────────────────────────────────────────────────────────┘")
+	// Quick Examples
+	fmt.Println("  " + cli.Highlight("Quick Examples"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("# Create a table"))
+	fmt.Println("    " + cli.Success("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("# Insert data"))
+	fmt.Println("    " + cli.Success("INSERT INTO users VALUES (1, 'Alice')"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("# Query data"))
+	fmt.Println("    " + cli.Success("SELECT * FROM users WHERE id = 1"))
 	fmt.Println()
 
-	fmt.Println(cli.Dimmed("💡 Tip: SQL commands are auto-detected, no prefix needed."))
+	fmt.Println("  " + cli.Dimmed("💡 Tip: SQL commands are auto-detected, no prefix needed."))
 	fmt.Println()
 }
 
@@ -887,6 +1147,12 @@ func printResponseWithFormat(response string, format cli.OutputFormat) {
 		return
 	}
 
+	// Detect key-value format (introspect results like "Key: Value")
+	if isKeyValueFormat(response) {
+		formatKeyValueResult(response)
+		return
+	}
+
 	// Detect tabular data and format it nicely.
 	if strings.Contains(response, ", ") || strings.Contains(response, "\n") {
 		formatTable(response)
@@ -894,6 +1160,94 @@ func printResponseWithFormat(response string, format cli.OutputFormat) {
 		// Simple single-value response - print with success color.
 		cli.PrintSuccess("%s", response)
 	}
+}
+
+// isKeyValueFormat checks if the response is in key-value format (like introspect results).
+func isKeyValueFormat(response string) bool {
+	lines := strings.Split(response, "\n")
+	if len(lines) < 2 {
+		return false
+	}
+
+	// Check if most lines contain ": " pattern
+	kvCount := 0
+	for _, line := range lines {
+		if strings.Contains(line, ": ") {
+			kvCount++
+		}
+	}
+
+	// If more than half the lines are key-value pairs, treat as KV format
+	return kvCount > len(lines)/2
+}
+
+// formatKeyValueResult formats key-value introspect results nicely.
+func formatKeyValueResult(response string) {
+	lines := strings.Split(response, "\n")
+
+	// Find the title (first line that looks like a section header)
+	title := ""
+	startIdx := 0
+
+	// Check if first line looks like a title (e.g., "Table: users")
+	if len(lines) > 0 && strings.Contains(lines[0], ": ") {
+		parts := strings.SplitN(lines[0], ": ", 2)
+		if parts[0] == "Table" || parts[0] == "Server" {
+			title = parts[1]
+			startIdx = 0
+		}
+	}
+
+	fmt.Println()
+
+	// Determine section title based on content
+	if title != "" {
+		if strings.Contains(response, "Version:") && strings.Contains(response, "Protocol:") {
+			fmt.Println("  " + cli.Highlight("Server Information"))
+		} else if strings.Contains(response, "Columns:") {
+			fmt.Println("  " + cli.Highlight("Table: "+title))
+		} else {
+			fmt.Println("  " + cli.Highlight(title))
+		}
+	} else if strings.Contains(response, "Tables:") && strings.Contains(response, "Users:") {
+		fmt.Println("  " + cli.Highlight("Database Status"))
+	} else {
+		fmt.Println("  " + cli.Highlight("Result"))
+	}
+	fmt.Println("  " + cli.Separator(40))
+	fmt.Println()
+
+	// Format each line
+	for i := startIdx; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+
+		// Handle section headers (lines ending with ":")
+		if strings.HasSuffix(line, ":") && !strings.Contains(line, ": ") {
+			fmt.Println()
+			fmt.Println("  " + cli.Info(line))
+			continue
+		}
+
+		// Handle indented items (like column listings)
+		if strings.HasPrefix(lines[i], "  ") {
+			fmt.Println("  " + cli.Dimmed("  "+line))
+			continue
+		}
+
+		// Handle key-value pairs
+		if idx := strings.Index(line, ": "); idx != -1 {
+			key := line[:idx]
+			value := line[idx+2:]
+			fmt.Printf("    %s %s\n", cli.Dimmed(key+":"), value)
+		} else {
+			fmt.Println("    " + line)
+		}
+	}
+
+	fmt.Println()
 }
 
 // printResponseAsJSON outputs the response in JSON format.
@@ -981,8 +1335,16 @@ func formatSelectResult(response string) {
 		return
 	}
 
+	// Calculate the maximum number of columns across ALL rows
+	// This fixes the issue where later rows might have more columns than the first
+	numCols := 0
+	for _, row := range rows {
+		if len(row) > numCols {
+			numCols = len(row)
+		}
+	}
+
 	// Calculate maximum width for each column (minimum width of 3 for aesthetics)
-	numCols := len(rows[0])
 	colWidths := make([]int, numCols)
 	for i := range colWidths {
 		colWidths[i] = 3 // Minimum column width
@@ -1038,16 +1400,14 @@ func formatSelectResult(response string) {
 
 	for rowIdx, row := range rows {
 		var rowParts []string
-		for i, col := range row {
-			if i < numCols {
-				// Pad the column value to the required width
-				padded := fmt.Sprintf(" %-*s ", colWidths[i], col)
-				rowParts = append(rowParts, padded)
+		// Process all columns up to numCols
+		for i := 0; i < numCols; i++ {
+			val := ""
+			if i < len(row) {
+				val = row[i]
 			}
-		}
-		// Handle rows with fewer columns than expected
-		for i := len(row); i < numCols; i++ {
-			padded := fmt.Sprintf(" %-*s ", colWidths[i], "")
+			// Pad the column value to the required width
+			padded := fmt.Sprintf(" %-*s ", colWidths[i], val)
 			rowParts = append(rowParts, padded)
 		}
 		fmt.Println(cli.Dimmed(vertical) + strings.Join(rowParts, cli.Dimmed(vertical)) + cli.Dimmed(vertical))
@@ -1073,6 +1433,7 @@ func formatSelectResult(response string) {
 
 // formatTable pretty-prints tabular data using a professional grid layout.
 // It converts comma-separated values into a nicely formatted table.
+// The first row is treated as a header row with a separator line below it.
 func formatTable(data string) {
 	// Process each line of the response.
 	lines := strings.Split(data, "\n")
@@ -1089,7 +1450,7 @@ func formatTable(data string) {
 		return
 	}
 
-	// Calculate maximum width for each column
+	// Calculate maximum number of columns across all rows
 	numCols := 0
 	for _, row := range rows {
 		if len(row) > numCols {
@@ -1097,6 +1458,7 @@ func formatTable(data string) {
 		}
 	}
 
+	// Calculate maximum width for each column (minimum width of 3 for aesthetics)
 	colWidths := make([]int, numCols)
 	for i := range colWidths {
 		colWidths[i] = 3 // Minimum column width
@@ -1109,7 +1471,7 @@ func formatTable(data string) {
 		}
 	}
 
-	// Unicode box-drawing characters
+	// Unicode box-drawing characters for professional grid
 	const (
 		topLeft     = "┌"
 		topRight    = "┐"
@@ -1119,21 +1481,26 @@ func formatTable(data string) {
 		vertical    = "│"
 		topT        = "┬"
 		bottomT     = "┴"
+		leftT       = "├"
+		rightT      = "┤"
+		cross       = "┼"
 	)
 
-	// Build borders
-	var topParts, bottomParts []string
+	// Build border strings
+	var topParts, sepParts, bottomParts []string
 	for _, width := range colWidths {
 		topParts = append(topParts, strings.Repeat(horizontal, width+2))
+		sepParts = append(sepParts, strings.Repeat(horizontal, width+2))
 		bottomParts = append(bottomParts, strings.Repeat(horizontal, width+2))
 	}
 	topBorder := topLeft + strings.Join(topParts, topT) + topRight
+	separator := leftT + strings.Join(sepParts, cross) + rightT
 	bottomBorder := bottomLeft + strings.Join(bottomParts, bottomT) + bottomRight
 
 	fmt.Println()
 	fmt.Println(cli.Dimmed(topBorder))
 
-	for _, row := range rows {
+	for rowIdx, row := range rows {
 		var rowParts []string
 		for i := 0; i < numCols; i++ {
 			val := ""
@@ -1144,6 +1511,11 @@ func formatTable(data string) {
 			rowParts = append(rowParts, padded)
 		}
 		fmt.Println(cli.Dimmed(vertical) + strings.Join(rowParts, cli.Dimmed(vertical)) + cli.Dimmed(vertical))
+
+		// Print separator after first row (header) if there are multiple rows
+		if rowIdx == 0 && len(rows) > 1 {
+			fmt.Println(cli.Dimmed(separator))
+		}
 	}
 
 	fmt.Println(cli.Dimmed(bottomBorder))
