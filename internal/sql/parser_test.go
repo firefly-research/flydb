@@ -1099,3 +1099,136 @@ func TestParseDropTrigger(t *testing.T) {
 		t.Errorf("Expected table 'users', got '%s'", dropStmt.TableName)
 	}
 }
+
+func TestParseDropTable(t *testing.T) {
+	input := "DROP TABLE users"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	dropStmt, ok := stmt.(*DropTableStmt)
+	if !ok {
+		t.Fatalf("Expected DropTableStmt, got %T", stmt)
+	}
+
+	if dropStmt.TableName != "users" {
+		t.Errorf("Expected table name 'users', got '%s'", dropStmt.TableName)
+	}
+
+	if dropStmt.IfExists {
+		t.Error("Expected IfExists to be false")
+	}
+}
+
+func TestParseDropTableIfExists(t *testing.T) {
+	input := "DROP TABLE IF EXISTS temp_data"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	dropStmt, ok := stmt.(*DropTableStmt)
+	if !ok {
+		t.Fatalf("Expected DropTableStmt, got %T", stmt)
+	}
+
+	if dropStmt.TableName != "temp_data" {
+		t.Errorf("Expected table name 'temp_data', got '%s'", dropStmt.TableName)
+	}
+
+	if !dropStmt.IfExists {
+		t.Error("Expected IfExists to be true")
+	}
+}
+
+func TestParseTruncateTable(t *testing.T) {
+	input := "TRUNCATE TABLE logs"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	truncateStmt, ok := stmt.(*TruncateTableStmt)
+	if !ok {
+		t.Fatalf("Expected TruncateTableStmt, got %T", stmt)
+	}
+
+	if truncateStmt.TableName != "logs" {
+		t.Errorf("Expected table name 'logs', got '%s'", truncateStmt.TableName)
+	}
+}
+
+func TestParseAlterUser(t *testing.T) {
+	tests := []struct {
+		input       string
+		username    string
+		newPassword string
+	}{
+		{"ALTER USER alice IDENTIFIED BY 'newpassword'", "alice", "newpassword"},
+		{"ALTER USER admin IDENTIFIED BY 'secure123'", "admin", "secure123"},
+		{"ALTER USER bob IDENTIFIED BY secret", "bob", "secret"},
+	}
+
+	for _, tt := range tests {
+		lexer := NewLexer(tt.input)
+		parser := NewParser(lexer)
+		stmt, err := parser.Parse()
+		if err != nil {
+			t.Fatalf("Parse failed for '%s': %v", tt.input, err)
+		}
+
+		alterUserStmt, ok := stmt.(*AlterUserStmt)
+		if !ok {
+			t.Fatalf("Expected AlterUserStmt, got %T", stmt)
+		}
+
+		if alterUserStmt.Username != tt.username {
+			t.Errorf("Expected username '%s', got '%s'", tt.username, alterUserStmt.Username)
+		}
+
+		if alterUserStmt.NewPassword != tt.newPassword {
+			t.Errorf("Expected password '%s', got '%s'", tt.newPassword, alterUserStmt.NewPassword)
+		}
+	}
+}
+
+func TestParseRevoke(t *testing.T) {
+	tests := []struct {
+		input     string
+		tableName string
+		username  string
+	}{
+		{"REVOKE ON products FROM alice", "products", "alice"},
+		{"REVOKE ON orders FROM bob", "orders", "bob"},
+		{"REVOKE ON users FROM admin", "users", "admin"},
+	}
+
+	for _, tt := range tests {
+		lexer := NewLexer(tt.input)
+		parser := NewParser(lexer)
+		stmt, err := parser.Parse()
+		if err != nil {
+			t.Fatalf("Parse failed for '%s': %v", tt.input, err)
+		}
+
+		revokeStmt, ok := stmt.(*RevokeStmt)
+		if !ok {
+			t.Fatalf("Expected RevokeStmt, got %T", stmt)
+		}
+
+		if revokeStmt.TableName != tt.tableName {
+			t.Errorf("Expected table '%s', got '%s'", tt.tableName, revokeStmt.TableName)
+		}
+
+		if revokeStmt.Username != tt.username {
+			t.Errorf("Expected username '%s', got '%s'", tt.username, revokeStmt.Username)
+		}
+	}
+}

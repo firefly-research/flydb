@@ -201,18 +201,20 @@ func (l *Lexer) NextToken() Token {
 		case "CREATE", "TABLE", "INSERT", "INTO", "VALUES",
 			"SELECT", "FROM", "WHERE", "TEXT", "INT",
 			"JOIN", "ON", "USER", "IDENTIFIED", "BY",
-			"GRANT", "TO", "UPDATE", "SET", "DELETE",
-			"ORDER", "LIMIT", "ASC", "DESC", "NULL",
+			"GRANT", "REVOKE", "TO", "UPDATE", "SET", "DELETE",
+			"ORDER", "LIMIT", "OFFSET", "ASC", "DESC", "NULL",
 			"BEGIN", "COMMIT", "ROLLBACK", "TRANSACTION", "INDEX", "DROP",
 			// Extended column types
-			"BOOLEAN", "FLOAT", "TIMESTAMP", "DATE", "BLOB", "UUID", "JSONB",
-			"BIGINT", "DECIMAL", "NUMERIC", "TIME", "VARCHAR", "SERIAL",
+			"BOOLEAN", "BOOL", "FLOAT", "DOUBLE", "REAL", "TIMESTAMP", "DATETIME",
+			"DATE", "BLOB", "BYTEA", "BINARY", "VARBINARY", "UUID", "JSONB", "JSON",
+			"BIGINT", "SMALLINT", "TINYINT", "INTEGER", "DECIMAL", "NUMERIC",
+			"TIME", "VARCHAR", "CHAR", "CHARACTER", "SERIAL",
 			// Boolean literals
 			"TRUE", "FALSE",
 			// Prepared statements
 			"PREPARE", "EXECUTE", "DEALLOCATE", "AS", "USING",
 			// Aggregate functions
-			"COUNT", "SUM", "AVG", "MIN", "MAX",
+			"COUNT", "SUM", "AVG", "MIN", "MAX", "GROUP_CONCAT", "STRING_AGG",
 			// GROUP BY and HAVING
 			"GROUP", "HAVING",
 			// Introspection
@@ -235,7 +237,24 @@ func (l *Lexer) NextToken() Token {
 			// Views
 			"VIEW",
 			// Triggers
-			"TRIGGER", "BEFORE", "AFTER", "EACH", "ROW":
+			"TRIGGER", "BEFORE", "AFTER", "EACH", "ROW",
+			// TRUNCATE
+			"TRUNCATE",
+			// JOIN types
+			"LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS",
+			// Transaction control
+			"SAVEPOINT", "RELEASE",
+			// SQL functions
+			"UPPER", "LOWER", "CONCAT", "SUBSTRING", "SUBSTR", "TRIM", "LENGTH", "LEN",
+			"REPLACE", "LTRIM", "RTRIM", "REVERSE", "REPEAT",
+			"ABS", "ROUND", "CEIL", "CEILING", "FLOOR", "MOD", "POWER", "POW", "SQRT",
+			"NOW", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
+			"DATE_ADD", "DATE_SUB", "DATEDIFF", "DATEADD", "EXTRACT",
+			"YEAR", "MONTH", "DAY", "HOUR", "MINUTE", "SECOND",
+			"COALESCE", "NULLIF", "IFNULL", "NVL", "ISNULL",
+			"CAST", "CONVERT",
+			// UPSERT
+			"CONFLICT", "NOTHING":
 			return Token{Type: TokenKeyword, Value: upper}
 		}
 
@@ -244,13 +263,25 @@ func (l *Lexer) NextToken() Token {
 	}
 
 	// Number: starts with digit.
-	// Currently only supports integers (no decimals or scientific notation).
+	// Supports integers and decimal numbers (e.g., 123, 3.14, 0.5).
 	if unicode.IsDigit(rune(ch)) {
 		start := l.pos
 
-		// Consume all digits.
+		// Consume all digits before decimal point.
 		for l.pos < len(l.input) && unicode.IsDigit(rune(l.input[l.pos])) {
 			l.pos++
+		}
+
+		// Check for decimal point followed by more digits.
+		if l.pos < len(l.input) && l.input[l.pos] == '.' {
+			// Look ahead to ensure there's at least one digit after the decimal point.
+			if l.pos+1 < len(l.input) && unicode.IsDigit(rune(l.input[l.pos+1])) {
+				l.pos++ // Consume the decimal point.
+				// Consume all digits after decimal point.
+				for l.pos < len(l.input) && unicode.IsDigit(rune(l.input[l.pos])) {
+					l.pos++
+				}
+			}
 		}
 
 		return Token{Type: TokenNumber, Value: l.input[start:l.pos]}

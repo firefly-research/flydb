@@ -139,12 +139,55 @@ type GrantStmt struct {
 // statementNode implements the Statement interface.
 func (s GrantStmt) statementNode() {}
 
+// RevokeStmt represents a REVOKE statement.
+// It removes permissions from a user for accessing a specific table.
+//
+// SQL Syntax:
+//
+//	REVOKE ON <table> FROM <user>
+//
+// Examples:
+//
+//	REVOKE ON products FROM alice
+//	REVOKE ON orders FROM bob
+//
+// This removes all access rights for the user on the specified table,
+// including any Row-Level Security conditions that were set.
+type RevokeStmt struct {
+	TableName string // The table to revoke access from
+	Username  string // The user losing the permission
+}
+
+// statementNode implements the Statement interface.
+func (s RevokeStmt) statementNode() {}
+
+// AlterUserStmt represents an ALTER USER statement.
+// It modifies an existing user's properties, such as their password.
+//
+// SQL Syntax:
+//
+//	ALTER USER <username> IDENTIFIED BY '<new_password>'
+//
+// Examples:
+//
+//	ALTER USER alice IDENTIFIED BY 'new_secret123'
+//	ALTER USER admin IDENTIFIED BY 'new-admin-password'
+//
+// Currently supports changing the user's password.
+type AlterUserStmt struct {
+	Username    string // The username to modify
+	NewPassword string // The new password for the user
+}
+
+// statementNode implements the Statement interface.
+func (s AlterUserStmt) statementNode() {}
+
 // CreateTableStmt represents a CREATE TABLE statement.
 // It defines a new table with the specified columns, types, and constraints.
 //
 // SQL Syntax:
 //
-//	CREATE TABLE <name> (
+//	CREATE TABLE [IF NOT EXISTS] <name> (
 //	    <col1> <type1> [constraints],
 //	    <col2> <type2> [constraints],
 //	    [table_constraints]
@@ -153,12 +196,13 @@ func (s GrantStmt) statementNode() {}
 // Examples:
 //
 //	CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE)
-//	CREATE TABLE orders (id SERIAL PRIMARY KEY, user_id INT REFERENCES users(id), amount DECIMAL)
+//	CREATE TABLE IF NOT EXISTS orders (id SERIAL PRIMARY KEY, user_id INT REFERENCES users(id), amount DECIMAL)
 //
 // Supported column types: INT, TEXT, SERIAL, and others defined in types.go
 // Supported constraints: PRIMARY KEY, FOREIGN KEY/REFERENCES, NOT NULL, UNIQUE, AUTO_INCREMENT, DEFAULT
 type CreateTableStmt struct {
 	TableName   string            // The name of the new table
+	IfNotExists bool              // If true, don't error if table already exists
 	Columns     []ColumnDef       // Column definitions (name, type, and constraints)
 	Constraints []TableConstraint // Table-level constraints (composite keys, etc.)
 }
@@ -313,21 +357,37 @@ type TableConstraint struct {
 }
 
 // InsertStmt represents an INSERT INTO statement.
-// It adds a new row to a table with the specified values.
+// It adds one or more rows to a table with the specified values.
 //
 // SQL Syntax:
 //
 //	INSERT INTO <table> VALUES (<val1>, <val2>, ...)
+//	INSERT INTO <table> (<col1>, <col2>) VALUES (<val1>, <val2>)
+//	INSERT INTO <table> VALUES (<val1>, <val2>), (<val3>, <val4>)
+//	INSERT INTO <table> (<col1>, <col2>) VALUES (<val1>, <val2>) ON CONFLICT DO NOTHING
+//	INSERT INTO <table> (<col1>, <col2>) VALUES (<val1>, <val2>) ON CONFLICT DO UPDATE SET <col>=<val>
 //
-// Example:
+// Examples:
 //
 //	INSERT INTO users VALUES (1, 'Alice', 'alice@example.com')
+//	INSERT INTO users (id, name) VALUES (1, 'Alice')
+//	INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob')
 //
-// The number of values must match the number of columns in the table.
-// Values are provided in the same order as the table's column definitions.
+// When Columns is empty, values must match all columns in table order.
+// When Columns is specified, only those columns receive values.
 type InsertStmt struct {
-	TableName string   // The target table
-	Values    []string // Values for each column (in order)
+	TableName    string              // The target table
+	Columns      []string            // Optional: specific columns to insert into
+	Values       []string            // Values for the first row (backward compatibility)
+	MultiValues  [][]string          // Multiple rows of values
+	OnConflict   *OnConflictClause   // Optional: ON CONFLICT handling for upsert
+}
+
+// OnConflictClause represents the ON CONFLICT clause for upsert operations.
+type OnConflictClause struct {
+	DoNothing bool              // If true, do nothing on conflict
+	DoUpdate  bool              // If true, update on conflict
+	Updates   map[string]string // Column-to-value mapping for updates
 }
 
 // statementNode implements the Statement interface.
@@ -420,6 +480,7 @@ type SelectStmt struct {
 	Columns    []string         // Columns to return (or "*" for all)
 	Distinct   bool             // Whether to remove duplicate rows
 	Aggregates []*AggregateExpr // Aggregate function expressions
+	Functions  []*FunctionExpr  // Scalar function expressions
 	Where      *Condition       // Optional simple filter condition (backward compat)
 	WhereExt   *WhereClause     // Optional extended WHERE clause with subquery support
 	Join       *JoinClause      // Optional JOIN clause
@@ -427,6 +488,7 @@ type SelectStmt struct {
 	Having     *HavingClause    // Optional HAVING clause for filtering groups
 	OrderBy    *OrderByClause   // Optional ORDER BY clause
 	Limit      int              // Maximum rows to return (0 = unlimited)
+	Offset     int              // Number of rows to skip (0 = none)
 	Subquery   *SelectStmt      // Optional subquery for FROM clause
 	FromAlias  string           // Alias for subquery or table
 }
@@ -458,21 +520,81 @@ type UnionStmt struct {
 // statementNode implements the Statement interface.
 func (u UnionStmt) statementNode() {}
 
-// JoinClause represents an INNER JOIN operation in a SELECT statement.
+// IntersectStmt represents an INTERSECT operation combining two SELECT statements.
+// It returns only rows that appear in both result sets.
+//
+// SQL Syntax:
+//
+//	SELECT ... INTERSECT [ALL] SELECT ...
+//
+// Examples:
+//
+//	SELECT name FROM employees INTERSECT SELECT name FROM managers
+//
+// INTERSECT removes duplicates by default. INTERSECT ALL keeps duplicates.
+type IntersectStmt struct {
+	Left  *SelectStmt // Left SELECT statement
+	Right *SelectStmt // Right SELECT statement
+	All   bool        // If true, keep duplicates (INTERSECT ALL)
+}
+
+// statementNode implements the Statement interface.
+func (i IntersectStmt) statementNode() {}
+
+// ExceptStmt represents an EXCEPT operation combining two SELECT statements.
+// It returns rows from the left query that are not in the right query.
+//
+// SQL Syntax:
+//
+//	SELECT ... EXCEPT [ALL] SELECT ...
+//
+// Examples:
+//
+//	SELECT name FROM employees EXCEPT SELECT name FROM managers
+//
+// EXCEPT removes duplicates by default. EXCEPT ALL keeps duplicates.
+type ExceptStmt struct {
+	Left  *SelectStmt // Left SELECT statement
+	Right *SelectStmt // Right SELECT statement
+	All   bool        // If true, keep duplicates (EXCEPT ALL)
+}
+
+// statementNode implements the Statement interface.
+func (e ExceptStmt) statementNode() {}
+
+// JoinType represents the type of JOIN operation.
+type JoinType string
+
+// JOIN type constants.
+const (
+	JoinTypeInner JoinType = "INNER"
+	JoinTypeLeft  JoinType = "LEFT"
+	JoinTypeRight JoinType = "RIGHT"
+	JoinTypeFull  JoinType = "FULL"
+)
+
+// JoinClause represents a JOIN operation in a SELECT statement.
 // It combines rows from two tables based on a matching condition.
 //
 // SQL Syntax:
 //
-//	JOIN <table> ON <left_col> = <right_col>
+//	[INNER] JOIN <table> ON <left_col> = <right_col>
+//	LEFT [OUTER] JOIN <table> ON <left_col> = <right_col>
+//	RIGHT [OUTER] JOIN <table> ON <left_col> = <right_col>
+//	FULL [OUTER] JOIN <table> ON <left_col> = <right_col>
 //
-// Example:
+// Examples:
 //
 //	SELECT users.name, orders.amount
 //	FROM users JOIN orders ON users.id = orders.user_id
 //
+//	SELECT users.name, orders.amount
+//	FROM users LEFT JOIN orders ON users.id = orders.user_id
+//
 // FlyDB implements a Nested Loop Join algorithm, which iterates
 // through all combinations of rows and filters by the ON condition.
 type JoinClause struct {
+	JoinType  JoinType   // Type of join: INNER, LEFT, RIGHT, FULL
 	TableName string     // The table to join with
 	On        *Condition // The join condition (left_col = right_col)
 }
@@ -512,14 +634,16 @@ type Condition struct {
 //	WHERE category IN (SELECT category FROM featured_products)
 //	WHERE EXISTS (SELECT 1 FROM orders WHERE orders.user_id = users.id)
 type WhereClause struct {
-	Column     string       // The column name for comparison
-	Operator   string       // Comparison operator: =, <, >, <=, >=, IN, EXISTS, NOT IN, NOT EXISTS
-	Value      string       // Simple value for comparison
-	Values     []string     // List of values for IN clause
-	Subquery   *SelectStmt  // Subquery for IN/EXISTS
-	IsSubquery bool         // True if this uses a subquery
-	And        *WhereClause // Optional AND condition
-	Or         *WhereClause // Optional OR condition
+	Column      string       // The column name for comparison
+	Operator    string       // Comparison operator: =, <, >, <=, >=, IN, EXISTS, NOT IN, NOT EXISTS, LIKE, NOT LIKE, BETWEEN, IS NULL, IS NOT NULL
+	Value       string       // Simple value for comparison
+	Values      []string     // List of values for IN clause
+	BetweenLow  string       // Low value for BETWEEN
+	BetweenHigh string       // High value for BETWEEN
+	Subquery    *SelectStmt  // Subquery for IN/EXISTS
+	IsSubquery  bool         // True if this uses a subquery
+	And         *WhereClause // Optional AND condition
+	Or          *WhereClause // Optional OR condition
 }
 
 // HavingClause represents a HAVING clause for filtering grouped results.
@@ -574,33 +698,88 @@ func (s CommitStmt) statementNode() {}
 // SQL Syntax:
 //
 //	ROLLBACK
+//	ROLLBACK TO [SAVEPOINT] <name>
 //
 // ROLLBACK discards all changes made during the transaction.
-type RollbackStmt struct{}
+// ROLLBACK TO rolls back to a specific savepoint.
+type RollbackStmt struct {
+	ToSavepoint string // Optional: savepoint name to rollback to
+}
 
 // statementNode implements the Statement interface.
 func (s RollbackStmt) statementNode() {}
+
+// SavepointStmt represents a SAVEPOINT statement.
+//
+// SQL Syntax:
+//
+//	SAVEPOINT <name>
+//
+// Creates a savepoint within the current transaction.
+type SavepointStmt struct {
+	Name string // Savepoint name
+}
+
+// statementNode implements the Statement interface.
+func (s SavepointStmt) statementNode() {}
+
+// ReleaseSavepointStmt represents a RELEASE SAVEPOINT statement.
+//
+// SQL Syntax:
+//
+//	RELEASE [SAVEPOINT] <name>
+//
+// Releases (destroys) a savepoint.
+type ReleaseSavepointStmt struct {
+	Name string // Savepoint name
+}
+
+// statementNode implements the Statement interface.
+func (s ReleaseSavepointStmt) statementNode() {}
 
 // CreateIndexStmt represents a CREATE INDEX statement.
 //
 // SQL Syntax:
 //
-//	CREATE INDEX <name> ON <table> (<column>)
+//	CREATE INDEX [IF NOT EXISTS] <name> ON <table> (<column>)
 //
-// Example:
+// Examples:
 //
 //	CREATE INDEX idx_users_email ON users (email)
+//	CREATE INDEX IF NOT EXISTS idx_users_email ON users (email)
 //
 // Indexes improve query performance for WHERE clause lookups
 // on the indexed column.
 type CreateIndexStmt struct {
-	IndexName  string // Name of the index
-	TableName  string // Table to create the index on
-	ColumnName string // Column to index
+	IndexName   string // Name of the index
+	TableName   string // Table to create the index on
+	ColumnName  string // Column to index
+	IfNotExists bool   // If true, don't error if index already exists
 }
 
 // statementNode implements the Statement interface.
 func (s CreateIndexStmt) statementNode() {}
+
+// DropIndexStmt represents a DROP INDEX statement.
+//
+// SQL Syntax:
+//
+//	DROP INDEX [IF EXISTS] <name> ON <table>
+//
+// Examples:
+//
+//	DROP INDEX idx_users_email ON users
+//	DROP INDEX IF EXISTS idx_users_email ON users
+//
+// Removes an index from a table.
+type DropIndexStmt struct {
+	IndexName string // Name of the index to drop
+	TableName string // Table the index is on
+	IfExists  bool   // If true, don't error if index doesn't exist
+}
+
+// statementNode implements the Statement interface.
+func (s DropIndexStmt) statementNode() {}
 
 // PrepareStmt represents a PREPARE statement for prepared statements.
 //
@@ -707,9 +886,58 @@ func (s IntrospectStmt) statementNode() {}
 //	SELECT SUM(amount) FROM orders
 //	SELECT AVG(price), MIN(price), MAX(price) FROM products
 type AggregateExpr struct {
-	Function string // The aggregate function name (COUNT, SUM, AVG, MIN, MAX)
-	Column   string // The column to aggregate (or "*" for COUNT(*))
-	Alias    string // Optional alias for the result column
+	Function  string // The aggregate function name (COUNT, SUM, AVG, MIN, MAX, GROUP_CONCAT, STRING_AGG)
+	Column    string // The column to aggregate (or "*" for COUNT(*))
+	Alias     string // Optional alias for the result column
+	Separator string // Separator for GROUP_CONCAT/STRING_AGG (default: ",")
+}
+
+// FunctionExpr represents a scalar function call in a SELECT statement.
+// Scalar functions operate on individual values and return a single value.
+//
+// SQL Syntax:
+//
+//	<function>(<arg1>, <arg2>, ...)
+//
+// Supported String Functions:
+//   - UPPER(str): Convert to uppercase
+//   - LOWER(str): Convert to lowercase
+//   - LENGTH(str): String length
+//   - CONCAT(str1, str2, ...): Concatenate strings
+//   - SUBSTRING(str, start, length): Extract substring
+//   - TRIM(str): Remove leading/trailing whitespace
+//   - REPLACE(str, from, to): Replace occurrences
+//   - LEFT(str, n): Get leftmost n characters
+//   - RIGHT(str, n): Get rightmost n characters
+//
+// Supported Numeric Functions:
+//   - ABS(n): Absolute value
+//   - ROUND(n, decimals): Round to decimals
+//   - CEIL(n): Round up
+//   - FLOOR(n): Round down
+//   - MOD(n, m): Modulo
+//   - POWER(n, m): Power
+//   - SQRT(n): Square root
+//
+// Supported Date/Time Functions:
+//   - NOW(): Current timestamp
+//   - CURRENT_DATE: Current date
+//   - CURRENT_TIME: Current time
+//
+// Supported NULL Functions:
+//   - COALESCE(val1, val2, ...): First non-null value
+//   - NULLIF(val1, val2): NULL if equal
+//   - IFNULL(val, default): Default if null
+//
+// Examples:
+//
+//	SELECT UPPER(name) FROM users
+//	SELECT CONCAT(first_name, ' ', last_name) FROM users
+//	SELECT LENGTH(description) FROM products
+type FunctionExpr struct {
+	Function  string   // The function name
+	Arguments []string // Arguments (column names or literals)
+	Alias     string   // Optional alias for the result column
 }
 
 // CreateProcedureStmt represents a CREATE PROCEDURE statement.
@@ -717,7 +945,7 @@ type AggregateExpr struct {
 //
 // SQL Syntax:
 //
-//	CREATE PROCEDURE <name>([<param1> <type1>, ...])
+//	CREATE [OR REPLACE] PROCEDURE [IF NOT EXISTS] <name>([<param1> <type1>, ...])
 //	BEGIN
 //	    <statements>
 //	END
@@ -729,15 +957,22 @@ type AggregateExpr struct {
 //	    SELECT * FROM users WHERE id = $1;
 //	END
 //
-//	CREATE PROCEDURE update_status(id INT, status TEXT)
+//	CREATE PROCEDURE IF NOT EXISTS update_status(id INT, status TEXT)
+//	BEGIN
+//	    UPDATE orders SET status = $2 WHERE id = $1;
+//	END
+//
+//	CREATE OR REPLACE PROCEDURE update_status(id INT, status TEXT)
 //	BEGIN
 //	    UPDATE orders SET status = $2 WHERE id = $1;
 //	END
 type CreateProcedureStmt struct {
-	Name       string           // Procedure name
-	Parameters []ProcedureParam // Input parameters
-	Body       []Statement      // SQL statements in the procedure body
-	BodySQL    []string         // Raw SQL strings for the body (for storage)
+	Name        string           // Procedure name
+	IfNotExists bool             // If true, don't error if procedure already exists
+	OrReplace   bool             // If true, replace existing procedure
+	Parameters  []ProcedureParam // Input parameters
+	Body        []Statement      // SQL statements in the procedure body
+	BodySQL     []string         // Raw SQL strings for the body (for storage)
 }
 
 // statementNode implements the Statement interface.
@@ -771,9 +1006,15 @@ func (s CallStmt) statementNode() {}
 //
 // SQL Syntax:
 //
-//	DROP PROCEDURE <name>
+//	DROP PROCEDURE [IF EXISTS] <name>
+//
+// Examples:
+//
+//	DROP PROCEDURE get_user
+//	DROP PROCEDURE IF EXISTS get_user
 type DropProcedureStmt struct {
-	Name string // Procedure name to drop
+	Name     string // Procedure name to drop
+	IfExists bool   // If true, don't error if procedure doesn't exist
 }
 
 // statementNode implements the Statement interface.
@@ -791,15 +1032,18 @@ type StoredProcedure struct {
 //
 // SQL Syntax:
 //
-//	CREATE VIEW <view_name> AS SELECT ...
+//	CREATE [OR REPLACE] VIEW [IF NOT EXISTS] <view_name> AS SELECT ...
 //
 // Examples:
 //
 //	CREATE VIEW active_users AS SELECT * FROM users WHERE status = 'active'
-//	CREATE VIEW order_summary AS SELECT user_id, COUNT(*) FROM orders GROUP BY user_id
+//	CREATE VIEW IF NOT EXISTS order_summary AS SELECT user_id, COUNT(*) FROM orders GROUP BY user_id
+//	CREATE OR REPLACE VIEW active_users AS SELECT * FROM users WHERE status = 'active'
 type CreateViewStmt struct {
-	ViewName string      // The name of the view
-	Query    *SelectStmt // The SELECT query that defines the view
+	ViewName    string      // The name of the view
+	IfNotExists bool        // If true, don't error if view already exists
+	OrReplace   bool        // If true, replace existing view
+	Query       *SelectStmt // The SELECT query that defines the view
 }
 
 // statementNode implements the Statement interface.
@@ -810,13 +1054,15 @@ func (s CreateViewStmt) statementNode() {}
 //
 // SQL Syntax:
 //
-//	DROP VIEW <view_name>
+//	DROP VIEW [IF EXISTS] <view_name>
 //
-// Example:
+// Examples:
 //
 //	DROP VIEW active_users
+//	DROP VIEW IF EXISTS active_users
 type DropViewStmt struct {
 	ViewName string // The name of the view to drop
+	IfExists bool   // If true, don't error if view doesn't exist
 }
 
 // statementNode implements the Statement interface.
@@ -891,7 +1137,7 @@ const (
 //
 // SQL Syntax:
 //
-//	CREATE TRIGGER <trigger_name>
+//	CREATE [OR REPLACE] TRIGGER [IF NOT EXISTS] <trigger_name>
 //	  BEFORE|AFTER INSERT|UPDATE|DELETE ON <table_name>
 //	  FOR EACH ROW
 //	  EXECUTE <action_sql>
@@ -899,12 +1145,15 @@ const (
 // Examples:
 //
 //	CREATE TRIGGER log_insert AFTER INSERT ON users FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ('insert', 'users')
-//	CREATE TRIGGER validate_update BEFORE UPDATE ON products FOR EACH ROW EXECUTE SELECT validate_product()
+//	CREATE TRIGGER IF NOT EXISTS validate_update BEFORE UPDATE ON products FOR EACH ROW EXECUTE SELECT validate_product()
+//	CREATE OR REPLACE TRIGGER log_insert AFTER INSERT ON users FOR EACH ROW EXECUTE INSERT INTO audit_log VALUES ('insert', 'users')
 //
 // Triggers are executed automatically when the specified event occurs on the table.
 // BEFORE triggers execute before the operation, AFTER triggers execute after.
 type CreateTriggerStmt struct {
 	TriggerName string        // The name of the trigger (unique per table)
+	IfNotExists bool          // If true, don't error if trigger already exists
+	OrReplace   bool          // If true, replace existing trigger
 	Timing      TriggerTiming // BEFORE or AFTER
 	Event       TriggerEvent  // INSERT, UPDATE, or DELETE
 	TableName   string        // The table the trigger is attached to
@@ -919,14 +1168,16 @@ func (s CreateTriggerStmt) statementNode() {}
 //
 // SQL Syntax:
 //
-//	DROP TRIGGER <trigger_name> ON <table_name>
+//	DROP TRIGGER [IF EXISTS] <trigger_name> ON <table_name>
 //
-// Example:
+// Examples:
 //
 //	DROP TRIGGER log_insert ON users
+//	DROP TRIGGER IF EXISTS log_insert ON users
 type DropTriggerStmt struct {
 	TriggerName string // The name of the trigger to drop
 	TableName   string // The table the trigger is attached to
+	IfExists    bool   // If true, don't error if trigger doesn't exist
 }
 
 // statementNode implements the Statement interface.
@@ -940,3 +1191,39 @@ type Trigger struct {
 	TableName string        // The table the trigger is attached to
 	ActionSQL string        // The SQL statement to execute
 }
+
+// DropTableStmt represents a DROP TABLE statement.
+// It removes a table and all its data from the database.
+//
+// SQL Syntax:
+//
+//	DROP TABLE [IF EXISTS] <table_name>
+//
+// Example:
+//
+//	DROP TABLE users
+//	DROP TABLE IF EXISTS temp_data
+type DropTableStmt struct {
+	TableName string // The name of the table to drop
+	IfExists  bool   // If true, don't error if table doesn't exist
+}
+
+// statementNode implements the Statement interface.
+func (s DropTableStmt) statementNode() {}
+
+// TruncateTableStmt represents a TRUNCATE TABLE statement.
+// It removes all rows from a table but keeps the table structure.
+//
+// SQL Syntax:
+//
+//	TRUNCATE TABLE <table_name>
+//
+// Example:
+//
+//	TRUNCATE TABLE logs
+type TruncateTableStmt struct {
+	TableName string // The name of the table to truncate
+}
+
+// statementNode implements the Statement interface.
+func (s TruncateTableStmt) statementNode() {}
