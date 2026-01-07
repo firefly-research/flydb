@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"flydb/internal/logging"
 )
@@ -68,18 +69,34 @@ func NewBinaryHandler(executor QueryExecutor, prepMgr PreparedStatementManager, 
 // HandleConnection handles a single binary protocol connection.
 func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 	remoteAddr := conn.RemoteAddr().String()
-	log.Debug("Binary connection established", "remote_addr", remoteAddr)
+	connStart := time.Now()
+
+	log.Info("Binary connection established",
+		"remote_addr", remoteAddr,
+		"local_addr", conn.LocalAddr().String(),
+	)
 
 	h.mu.Lock()
 	h.connections[conn] = true
+	activeConns := len(h.connections)
 	h.mu.Unlock()
 
+	log.Debug("Active binary connections", "count", activeConns)
+
 	defer func() {
+		connDuration := time.Since(connStart)
+
 		h.mu.Lock()
 		delete(h.connections, conn)
+		remainingConns := len(h.connections)
 		h.mu.Unlock()
+
 		conn.Close()
-		log.Debug("Binary connection closed", "remote_addr", remoteAddr)
+		log.Info("Binary connection terminated",
+			"remote_addr", remoteAddr,
+			"duration", connDuration,
+			"remaining_connections", remainingConns,
+		)
 	}()
 
 	reader := bufio.NewReader(conn)

@@ -81,6 +81,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"flydb/internal/auth"
 	"flydb/internal/errors"
@@ -537,32 +538,52 @@ func (s *Server) broadcastInsert(table string, data string) {
 func (s *Server) handleConnection(conn net.Conn) {
 	remoteAddr := conn.RemoteAddr().String()
 	connLog := log.With("remote_addr", remoteAddr)
+	connStart := time.Now()
+
+	connLog.Info("New client connection established",
+		"local_addr", conn.LocalAddr().String(),
+		"protocol", "text",
+	)
 
 	// Deferred cleanup: remove subscriptions, rollback transactions, and close connection.
 	defer func() {
+		connDuration := time.Since(connStart)
+
 		// Remove this connection from all subscription lists.
 		s.subMu.Lock()
+		subscriptionCount := 0
 		for _, subs := range s.subscribers {
-			delete(subs, conn)
+			if _, ok := subs[conn]; ok {
+				subscriptionCount++
+				delete(subs, conn)
+			}
 		}
 		s.subMu.Unlock()
 
 		// Remove the connection from the authenticated users map.
 		s.connsMu.Lock()
+		username := s.conns[conn]
 		delete(s.conns, conn)
 		s.connsMu.Unlock()
 
 		// Rollback any active transaction for this connection.
 		s.txMu.Lock()
+		hadTransaction := false
 		if tx, ok := s.transactions[conn]; ok && tx != nil && tx.IsActive() {
-			connLog.Debug("Rolling back active transaction on disconnect")
+			connLog.Info("Rolling back active transaction on disconnect")
 			tx.Rollback()
+			hadTransaction = true
 		}
 		delete(s.transactions, conn)
 		s.txMu.Unlock()
 
 		// Close the TCP connection.
-		connLog.Debug("Connection closed")
+		connLog.Info("Client connection terminated",
+			"duration", connDuration,
+			"username", username,
+			"subscriptions_cleaned", subscriptionCount,
+			"had_active_transaction", hadTransaction,
+		)
 		conn.Close()
 	}()
 
