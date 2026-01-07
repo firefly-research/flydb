@@ -70,6 +70,14 @@ type TxOperation struct {
 	Value []byte
 }
 
+// Savepoint represents a savepoint within a transaction.
+type Savepoint struct {
+	Name           string
+	BufferPosition int               // Position in buffer when savepoint was created
+	ReadCacheSnap  map[string][]byte // Snapshot of readCache
+	DeleteSetSnap  map[string]bool   // Snapshot of deleteSet
+}
+
 // Transaction represents an active database transaction.
 // It buffers all writes until Commit is called, at which point
 // they are applied atomically to the underlying storage.
@@ -82,6 +90,7 @@ type Transaction struct {
 	readCache  map[string][]byte // Cache of values read/written in this tx
 	deleteSet  map[string]bool   // Keys marked for deletion
 	state      TxState
+	savepoints []Savepoint // Stack of savepoints
 	mu         sync.Mutex
 }
 
@@ -89,11 +98,12 @@ type Transaction struct {
 // The transaction starts in the Active state.
 func NewTransaction(store *KVStore) *Transaction {
 	return &Transaction{
-		store:     store,
-		buffer:    make([]TxOperation, 0),
-		readCache: make(map[string][]byte),
-		deleteSet: make(map[string]bool),
-		state:     TxStateActive,
+		store:      store,
+		buffer:     make([]TxOperation, 0),
+		readCache:  make(map[string][]byte),
+		deleteSet:  make(map[string]bool),
+		state:      TxStateActive,
+		savepoints: make([]Savepoint, 0),
 	}
 }
 
@@ -256,3 +266,105 @@ func (tx *Transaction) State() TxState {
 	return tx.state
 }
 
+// CreateSavepoint creates a savepoint with the given name.
+// The savepoint captures the current state of the transaction buffer.
+func (tx *Transaction) CreateSavepoint(name string) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if tx.state != TxStateActive {
+		return errors.New("transaction is not active")
+	}
+
+	// Create snapshots of current state
+	readCacheSnap := make(map[string][]byte)
+	for k, v := range tx.readCache {
+		readCacheSnap[k] = v
+	}
+	deleteSetSnap := make(map[string]bool)
+	for k, v := range tx.deleteSet {
+		deleteSetSnap[k] = v
+	}
+
+	tx.savepoints = append(tx.savepoints, Savepoint{
+		Name:           name,
+		BufferPosition: len(tx.buffer),
+		ReadCacheSnap:  readCacheSnap,
+		DeleteSetSnap:  deleteSetSnap,
+	})
+
+	return nil
+}
+
+// RollbackToSavepoint rolls back to the specified savepoint.
+// All changes made after the savepoint are discarded.
+func (tx *Transaction) RollbackToSavepoint(name string) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if tx.state != TxStateActive {
+		return errors.New("transaction is not active")
+	}
+
+	// Find the savepoint
+	idx := -1
+	for i, sp := range tx.savepoints {
+		if sp.Name == name {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		return errors.New("savepoint not found: " + name)
+	}
+
+	sp := tx.savepoints[idx]
+
+	// Rollback buffer to savepoint position
+	tx.buffer = tx.buffer[:sp.BufferPosition]
+
+	// Restore readCache and deleteSet
+	tx.readCache = make(map[string][]byte)
+	for k, v := range sp.ReadCacheSnap {
+		tx.readCache[k] = v
+	}
+	tx.deleteSet = make(map[string]bool)
+	for k, v := range sp.DeleteSetSnap {
+		tx.deleteSet[k] = v
+	}
+
+	// Remove savepoints after this one (but keep this one)
+	tx.savepoints = tx.savepoints[:idx+1]
+
+	return nil
+}
+
+// ReleaseSavepoint releases (destroys) the specified savepoint.
+// The savepoint is removed but changes are kept.
+func (tx *Transaction) ReleaseSavepoint(name string) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if tx.state != TxStateActive {
+		return errors.New("transaction is not active")
+	}
+
+	// Find and remove the savepoint
+	idx := -1
+	for i, sp := range tx.savepoints {
+		if sp.Name == name {
+			idx = i
+			break
+		}
+	}
+
+	if idx == -1 {
+		return errors.New("savepoint not found: " + name)
+	}
+
+	// Remove the savepoint
+	tx.savepoints = append(tx.savepoints[:idx], tx.savepoints[idx+1:]...)
+
+	return nil
+}
