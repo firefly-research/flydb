@@ -89,7 +89,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"flydb/internal/banner"
@@ -337,8 +336,11 @@ func parseFlags() CLIFlags {
 // printUsage prints comprehensive help information.
 func printUsage() {
 	fmt.Println()
-	fmt.Println(cli.Highlight("FlyDB CLI - Interactive Database Client"))
-	fmt.Printf("Version: %s\n\n", banner.Version)
+	fmt.Println("╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║" + cli.Highlight("           FlyDB CLI - Interactive Database Client              ") + "║")
+	fmt.Printf("║                       Version %-36s║\n", banner.Version)
+	fmt.Println("╚══════════════════════════════════════════════════════════════════╝")
+	fmt.Println()
 
 	fmt.Println(cli.Highlight("USAGE:"))
 	fmt.Println("  fly-cli [flags]")
@@ -346,46 +348,46 @@ func printUsage() {
 	fmt.Println()
 
 	fmt.Println(cli.Highlight("FLAGS:"))
-	fmt.Println("  -H, --host <host>      Server hostname or IP address (default: localhost)")
-	fmt.Println("  -p, --port <port>      Server port number (default: 8889)")
-	fmt.Println("  -v, --version          Print version information and exit")
-	fmt.Println("      --help             Show this help message")
-	fmt.Println("      --verbose          Enable verbose output")
-	fmt.Println("      --debug            Enable debug mode with detailed logging")
-	fmt.Println("  -f, --format <format>  Output format: table, json, plain (default: table)")
-	fmt.Println("      --no-color         Disable colored output")
-	fmt.Println("  -e, --execute <cmd>    Execute a command and exit")
-	fmt.Println("  -c, --config <file>    Path to configuration file")
+	fmt.Printf("  %s, %s <host>      Server hostname or IP (default: localhost)\n", cli.Info("-H"), cli.Info("--host"))
+	fmt.Printf("  %s, %s <port>      Server port number (default: 8889)\n", cli.Info("-p"), cli.Info("--port"))
+	fmt.Printf("  %s, %s          Print version information and exit\n", cli.Info("-v"), cli.Info("--version"))
+	fmt.Printf("      %s             Show this help message\n", cli.Info("--help"))
+	fmt.Printf("      %s          Enable verbose output with timing\n", cli.Info("--verbose"))
+	fmt.Printf("      %s            Enable debug mode with detailed logging\n", cli.Info("--debug"))
+	fmt.Printf("  %s, %s <format>  Output format: table, json, plain\n", cli.Info("-f"), cli.Info("--format"))
+	fmt.Printf("      %s         Disable colored output\n", cli.Info("--no-color"))
+	fmt.Printf("  %s, %s <cmd>    Execute a command and exit\n", cli.Info("-e"), cli.Info("--execute"))
+	fmt.Printf("  %s, %s <file>    Path to configuration file\n", cli.Info("-c"), cli.Info("--config"))
 	fmt.Println()
 
 	fmt.Println(cli.Highlight("EXAMPLES:"))
 	fmt.Println(cli.Dimmed("  # Connect to local server"))
-	fmt.Println(cli.Info("  fly-cli"))
+	fmt.Println("  " + cli.Success("fly-cli"))
 	fmt.Println()
 	fmt.Println(cli.Dimmed("  # Connect to remote server"))
-	fmt.Println(cli.Info("  fly-cli -H 192.168.1.100 -p 8889"))
+	fmt.Println("  " + cli.Success("fly-cli -H 192.168.1.100 -p 8889"))
 	fmt.Println()
 	fmt.Println(cli.Dimmed("  # Execute a query and exit"))
-	fmt.Println(cli.Info("  fly-cli -e \"SELECT * FROM users\""))
+	fmt.Println("  " + cli.Success("fly-cli -e \"SELECT * FROM users\""))
 	fmt.Println()
 	fmt.Println(cli.Dimmed("  # Get JSON output"))
-	fmt.Println(cli.Info("  fly-cli -f json -e \"SELECT * FROM users\""))
+	fmt.Println("  " + cli.Success("fly-cli -f json -e \"SELECT * FROM users\""))
 	fmt.Println()
 
 	fmt.Println(cli.Highlight("INTERACTIVE COMMANDS:"))
-	fmt.Println("  \\q, \\quit              Exit the CLI")
-	fmt.Println("  \\h, \\help              Display help information")
-	fmt.Println("  \\c, \\clear             Clear the screen")
-	fmt.Println("  \\s, \\status            Show connection status")
+	fmt.Printf("  %s, %s              Exit the CLI\n", cli.Info("\\q"), cli.Info("\\quit"))
+	fmt.Printf("  %s, %s              Display help information\n", cli.Info("\\h"), cli.Info("\\help"))
+	fmt.Printf("  %s, %s             Clear the screen\n", cli.Info("\\c"), cli.Info("\\clear"))
+	fmt.Printf("  %s, %s            Show connection status\n", cli.Info("\\s"), cli.Info("\\status"))
 	fmt.Println()
 
 	fmt.Println(cli.Highlight("ENVIRONMENT VARIABLES:"))
-	fmt.Println("  FLYDB_HOST             Default server host")
-	fmt.Println("  FLYDB_PORT             Default server port")
-	fmt.Println("  NO_COLOR               Disable colored output")
+	fmt.Printf("  %s             Default server host\n", cli.Info("FLYDB_HOST"))
+	fmt.Printf("  %s             Default server port\n", cli.Info("FLYDB_PORT"))
+	fmt.Printf("  %s               Disable colored output\n", cli.Info("NO_COLOR"))
 	fmt.Println()
 
-	fmt.Println("For more information, visit: https://github.com/flydb/flydb")
+	fmt.Println(cli.Dimmed("For more information, visit: https://github.com/flydb/flydb"))
 }
 
 // main is the entry point for the fly-cli application.
@@ -542,10 +544,12 @@ func startREPL(config CLIConfig) {
 		os.Exit(0)
 	}
 
-	fmt.Printf("%s Type %s to quit, %s for help.\n",
-		cli.Success("Ready."),
+	fmt.Println()
+	fmt.Println(cli.Success("✓ Connected to FlyDB server"))
+	fmt.Printf("  Type %s to quit, %s for help\n",
 		cli.Highlight("\\q"),
 		cli.Highlight("\\h"))
+	fmt.Println()
 
 	// Create scanner for reading user input
 	scanner := bufio.NewScanner(os.Stdin)
@@ -553,7 +557,7 @@ func startREPL(config CLIConfig) {
 	// Main REPL loop: continuously read, evaluate, and print.
 	for {
 		// Display the prompt and read user input.
-		fmt.Print(cli.Info("flydb") + "> ")
+		fmt.Print(cli.Info("flydb") + cli.Dimmed(">") + " ")
 		if !scanner.Scan() {
 			// EOF or error reading input - exit gracefully.
 			fmt.Println()
@@ -755,18 +759,25 @@ func handleLocalCommand(cmd string, config CLIConfig, client *BinaryClient) {
 // printStatus displays the current connection status.
 func printStatus(config CLIConfig, client *BinaryClient) {
 	fmt.Println()
-	fmt.Println(cli.Highlight("Connection Status"))
-	fmt.Println(cli.Separator(40))
-	cli.KeyValue("Server", config.Host+":"+config.Port, 15)
-	cli.KeyValue("Protocol", "Binary", 15)
-	cli.KeyValue("Output Format", string(config.Format), 15)
+	fmt.Println("╔════════════════════════════════════════╗")
+	fmt.Println("║" + cli.Highlight("        Connection Status              ") + "║")
+	fmt.Println("╠════════════════════════════════════════╣")
 
-	// Check connection
+	// Check connection status
+	var statusIcon, statusText string
 	if client.IsConnected() {
-		cli.KeyValue("Status", cli.Success("Connected"), 15)
+		statusIcon = cli.Success("●")
+		statusText = cli.Success("Connected")
 	} else {
-		cli.KeyValue("Status", cli.Error("Disconnected"), 15)
+		statusIcon = cli.Error("●")
+		statusText = cli.Error("Disconnected")
 	}
+
+	fmt.Printf("║  Status:        %s %-19s║\n", statusIcon, statusText)
+	fmt.Printf("║  Server:        %-22s║\n", config.Host+":"+config.Port)
+	fmt.Printf("║  Protocol:      %-22s║\n", "Binary")
+	fmt.Printf("║  Output Format: %-22s║\n", string(config.Format))
+	fmt.Println("╚════════════════════════════════════════╝")
 	fmt.Println()
 }
 
@@ -774,56 +785,76 @@ func printStatus(config CLIConfig, client *BinaryClient) {
 // This function provides users with a quick reference for available commands.
 func printHelp() {
 	fmt.Println()
-	fmt.Printf("%s (Binary Protocol)\n", cli.Highlight("FlyDB CLI v"+banner.Version))
-	fmt.Println(cli.Separator(50))
+	fmt.Println("╔══════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║" + cli.Highlight("                    FlyDB CLI Help                              ") + "║")
+	fmt.Printf("║                    Version %-39s║\n", banner.Version)
+	fmt.Println("╚══════════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("Local Commands:"))
-	fmt.Println("  \\q, \\quit      Exit the CLI")
-	fmt.Println("  \\h, \\help      Display this help message")
-	fmt.Println("  \\c, \\clear     Clear the screen")
-	fmt.Println("  \\s, \\status    Show connection status")
-	fmt.Println("  \\v, \\version   Show version information")
+	fmt.Println(cli.Highlight("┌─ Local Commands ─────────────────────────────────────────────────┐"))
+	fmt.Println("│  " + cli.Info("\\q") + ", " + cli.Info("\\quit") + "      Exit the CLI                                   │")
+	fmt.Println("│  " + cli.Info("\\h") + ", " + cli.Info("\\help") + "      Display this help message                       │")
+	fmt.Println("│  " + cli.Info("\\c") + ", " + cli.Info("\\clear") + "     Clear the screen                                 │")
+	fmt.Println("│  " + cli.Info("\\s") + ", " + cli.Info("\\status") + "    Show connection status                           │")
+	fmt.Println("│  " + cli.Info("\\v") + ", " + cli.Info("\\version") + "   Show version information                         │")
+	fmt.Println("└──────────────────────────────────────────────────────────────────┘")
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("Server Commands:"))
-	fmt.Println("  PING                Test server connectivity")
-	fmt.Println("  AUTH <user> <pwd>   Authenticate with the server")
+	fmt.Println(cli.Highlight("┌─ Server Commands ────────────────────────────────────────────────┐"))
+	fmt.Println("│  " + cli.Info("PING") + "                Test server connectivity                   │")
+	fmt.Println("│  " + cli.Info("AUTH") + " <user> <pwd>   Authenticate with the server               │")
+	fmt.Println("└──────────────────────────────────────────────────────────────────┘")
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("SQL Commands (auto-detected):"))
-	fmt.Println("  SELECT ...          Query data from tables")
-	fmt.Println("  INSERT ...          Insert new rows")
-	fmt.Println("  UPDATE ...          Modify existing rows")
-	fmt.Println("  DELETE ...          Remove rows")
-	fmt.Println("  CREATE TABLE ...    Create a new table")
-	fmt.Println("  CREATE INDEX ...    Create an index on a column")
-	fmt.Println("  CREATE USER ...     Create a new user")
-	fmt.Println("  GRANT ...           Grant permissions to a user")
+	fmt.Println(cli.Highlight("┌─ SQL Commands ") + cli.Dimmed("(auto-detected)") + cli.Highlight(" ────────────────────────────────────┐"))
+	fmt.Println("│  " + cli.Info("SELECT") + " ...          Query data from tables                     │")
+	fmt.Println("│  " + cli.Info("INSERT") + " ...          Insert new rows                            │")
+	fmt.Println("│  " + cli.Info("UPDATE") + " ...          Modify existing rows                       │")
+	fmt.Println("│  " + cli.Info("DELETE") + " ...          Remove rows                                │")
+	fmt.Println("│  " + cli.Info("CREATE TABLE") + " ...    Create a new table                         │")
+	fmt.Println("│  " + cli.Info("CREATE INDEX") + " ...    Create an index on a column                │")
+	fmt.Println("│  " + cli.Info("CREATE USER") + " ...     Create a new user                          │")
+	fmt.Println("│  " + cli.Info("GRANT") + " ...           Grant permissions to a user                │")
+	fmt.Println("└──────────────────────────────────────────────────────────────────┘")
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("Prepared Statements:"))
-	fmt.Println("  PREPARE <name> AS <query>   Compile a query for reuse")
-	fmt.Println("  EXECUTE <name> [USING ...]  Run a prepared statement")
-	fmt.Println("  DEALLOCATE <name>           Remove a prepared statement")
+	fmt.Println(cli.Highlight("┌─ Prepared Statements ────────────────────────────────────────────┐"))
+	fmt.Println("│  " + cli.Info("PREPARE") + " <name> AS <query>   Compile a query for reuse         │")
+	fmt.Println("│  " + cli.Info("EXECUTE") + " <name> [USING ...]  Run a prepared statement          │")
+	fmt.Println("│  " + cli.Info("DEALLOCATE") + " <name>           Remove a prepared statement       │")
+	fmt.Println("└──────────────────────────────────────────────────────────────────┘")
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("Transactions:"))
-	fmt.Println("  BEGIN               Start a transaction")
-	fmt.Println("  COMMIT              Commit the transaction")
-	fmt.Println("  ROLLBACK            Rollback the transaction")
+	fmt.Println(cli.Highlight("┌─ Transactions ────────────────────────────────────────────────────┐"))
+	fmt.Println("│  " + cli.Info("BEGIN") + "               Start a transaction                        │")
+	fmt.Println("│  " + cli.Info("COMMIT") + "              Commit the transaction                     │")
+	fmt.Println("│  " + cli.Info("ROLLBACK") + "            Rollback the transaction                   │")
+	fmt.Println("└───────────────────────────────────────────────────────────────────┘")
 	fmt.Println()
 
-	fmt.Println(cli.Highlight("Introspection:"))
-	fmt.Println("  INTROSPECT USERS            List all database users")
-	fmt.Println("  INTROSPECT DATABASES        Show database information")
-	fmt.Println("  INTROSPECT DATABASE <name>  Detailed info for a database")
-	fmt.Println("  INTROSPECT TABLES           List all tables with schemas")
-	fmt.Println("  INTROSPECT TABLE <name>     Detailed info for a table")
-	fmt.Println("  INTROSPECT INDEXES          List all indexes")
+	fmt.Println(cli.Highlight("┌─ Introspection ───────────────────────────────────────────────────┐"))
+	fmt.Println("│  " + cli.Info("INTROSPECT USERS") + "            List all database users            │")
+	fmt.Println("│  " + cli.Info("INTROSPECT TABLES") + "           List all tables with schemas       │")
+	fmt.Println("│  " + cli.Info("INTROSPECT TABLE") + " <name>     Detailed info for a table          │")
+	fmt.Println("│  " + cli.Info("INTROSPECT INDEXES") + "          List all indexes                   │")
+	fmt.Println("│  " + cli.Info("INTROSPECT SERVER") + "           Show server/daemon information     │")
+	fmt.Println("│  " + cli.Info("INTROSPECT STATUS") + "           Show database status & statistics  │")
+	fmt.Println("└───────────────────────────────────────────────────────────────────┘")
 	fmt.Println()
 
-	fmt.Println(cli.Dimmed("Tip: SQL commands are auto-detected, no prefix needed."))
+	fmt.Println(cli.Highlight("┌─ Quick Examples ──────────────────────────────────────────────────┐"))
+	fmt.Println("│  " + cli.Dimmed("# Create a table") + "                                               │")
+	fmt.Println("│  " + cli.Success("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)") + "            │")
+	fmt.Println("│                                                                   │")
+	fmt.Println("│  " + cli.Dimmed("# Insert data") + "                                                  │")
+	fmt.Println("│  " + cli.Success("INSERT INTO users VALUES (1, 'Alice')") + "                         │")
+	fmt.Println("│                                                                   │")
+	fmt.Println("│  " + cli.Dimmed("# Query data") + "                                                   │")
+	fmt.Println("│  " + cli.Success("SELECT * FROM users WHERE id = 1") + "                              │")
+	fmt.Println("└───────────────────────────────────────────────────────────────────┘")
+	fmt.Println()
+
+	fmt.Println(cli.Dimmed("💡 Tip: SQL commands are auto-detected, no prefix needed."))
 	fmt.Println()
 }
 
@@ -911,7 +942,7 @@ func printResponseAsJSON(response string) {
 	fmt.Println(string(data))
 }
 
-// formatSelectResult formats SELECT query results as a pretty-printed table.
+// formatSelectResult formats SELECT query results as a professional grid table.
 // It parses the response which contains data rows followed by a row count.
 func formatSelectResult(response string) {
 	lines := strings.Split(response, "\n")
@@ -925,7 +956,10 @@ func formatSelectResult(response string) {
 
 	// Handle empty result set
 	if len(dataLines) == 0 {
-		fmt.Println(rowCountLine)
+		fmt.Println()
+		fmt.Println(cli.Dimmed("  (empty result set)"))
+		fmt.Println(cli.Dimmed("  " + rowCountLine))
+		fmt.Println()
 		return
 	}
 
@@ -940,13 +974,19 @@ func formatSelectResult(response string) {
 	}
 
 	if len(rows) == 0 {
-		fmt.Println(rowCountLine)
+		fmt.Println()
+		fmt.Println(cli.Dimmed("  (empty result set)"))
+		fmt.Println(cli.Dimmed("  " + rowCountLine))
+		fmt.Println()
 		return
 	}
 
-	// Calculate maximum width for each column
+	// Calculate maximum width for each column (minimum width of 3 for aesthetics)
 	numCols := len(rows[0])
 	colWidths := make([]int, numCols)
+	for i := range colWidths {
+		colWidths[i] = 3 // Minimum column width
+	}
 	for _, row := range rows {
 		for i, col := range row {
 			if i < numCols && len(col) > colWidths[i] {
@@ -955,16 +995,48 @@ func formatSelectResult(response string) {
 		}
 	}
 
-	// Build the separator line
+	// Unicode box-drawing characters for professional grid
+	const (
+		topLeft     = "┌"
+		topRight    = "┐"
+		bottomLeft  = "└"
+		bottomRight = "┘"
+		horizontal  = "─"
+		vertical    = "│"
+		topT        = "┬"
+		bottomT     = "┴"
+		leftT       = "├"
+		rightT      = "┤"
+		cross       = "┼"
+	)
+
+	// Build the top border
+	var topParts []string
+	for _, width := range colWidths {
+		topParts = append(topParts, strings.Repeat(horizontal, width+2))
+	}
+	topBorder := topLeft + strings.Join(topParts, topT) + topRight
+
+	// Build the separator line (between header and data, or between rows)
 	var sepParts []string
 	for _, width := range colWidths {
-		sepParts = append(sepParts, strings.Repeat("-", width+2))
+		sepParts = append(sepParts, strings.Repeat(horizontal, width+2))
 	}
-	separator := "+" + strings.Join(sepParts, "+") + "+"
+	separator := leftT + strings.Join(sepParts, cross) + rightT
 
-	// Print the table
-	fmt.Println(separator)
-	for _, row := range rows {
+	// Build the bottom border
+	var bottomParts []string
+	for _, width := range colWidths {
+		bottomParts = append(bottomParts, strings.Repeat(horizontal, width+2))
+	}
+	bottomBorder := bottomLeft + strings.Join(bottomParts, bottomT) + bottomRight
+
+	fmt.Println()
+
+	// Print the table with professional grid
+	fmt.Println(cli.Dimmed(topBorder))
+
+	for rowIdx, row := range rows {
 		var rowParts []string
 		for i, col := range row {
 			if i < numCols {
@@ -973,34 +1045,107 @@ func formatSelectResult(response string) {
 				rowParts = append(rowParts, padded)
 			}
 		}
-		fmt.Println("|" + strings.Join(rowParts, "|") + "|")
-	}
-	fmt.Println(separator)
+		// Handle rows with fewer columns than expected
+		for i := len(row); i < numCols; i++ {
+			padded := fmt.Sprintf(" %-*s ", colWidths[i], "")
+			rowParts = append(rowParts, padded)
+		}
+		fmt.Println(cli.Dimmed(vertical) + strings.Join(rowParts, cli.Dimmed(vertical)) + cli.Dimmed(vertical))
 
-	// Print the row count
-	fmt.Println(rowCountLine)
+		// Print separator after first row (header) if there are multiple rows
+		if rowIdx == 0 && len(rows) > 1 {
+			fmt.Println(cli.Dimmed(separator))
+		}
+	}
+
+	fmt.Println(cli.Dimmed(bottomBorder))
+
+	// Print the row count with formatting
+	rowCount := len(rows)
+	if rowCount == 1 {
+		// Check if this is a header-only result or actual data
+		fmt.Println(cli.Success(fmt.Sprintf("  %d row returned", rowCount)))
+	} else {
+		fmt.Println(cli.Success(fmt.Sprintf("  %d rows returned", rowCount)))
+	}
+	fmt.Println()
 }
 
-// formatTable pretty-prints tabular data using aligned columns.
-// It converts comma-separated values into a nicely formatted table
-// using Go's tabwriter package for column alignment.
+// formatTable pretty-prints tabular data using a professional grid layout.
+// It converts comma-separated values into a nicely formatted table.
 func formatTable(data string) {
-	// Create a tabwriter for aligned column output.
-	// Parameters: output, minwidth, tabwidth, padding, padchar, flags
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-
 	// Process each line of the response.
 	lines := strings.Split(data, "\n")
+	var rows [][]string
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		// Convert comma-space separators to tabs for tabwriter.
-		// This assumes values don't contain ", " - a limitation of the simple protocol.
-		row := strings.ReplaceAll(line, ", ", "\t")
-		fmt.Fprintln(w, row)
+		cols := strings.Split(line, ", ")
+		rows = append(rows, cols)
 	}
 
-	// Flush the tabwriter to ensure all output is written.
-	w.Flush()
+	if len(rows) == 0 {
+		return
+	}
+
+	// Calculate maximum width for each column
+	numCols := 0
+	for _, row := range rows {
+		if len(row) > numCols {
+			numCols = len(row)
+		}
+	}
+
+	colWidths := make([]int, numCols)
+	for i := range colWidths {
+		colWidths[i] = 3 // Minimum column width
+	}
+	for _, row := range rows {
+		for i, col := range row {
+			if i < numCols && len(col) > colWidths[i] {
+				colWidths[i] = len(col)
+			}
+		}
+	}
+
+	// Unicode box-drawing characters
+	const (
+		topLeft     = "┌"
+		topRight    = "┐"
+		bottomLeft  = "└"
+		bottomRight = "┘"
+		horizontal  = "─"
+		vertical    = "│"
+		topT        = "┬"
+		bottomT     = "┴"
+	)
+
+	// Build borders
+	var topParts, bottomParts []string
+	for _, width := range colWidths {
+		topParts = append(topParts, strings.Repeat(horizontal, width+2))
+		bottomParts = append(bottomParts, strings.Repeat(horizontal, width+2))
+	}
+	topBorder := topLeft + strings.Join(topParts, topT) + topRight
+	bottomBorder := bottomLeft + strings.Join(bottomParts, bottomT) + bottomRight
+
+	fmt.Println()
+	fmt.Println(cli.Dimmed(topBorder))
+
+	for _, row := range rows {
+		var rowParts []string
+		for i := 0; i < numCols; i++ {
+			val := ""
+			if i < len(row) {
+				val = row[i]
+			}
+			padded := fmt.Sprintf(" %-*s ", colWidths[i], val)
+			rowParts = append(rowParts, padded)
+		}
+		fmt.Println(cli.Dimmed(vertical) + strings.Join(rowParts, cli.Dimmed(vertical)) + cli.Dimmed(vertical))
+	}
+
+	fmt.Println(cli.Dimmed(bottomBorder))
+	fmt.Println()
 }
