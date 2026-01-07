@@ -1,6 +1,6 @@
 # Binaries
-fly-cli
-flydb
+/fly-cli
+/flydb
 *.exe
 *.exe~
 *.dll
