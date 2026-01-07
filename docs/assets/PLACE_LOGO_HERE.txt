@@ -1,0 +1,5 @@
+Place the FlyDB logo image in this directory and name it "logo.png"
+
+The logo should be the image you provided showing "flydb" text with an orange dot.
+
+After placing the logo.png file here, you can delete this placeholder text file.

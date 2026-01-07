@@ -1,4 +1,22 @@
-# FlyDB
+<div align="center">
+  <img src="docs/assets/logo.png" alt="FlyDB Logo" width="600">
+  
+  <h1>FlyDB</h1>
+  
+  <p><strong>A lightweight, distributed SQL database engine written in Go</strong></p>
+  
+  <p>
+    <a href="https://github.com/firefly-oss/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.1-blue.svg" alt="Version"></a>
+    <a href="https://github.com/firefly-oss/flydb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="License"></a>
+    <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.21%2B-00ADD8?logo=go" alt="Go Version"></a>
+    <a href="https://github.com/firefly-oss/flydb"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg" alt="Platform"></a>
+    <a href="https://github.com/firefly-oss/flydb/actions"><img src="https://img.shields.io/badge/build-passing-brightgreen.svg" alt="Build Status"></a>
+    <a href="https://github.com/firefly-oss/flydb/issues"><img src="https://img.shields.io/github/issues/firefly-oss/flydb.svg" alt="Issues"></a>
+    <a href="https://github.com/firefly-oss/flydb/stargazers"><img src="https://img.shields.io/github/stars/firefly-oss/flydb.svg?style=social" alt="Stars"></a>
+  </p>
+</div>
+
+---
 
 FlyDB is a lightweight, distributed SQL database engine written in Go. It provides ACID-compliant storage through a Write-Ahead Log (WAL), supports SQL queries with JOIN operations, and includes built-in security features such as user authentication and Row-Level Security (RLS).
 
