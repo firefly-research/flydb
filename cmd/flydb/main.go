@@ -74,11 +74,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"flydb/internal/auth"
 	"flydb/internal/banner"
+	"flydb/internal/config"
 	"flydb/internal/logging"
 	"flydb/internal/server"
 	"flydb/internal/storage"
@@ -86,13 +89,7 @@ import (
 	"flydb/pkg/cli"
 )
 
-// Environment variable names for configuration.
-const (
-	// EnvAdminPassword is the environment variable for setting the initial admin password.
-	// If set, this password will be used when initializing the admin user for the first time.
-	// If not set and admin doesn't exist, a random password will be generated.
-	EnvAdminPassword = "FLYDB_ADMIN_PASSWORD"
-)
+// Note: Environment variable names are now defined in internal/config package.
 
 // printUsage prints comprehensive help information.
 func printUsage() {
@@ -150,17 +147,32 @@ func printUsage() {
 // main is the entry point for the FlyDB server application.
 // It orchestrates the initialization of all subsystems and starts the server.
 func main() {
+	// Initialize the configuration manager and load from file/env
+	cfgMgr := config.Global()
+	if err := cfgMgr.Load(); err != nil {
+		// Non-fatal: continue with defaults if config file not found
+		// Only fail on parse errors
+		if config.FindConfigFile() != "" {
+			fmt.Fprintf(os.Stderr, "Warning: %v\n", err)
+		}
+	}
+
+	// Get the loaded configuration (may have file/env values)
+	cfg := cfgMgr.Get()
+
 	// Define command-line flags for configuration.
 	// These flags allow operators to customize the server behavior without
 	// modifying code, following the 12-factor app methodology.
-	port := flag.String("port", "8888", "Server port for client connections")
-	binaryPort := flag.String("binary-port", "8889", "Server port for binary protocol connections")
-	replPort := flag.String("repl-port", "9999", "Replication port (master only)")
-	role := flag.String("role", "master", "Server role: 'master', 'slave', or 'standalone'")
-	masterAddr := flag.String("master", "", "Master address (host:port) for slave mode")
-	dbPath := flag.String("db", "flydb.wal", "Path to the WAL database file")
-	logLevel := flag.String("log-level", "info", "Log level: debug, info, warn, error")
-	logJSON := flag.Bool("log-json", false, "Enable JSON log output")
+	// Default values come from the loaded configuration.
+	port := flag.String("port", strconv.Itoa(cfg.Port), "Server port for client connections")
+	binaryPort := flag.String("binary-port", strconv.Itoa(cfg.BinaryPort), "Server port for binary protocol connections")
+	replPort := flag.String("repl-port", strconv.Itoa(cfg.ReplPort), "Replication port (master only)")
+	role := flag.String("role", cfg.Role, "Server role: 'master', 'slave', or 'standalone'")
+	masterAddr := flag.String("master", cfg.MasterAddr, "Master address (host:port) for slave mode")
+	dbPath := flag.String("db", cfg.DBPath, "Path to the WAL database file")
+	logLevel := flag.String("log-level", cfg.LogLevel, "Log level: debug, info, warn, error")
+	logJSON := flag.Bool("log-json", cfg.LogJSON, "Enable JSON log output")
+	configFile := flag.String("config", "", "Path to configuration file")
 	showVersion := flag.Bool("version", false, "Show version information")
 	showHelp := flag.Bool("help", false, "Show help message")
 
@@ -180,47 +192,86 @@ func main() {
 		os.Exit(0)
 	}
 
+	// If a specific config file was provided, load it
+	if *configFile != "" {
+		if err := cfgMgr.LoadFromFile(*configFile); err != nil {
+			fmt.Fprintf(os.Stderr, "Error loading config file: %v\n", err)
+			os.Exit(1)
+		}
+		cfg = cfgMgr.Get()
+		// Re-apply defaults from new config for flags that weren't explicitly set
+	}
+
 	// Track if we're running in interactive wizard mode
 	useWizard := len(os.Args) == 1
 	var wizardConfig *wizard.Config
-	var adminPassword string
 
-	// If running in wizard mode, we need to get the dbPath first to check admin status
+	// If running in wizard mode, the wizard handles config loading and display
 	if useWizard {
-		// Run wizard without admin setup first to get basic config
+		// Run wizard - it will load existing config, display it, and prompt user
 		wizardConfig = wizard.Run()
 		if wizardConfig == nil {
 			// User cancelled the wizard
 			os.Exit(0)
 		}
-		// Apply wizard configuration to the flags
-		*port = wizardConfig.Port
-		*binaryPort = wizardConfig.BinaryPort
-		*replPort = wizardConfig.ReplPort
-		*role = wizardConfig.Role
-		*masterAddr = wizardConfig.MasterAddr
-		*dbPath = wizardConfig.DBPath
-		*logLevel = wizardConfig.LogLevel
-		*logJSON = wizardConfig.LogJSON
+		// Convert wizard config to main config and use it directly
+		// The wizard has already handled config file loading and saving
+		cfg = wizardConfig.ToConfig()
+
+		// If wizard saved a config file, update the ConfigFile path
+		if wizardConfig.ConfigFile != "" {
+			cfg.ConfigFile = wizardConfig.ConfigFile
+		}
 	} else {
 		// Display the startup banner with version and copyright information.
 		// This provides visual feedback that the server is starting.
 		banner.Print()
+
+		// Apply command-line flags to configuration (highest priority)
+		// Parse port strings to integers
+		if portInt, err := strconv.Atoi(*port); err == nil {
+			cfg.Port = portInt
+		}
+		if binaryPortInt, err := strconv.Atoi(*binaryPort); err == nil {
+			cfg.BinaryPort = binaryPortInt
+		}
+		if replPortInt, err := strconv.Atoi(*replPort); err == nil {
+			cfg.ReplPort = replPortInt
+		}
+		cfg.Role = *role
+		cfg.MasterAddr = *masterAddr
+		cfg.DBPath = *dbPath
+		cfg.LogLevel = *logLevel
+		cfg.LogJSON = *logJSON
 	}
 
+	// Validate the final configuration
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "Configuration error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Update the global configuration
+	cfgMgr.Set(cfg)
+
 	// Configure the logging system.
-	logging.SetGlobalLevel(logging.ParseLevel(*logLevel))
-	logging.SetJSONMode(*logJSON)
+	logging.SetGlobalLevel(logging.ParseLevel(cfg.LogLevel))
+	logging.SetJSONMode(cfg.LogJSON)
 
 	// Create the main logger for the daemon.
 	log := logging.NewLogger("main")
 
+	// Log configuration source if a file was loaded
+	if cfg.ConfigFile != "" {
+		log.Info("Configuration loaded", "file", cfg.ConfigFile)
+	}
+
 	log.Info("FlyDB server starting",
 		"version", "01.26.1",
-		"role", *role,
-		"port", *port,
-		"binary_port", *binaryPort,
-		"db_path", *dbPath,
+		"role", cfg.Role,
+		"port", cfg.Port,
+		"binary_port", cfg.BinaryPort,
+		"db_path", cfg.DBPath,
 	)
 
 	// Initialize the Storage Layer.
@@ -231,21 +282,21 @@ func main() {
 	//
 	// The WAL (Write-Ahead Log) ensures that all writes are persisted to disk
 	// before being acknowledged, providing crash recovery guarantees.
-	log.Debug("Initializing storage layer", "path", *dbPath)
-	kv, err := storage.NewKVStore(*dbPath)
+	log.Debug("Initializing storage layer", "path", cfg.DBPath)
+	kv, err := storage.NewKVStore(cfg.DBPath)
 	if err != nil {
-		log.Error("Failed to initialize storage", "error", err, "path", *dbPath)
+		log.Error("Failed to initialize storage", "error", err, "path", cfg.DBPath)
 		os.Exit(1)
 	}
-	log.Info("Storage layer initialized", "path", *dbPath)
+	log.Info("Storage layer initialized", "path", cfg.DBPath)
 
 	// Initialize the authentication manager and check if admin exists.
 	authMgr := auth.NewAuthManager(kv)
 	if !authMgr.AdminExists() {
 		log.Info("First-time setup detected: admin user does not exist")
 
-		// Check for admin password from environment variable
-		adminPassword = os.Getenv(EnvAdminPassword)
+		// Check for admin password from configuration (loaded from env var)
+		adminPassword := cfg.AdminPassword
 
 		if adminPassword != "" {
 			// Use password from environment variable
@@ -258,9 +309,7 @@ func main() {
 		} else if useWizard {
 			// Interactive mode: prompt for password
 			fmt.Println()
-			fmt.Println("\033[33m" + "\033[1m" + "═══════════════════════════════════════════════════════════════" + "\033[0m")
-			fmt.Println("\033[33m" + "\033[1m" + "  FIRST-TIME SETUP: Admin Password Configuration" + "\033[0m")
-			fmt.Println("\033[33m" + "\033[1m" + "═══════════════════════════════════════════════════════════════" + "\033[0m")
+			cli.PrintWarning("First-Time Setup: Admin Password Configuration")
 			fmt.Println()
 			fmt.Println("  This is the first time FlyDB is starting with this database.")
 			fmt.Println("  An admin user needs to be created.")
@@ -273,17 +322,18 @@ func main() {
 				os.Exit(1)
 			}
 
-			fmt.Println("\033[32m" + "  ✓ Admin user created successfully!" + "\033[0m")
 			fmt.Println()
-			fmt.Println("\033[1m" + "  ╔═══════════════════════════════════════════════════════════╗" + "\033[0m")
-			fmt.Println("\033[1m" + "  ║  IMPORTANT: Save this password securely!                  ║" + "\033[0m")
-			fmt.Println("\033[1m" + "  ╠═══════════════════════════════════════════════════════════╣" + "\033[0m")
-			fmt.Printf("\033[1m" + "  ║  Username: \033[36madmin\033[0m\033[1m                                          ║" + "\033[0m\n")
-			fmt.Printf("\033[1m" + "  ║  Password: \033[36m%-20s\033[0m\033[1m                        ║" + "\033[0m\n", generatedPassword)
-			fmt.Println("\033[1m" + "  ╚═══════════════════════════════════════════════════════════╝" + "\033[0m")
+			cli.PrintSuccess("Admin user created successfully!")
 			fmt.Println()
-			fmt.Println("\033[33m" + "  This password will NOT be shown again." + "\033[0m")
-			fmt.Println("\033[33m" + "  You can change it later using: SQL ALTER USER admin IDENTIFIED BY 'newpass'" + "\033[0m")
+			fmt.Println("  " + cli.Highlight("Admin Credentials"))
+			fmt.Println("  " + cli.Separator(40))
+			fmt.Println()
+			fmt.Printf("    %s %s\n", cli.Dimmed("Username:"), cli.Info("admin"))
+			fmt.Printf("    %s %s\n", cli.Dimmed("Password:"), cli.Info(generatedPassword))
+			fmt.Println()
+			cli.PrintWarning("IMPORTANT: Save this password securely!")
+			cli.PrintWarning("This password will NOT be shown again.")
+			cli.PrintWarning("You can change it later using: ALTER USER admin IDENTIFIED BY 'newpass'")
 			fmt.Println()
 
 			log.Info("Admin user initialized with generated password")
@@ -296,17 +346,15 @@ func main() {
 			}
 
 			fmt.Println()
-			fmt.Println("═══════════════════════════════════════════════════════════════")
 			fmt.Println("  FIRST-TIME SETUP: Admin credentials generated")
-			fmt.Println("═══════════════════════════════════════════════════════════════")
+			fmt.Println("  " + strings.Repeat("─", 45))
 			fmt.Println()
-			fmt.Printf("  Username: admin\n")
-			fmt.Printf("  Password: %s\n", generatedPassword)
+			fmt.Printf("    Username: admin\n")
+			fmt.Printf("    Password: %s\n", generatedPassword)
 			fmt.Println()
 			fmt.Println("  IMPORTANT: Save this password securely!")
 			fmt.Println("  This password will NOT be shown again.")
 			fmt.Println("  Set FLYDB_ADMIN_PASSWORD env var to specify a custom password.")
-			fmt.Println("═══════════════════════════════════════════════════════════════")
 			fmt.Println()
 
 			log.Info("Admin user initialized with generated password")
@@ -329,7 +377,7 @@ func main() {
 	// This architecture provides read scalability and fault tolerance.
 	replLog := logging.NewLogger("replication")
 
-	switch *role {
+	switch cfg.Role {
 	case "standalone":
 		// Standalone Mode: No replication, single server for development.
 		log.Info("Running in standalone mode (no replication)")
@@ -340,15 +388,16 @@ func main() {
 		// WAL updates to keep slaves synchronized.
 		replicator := server.NewReplicator(kv.WAL(), kv, true)
 		go func() {
-			replLog.Info("Starting replication master", "port", *replPort)
-			if err := replicator.StartMaster(":" + *replPort); err != nil {
+			replLog.Info("Starting replication master", "port", cfg.ReplPort)
+			if err := replicator.StartMaster(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
 				replLog.Error("Replication master error", "error", err)
 			}
 		}()
 
 	case "slave":
 		// Slave Mode: Validate configuration and start the replication client.
-		if *masterAddr == "" {
+		// Note: Validation already done above, but double-check for safety
+		if cfg.MasterAddr == "" {
 			log.Error("Master address is required for slave mode")
 			os.Exit(1)
 		}
@@ -359,8 +408,8 @@ func main() {
 		replicator := server.NewReplicator(kv.WAL(), kv, false)
 		go func() {
 			for {
-				replLog.Info("Connecting to master", "address", *masterAddr)
-				if err := replicator.StartSlave(*masterAddr); err != nil {
+				replLog.Info("Connecting to master", "address", cfg.MasterAddr)
+				if err := replicator.StartSlave(cfg.MasterAddr); err != nil {
 					replLog.Warn("Replication slave error, retrying",
 						"error", err,
 						"retry_in", "5s",
@@ -373,7 +422,7 @@ func main() {
 		}()
 
 	default:
-		log.Error("Invalid role specified", "role", *role, "valid_roles", "standalone, master, slave")
+		log.Error("Invalid role specified", "role", cfg.Role, "valid_roles", "standalone, master, slave")
 		os.Exit(1)
 	}
 
@@ -386,7 +435,11 @@ func main() {
 	//   - Easier testing with mock storage
 	//   - Consistent state across all components
 	//   - Proper resource management
-	srv := server.NewServerWithStoreAndBinary(":"+*port, ":"+*binaryPort, kv)
+	srv := server.NewServerWithStoreAndBinary(
+		fmt.Sprintf(":%d", cfg.Port),
+		fmt.Sprintf(":%d", cfg.BinaryPort),
+		kv,
+	)
 
 	// Set up graceful shutdown handling
 	sigChan := make(chan os.Signal, 1)
@@ -417,10 +470,13 @@ func main() {
 	fmt.Println()
 	cli.PrintSuccess("FlyDB server is ready!")
 	fmt.Println()
-	cli.KeyValue("Text Protocol", fmt.Sprintf("localhost:%s", *port), 20)
-	cli.KeyValue("Binary Protocol", fmt.Sprintf("localhost:%s", *binaryPort), 20)
-	cli.KeyValue("Role", *role, 20)
-	cli.KeyValue("Database", *dbPath, 20)
+	cli.KeyValue("Text Protocol", fmt.Sprintf("localhost:%d", cfg.Port), 20)
+	cli.KeyValue("Binary Protocol", fmt.Sprintf("localhost:%d", cfg.BinaryPort), 20)
+	cli.KeyValue("Role", cfg.Role, 20)
+	cli.KeyValue("Database", cfg.DBPath, 20)
+	if cfg.ConfigFile != "" {
+		cli.KeyValue("Config File", cfg.ConfigFile, 20)
+	}
 	fmt.Println()
 	fmt.Println(cli.Dimmed("Press Ctrl+C to stop the server"))
 	fmt.Println()
@@ -429,9 +485,9 @@ func main() {
 	// This call blocks and handles client connections until the server is stopped.
 	// Each client connection is handled in a separate goroutine for concurrency.
 	log.Info("Starting FlyDB server",
-		"text_port", *port,
-		"binary_port", *binaryPort,
-		"role", *role,
+		"text_port", cfg.Port,
+		"binary_port", cfg.BinaryPort,
+		"role", cfg.Role,
 	)
 	if err := srv.Start(); err != nil {
 		log.Error("Server error", "error", err)
