@@ -23,7 +23,9 @@ FlyDB Server Architecture Overview:
 The FlyDB server is designed with a layered architecture that separates concerns:
 
   1. Storage Layer (internal/storage):
-     - KVStore: In-memory key-value store with WAL-backed persistence
+     - UnifiedStorageEngine: Disk-based storage with intelligent buffer pool caching
+     - BufferPool: LRU-K page caching with auto-sizing based on available memory
+     - HeapFile: 8KB slotted pages for efficient variable-length record storage
      - WAL: Write-Ahead Log for durability and crash recovery
 
   2. SQL Layer (internal/sql):
@@ -43,8 +45,8 @@ The FlyDB server is designed with a layered architecture that separates concerns
 Startup Flow:
 =============
 
-  1. Parse command-line flags for configuration
-  2. Initialize the KVStore (which replays WAL for crash recovery)
+  1. Parse command-line flags and load configuration
+  2. Initialize the storage engine (auto-sizes buffer pool, replays WAL)
   3. Create the Replicator based on the server role (master/slave)
   4. Start replication in a background goroutine
   5. Create and start the TCP server to accept client connections
@@ -372,11 +374,12 @@ func main() {
 	// FlyDB always uses multi-database mode with DatabaseManager.
 	// Each database is stored in a separate directory under cfg.DataDir.
 	//
-	// The KVStore is the core storage engine that provides:
-	//   - In-memory key-value storage for fast reads
+	// The unified storage engine provides:
+	//   - Page-based disk storage for datasets larger than RAM
+	//   - Intelligent buffer pool with LRU-K caching
 	//   - WAL-backed persistence for durability
-	//   - Automatic state recovery on startup by replaying the WAL
-	var kv *storage.KVStore
+	//   - Automatic state recovery on startup
+	var store storage.Engine
 	var dbManager *storage.DatabaseManager
 
 	log.Info("Initializing database manager", "data_dir", cfg.DataDir)
@@ -430,13 +433,13 @@ func main() {
 		log.Error("Failed to get system database", "error", err)
 		os.Exit(1)
 	}
-	kv = systemDB.Store
+	store = systemDB.Store
 
 	log.Info("Database manager initialized", "data_dir", cfg.DataDir)
 
 	// Initialize the authentication manager backed by the system database.
 	// This ensures users are global across all databases.
-	authMgr := auth.NewAuthManager(kv)
+	authMgr := auth.NewAuthManager(store)
 
 	// Initialize built-in RBAC roles BEFORE creating admin user.
 	// This ensures the admin role exists when we try to assign it.
@@ -545,13 +548,18 @@ func main() {
 		// Master Mode: Start the replication server in a background goroutine.
 		// The replication server listens for slave connections and streams
 		// WAL updates to keep slaves synchronized.
-		replicator := server.NewReplicator(kv.WAL(), kv, true)
-		go func() {
-			replLog.Info("Starting replication master", "port", cfg.ReplPort)
-			if err := replicator.StartMaster(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
-				replLog.Error("Replication master error", "error", err)
-			}
-		}()
+		if unified, ok := store.(*storage.UnifiedStorageEngine); ok {
+			replicator := server.NewReplicator(unified.WAL(), store, true)
+			go func() {
+				replLog.Info("Starting replication master", "port", cfg.ReplPort)
+				if err := replicator.StartMaster(fmt.Sprintf(":%d", cfg.ReplPort)); err != nil {
+					replLog.Error("Replication master error", "error", err)
+				}
+			}()
+		} else {
+			log.Error("Replication requires unified storage engine")
+			os.Exit(1)
+		}
 
 	case "slave":
 		// Slave Mode: Validate configuration and start the replication client.
@@ -564,7 +572,12 @@ func main() {
 		// Start the replication client in a background goroutine.
 		// The client connects to the master and receives WAL updates.
 		// A retry loop ensures the slave reconnects if the connection is lost.
-		replicator := server.NewReplicator(kv.WAL(), kv, false)
+		unified, ok := store.(*storage.UnifiedStorageEngine)
+		if !ok {
+			log.Error("Replication requires unified storage engine")
+			os.Exit(1)
+		}
+		replicator := server.NewReplicator(unified.WAL(), store, false)
 		go func() {
 			for {
 				replLog.Info("Connecting to master", "address", cfg.MasterAddr)
