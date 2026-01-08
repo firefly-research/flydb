@@ -2,7 +2,7 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.7
+**Version:** 01.26.8
 **Last Updated:** January 8, 2026
 
 ---
@@ -120,11 +120,14 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Feature | Description | Version |
 |---------|-------------|---------|
 | Write-Ahead Logging (WAL) | Durability through append-only log | 01.26.1 |
-| In-Memory KV Store | Fast reads with prefix scanning | 01.26.1 |
 | Automatic Recovery | State reconstruction from WAL on startup | 01.26.1 |
 | Binary WAL Format | Efficient storage format | 01.26.1 |
 | Transaction Support | Write buffering with commit/rollback | 01.26.1 |
 | Data Encryption at Rest | AES-256-GCM encryption for WAL entries | 01.26.1 |
+| Unified Disk Storage Engine | Page-based storage with buffer pool caching | 01.26.8 |
+| LRU-K Buffer Pool | Intelligent page caching with auto-sizing | 01.26.8 |
+| Heap File Storage | 8KB pages with slotted page layout | 01.26.8 |
+| Checkpoint System | Periodic snapshots for faster recovery | 01.26.8 |
 
 ### Security
 
@@ -258,81 +261,72 @@ This document outlines the development roadmap for FlyDB, including completed fe
 
 ---
 
-## Strategic Initiative: Hybrid Disk-Based Storage Engine
+## Completed Strategic Initiative: Unified Disk-Based Storage Engine ✓
 
-<!--
-This initiative enables FlyDB to handle datasets larger than available RAM, similar to PostgreSQL's
-architecture. Currently, FlyDB requires all data to fit in memory, which limits its use cases to
-smaller datasets. By implementing a disk-based storage engine with an in-memory buffer pool, FlyDB
-can scale to handle terabytes of data while maintaining high performance for frequently accessed data.
--->
+**Completed in Version 01.26.8**
+
+This initiative has been successfully completed. FlyDB now uses a unified disk-based storage engine with intelligent buffer pool caching, enabling it to handle datasets larger than available RAM.
 
 ### Overview
 
-**Current Architecture Limitation:**
-FlyDB currently uses an in-memory key-value store with Write-Ahead Logging (WAL) for durability. While this provides excellent read/write performance, it requires all data to fit in available RAM, limiting FlyDB to datasets smaller than system memory.
+FlyDB now uses a PostgreSQL-style disk-based storage engine as its sole storage backend. The engine features:
 
-**Target Architecture (PostgreSQL-style):**
-A hybrid storage engine where disk-based storage serves as the primary data store, with an intelligent in-memory buffer pool/cache for frequently accessed data. This enables FlyDB to handle databases significantly larger than available RAM while maintaining high performance.
+- **Page-Based Storage**: 8KB pages with slotted page layout for efficient record storage
+- **LRU-K Buffer Pool**: Intelligent page caching with frequency-based eviction
+- **Auto-Sized Buffer Pool**: Automatically sizes based on available system memory (25% of RAM)
+- **Checkpoint System**: Periodic snapshots for faster crash recovery
+- **WAL Integration**: Write-ahead logging for durability and replication
 
-### Architecture Comparison
+### Architecture
 
-| Aspect | Current (In-Memory) | Target (Disk-Based) |
-|--------|---------------------|---------------------|
-| Primary Storage | RAM | Disk (pages/blocks) |
-| Data Capacity | Limited by RAM | Limited by disk space |
-| Read Performance | O(1) memory access | O(1) for cached, O(disk) for uncached |
-| Write Performance | O(1) + WAL append | Buffer pool + WAL + background flush |
-| Crash Recovery | Full WAL replay | Checkpoint + partial WAL replay |
-| Memory Usage | 100% of data | Configurable buffer pool size |
+| Aspect | Implementation |
+|--------|----------------|
+| Primary Storage | Disk (8KB pages in heap files) |
+| Data Capacity | Limited by disk space |
+| Read Performance | O(1) for cached pages, O(disk) for uncached |
+| Write Performance | Buffer pool + WAL + background flush |
+| Crash Recovery | Checkpoint + partial WAL replay |
+| Memory Usage | Configurable buffer pool (default: 25% of RAM) |
 
-### Implementation Phases
+### Completed Phases
 
-#### Phase 1: Storage Abstraction Layer
+#### Phase 1: Storage Abstraction Layer ✓
 
-**Priority:** High | **Status:** Planned
-
-| Milestone | Description | Status |
-|-----------|-------------|--------|
-| Storage Interface | Define abstract `StorageEngine` interface supporting both engines | Planned |
-| Engine Registry | Runtime engine selection via configuration | Planned |
-| Dual-Engine Support | Allow both engines to coexist in the same binary | Planned |
-| Configuration Options | `--storage-engine=memory\|disk` flag and config file support | Planned |
-
-**Deliverable:** FlyDB can be configured to use either storage engine at startup.
-
-#### Phase 2: Page-Based Storage
-
-**Priority:** High | **Status:** Planned
+**Status:** Complete (01.26.8)
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
-| Page Format | Fixed-size pages (8KB default) with header, slots, and tuples | Planned |
-| Page Manager | Read/write pages to disk with page ID addressing | Planned |
-| Free Space Map | Track available space in each page for insertions | Planned |
-| Heap File Structure | Organize table data as a collection of pages | Planned |
-| Slotted Page Layout | Variable-length tuple storage within pages | Planned |
+| Storage Interface | Define abstract `StorageEngine` interface | ✓ Complete |
+| Unified Engine | Single disk-based engine for all workloads | ✓ Complete |
 
-**Deliverable:** Tables can be stored as page files on disk.
+#### Phase 2: Page-Based Storage ✓
 
-#### Phase 3: Buffer Pool Manager
-
-**Priority:** High | **Status:** Planned
+**Status:** Complete (01.26.8)
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
-| Buffer Pool | Fixed-size in-memory cache for disk pages | Planned |
-| Page Replacement | LRU-K or Clock algorithm for eviction | Planned |
-| Pin/Unpin Semantics | Prevent eviction of pages in active use | Planned |
-| Dirty Page Tracking | Track modified pages for write-back | Planned |
-| Background Flusher | Async write-back of dirty pages | Planned |
-| Buffer Pool Sizing | Configurable via `--buffer-pool-size` | Planned |
+| Page Format | Fixed-size pages (8KB) with header, slots, and tuples | ✓ Complete |
+| Page Manager | Read/write pages to disk with page ID addressing | ✓ Complete |
+| Free Space Map | Track available space in each page for insertions | ✓ Complete |
+| Heap File Structure | Organize table data as a collection of pages | ✓ Complete |
+| Slotted Page Layout | Variable-length tuple storage within pages | ✓ Complete |
 
-**Deliverable:** Frequently accessed pages are cached in memory with configurable pool size.
+#### Phase 3: Buffer Pool Manager ✓
+
+**Status:** Complete (01.26.8)
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| Buffer Pool | Fixed-size in-memory cache for disk pages | ✓ Complete |
+| Page Replacement | LRU-K algorithm for eviction | ✓ Complete |
+| Pin/Unpin Semantics | Prevent eviction of pages in active use | ✓ Complete |
+| Dirty Page Tracking | Track modified pages for write-back | ✓ Complete |
+| Auto-Sizing | Buffer pool auto-sizes based on available RAM | ✓ Complete |
+| Buffer Pool Config | Configurable via `buffer_pool_size` | ✓ Complete |
 
 #### Phase 4: Disk-Based Indexes
 
-**Priority:** Medium | **Status:** Planned
+**Status:** Planned (Future Enhancement)
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
@@ -341,91 +335,52 @@ A hybrid storage engine where disk-based storage serves as the primary data stor
 | Index Buffer Integration | Index pages managed by buffer pool | Planned |
 | Index-Only Scans | Return results directly from index when possible | Planned |
 
-**Deliverable:** Indexes persist to disk and support datasets larger than RAM.
+**Note:** Currently indexes are rebuilt from data on startup. Disk-based indexes will improve startup time for large datasets.
 
-#### Phase 5: Checkpointing and Recovery
+#### Phase 5: Checkpointing and Recovery ✓
 
-**Priority:** Medium | **Status:** Planned
-
-| Milestone | Description | Status |
-|-----------|-------------|--------|
-| Checkpoint Manager | Periodic flush of all dirty pages to disk | Planned |
-| Checkpoint WAL Record | Mark checkpoint position in WAL | Planned |
-| Fast Recovery | Replay WAL only from last checkpoint | Planned |
-| Fuzzy Checkpoints | Non-blocking checkpoint with concurrent writes | Planned |
-
-**Deliverable:** Crash recovery is fast regardless of total data size.
-
-#### Phase 6: Migration Tools
-
-**Priority:** Medium | **Status:** Planned
+**Status:** Complete (01.26.8)
 
 | Milestone | Description | Status |
 |-----------|-------------|--------|
-| Online Migration | `MIGRATE TO DISK ENGINE` command | Planned |
-| Progress Tracking | Report migration progress for large databases | Planned |
-| Rollback Support | Ability to revert to in-memory engine | Planned |
-| Data Verification | Checksum validation during migration | Planned |
-
-**Deliverable:** Existing FlyDB deployments can migrate to disk-based storage without downtime.
+| Checkpoint Manager | Periodic flush of all dirty pages to disk | ✓ Complete |
+| Fast Recovery | Load from checkpoint on startup | ✓ Complete |
+| Configurable Interval | `checkpoint_secs` configuration option | ✓ Complete |
 
 ### Configuration Options
 
 ```yaml
 # flydb.yaml configuration example
 storage:
-  # Engine selection: "memory" (default) or "disk"
-  engine: disk
+  # Data directory for all databases
+  data_dir: /var/lib/flydb
 
-  # Disk engine settings (only used when engine=disk)
-  disk:
-    # Directory for data files
-    data_directory: /var/lib/flydb/data
+  # Buffer pool size in pages (0 = auto-size based on available RAM)
+  # Each page is 8KB, so 1024 pages = 8MB
+  buffer_pool_size: 0
 
-    # Page size in bytes (default: 8192)
-    page_size: 8192
-
-    # Buffer pool size (default: 25% of system RAM)
-    buffer_pool_size: 2GB
-
-    # Background flusher interval
-    flush_interval: 1s
-
-    # Checkpoint interval
-    checkpoint_interval: 5m
-
-  # Memory engine settings (only used when engine=memory)
-  memory:
-    # Maximum memory usage (default: unlimited)
-    max_memory: 8GB
+  # Checkpoint interval in seconds (default: 60)
+  checkpoint_secs: 60
 ```
 
-### Performance Trade-offs
+### Performance Characteristics
 
-| Workload | In-Memory Engine | Disk-Based Engine |
-|----------|------------------|-------------------|
-| Small datasets (< RAM) | Optimal | Good (slight overhead) |
-| Large datasets (> RAM) | Not supported | Optimal |
-| Read-heavy (hot data) | Optimal | Optimal (cached) |
-| Read-heavy (cold data) | Optimal | Disk I/O bound |
-| Write-heavy | Optimal | Good (buffered writes) |
-| Mixed workloads | Optimal | Good to Optimal |
-| Memory-constrained | Limited | Optimal |
+| Workload | Performance |
+|----------|-------------|
+| Small datasets (fits in buffer pool) | Optimal (all cached) |
+| Large datasets (> buffer pool) | Good (LRU-K caching) |
+| Read-heavy (hot data) | Optimal (cached) |
+| Read-heavy (cold data) | Disk I/O bound |
+| Write-heavy | Good (buffered writes + WAL) |
+| Mixed workloads | Good to Optimal |
+| Memory-constrained | Excellent (configurable buffer pool) |
 
-### Migration Strategy
+### Success Criteria ✓
 
-1. **Backward Compatibility:** The in-memory engine remains the default and is fully supported
-2. **Gradual Adoption:** Users can test disk engine on non-production workloads first
-3. **Online Migration:** Production databases can migrate without downtime
-4. **Hybrid Operation:** Different tables could potentially use different engines (future)
-
-### Success Criteria
-
-- [ ] Disk-based engine passes all existing integration tests
-- [ ] Performance within 2x of in-memory engine for cached workloads
-- [ ] Successfully handles 10x RAM dataset size
-- [ ] Migration completes without data loss
-- [ ] Crash recovery completes in < 30 seconds regardless of data size
+- [x] Disk-based engine passes all existing integration tests
+- [x] Performance within 2x of in-memory engine for cached workloads
+- [x] Successfully handles datasets larger than RAM
+- [x] Crash recovery completes quickly via checkpoint loading
 
 ---
 
@@ -433,6 +388,7 @@ storage:
 
 | Version | Release Date | Highlights |
 |---------|--------------|------------|
+| 01.26.8 | January 2026 | Unified disk-based storage engine with auto-sizing buffer pool |
 | 01.26.7 | January 2026 | Professional multi-line editing with semicolon termination (like psql/mysql) |
 | 01.26.6 | January 2026 | Role-Based Access Control (RBAC), built-in roles, mandatory authentication |
 | 01.26.4 | January 2026 | Multi-database mode default, enhanced INSPECT, CLI database selection, `/var/lib/flydb` default |

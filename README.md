@@ -1,238 +1,476 @@
 <div align="center">
-  <img src="docs/assets/logo.png" alt="FlyDB Logo" width="600">
 
-  <h1>FlyDB</h1>
+```
+  _____.__            .______.
+_/ ____\  | ___.__. __| _/\_ |__
+\   __\|  |<   |  |/ __ |  | __ \
+ |  |  |  |_\___  / /_/ |  | \_\ \
+ |__|  |____/ ____\____ |  |___  /
+            \/         \/      \/
+```
 
-  <p><strong>A lightweight, distributed SQL database engine written in Go</strong></p>
+  <p><strong>The Lightweight, Embeddable SQL Database for Go Applications</strong></p>
 
   <p>
     <a href="https://github.com/firefly-oss/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.7-blue.svg" alt="Version"></a>
     <a href="https://github.com/firefly-oss/flydb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="License"></a>
-    <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.21%2B-00ADD8?logo=go" alt="Go Version"></a>
+    <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go" alt="Go Version"></a>
     <a href="https://github.com/firefly-oss/flydb"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg" alt="Platform"></a>
-    <a href="https://github.com/firefly-oss/flydb/actions"><img src="https://img.shields.io/badge/build-passing-brightgreen.svg" alt="Build Status"></a>
-    <a href="https://github.com/firefly-oss/flydb/issues"><img src="https://img.shields.io/github/issues/firefly-oss/flydb.svg" alt="Issues"></a>
-    <a href="https://github.com/firefly-oss/flydb/stargazers"><img src="https://img.shields.io/github/stars/firefly-oss/flydb.svg?style=social" alt="Stars"></a>
   </p>
 </div>
 
 ---
 
-FlyDB is a lightweight, distributed SQL database engine written in Go. It provides ACID-compliant storage through a Write-Ahead Log (WAL), supports SQL queries with JOIN operations, and includes built-in security features such as user authentication and Row-Level Security (RLS).
+## Overview
 
-| | |
-|------------|----------------------------------------------|
-| Version    | 01.26.7                                      |
-| License    | Apache License 2.0                           |
-| Copyright  | 2026 Firefly Software Solutions Inc.         |
+FlyDB is a production-ready SQL database engine built from the ground up in pure Go. Designed for developers who need the power of a relational database without the operational complexity of traditional database servers, FlyDB compiles to a single binary with zero external dependencies.
+
+Whether you are building microservices that need local persistence, edge applications requiring embedded storage, or distributed systems demanding replication and high availability, FlyDB delivers enterprise-grade features in a lightweight package. The PostgreSQL-inspired storage engine provides familiar semantics with modern performance characteristics, while built-in encryption and row-level security ensure your data remains protected.
+
+### Why FlyDB
+
+- **Zero Dependencies** — Pure Go implementation with no CGO. Deploy a single binary anywhere Go runs.
+- **Production Storage Engine** — 8KB slotted pages, LRU-K buffer pool, and write-ahead logging deliver the durability and performance you expect from a real database.
+- **Security by Default** — AES-256-GCM encryption at rest and row-level security policies protect sensitive data without additional configuration.
+- **Scale When Ready** — Start embedded, then seamlessly transition to leader-follower replication with automatic failover as your needs grow.
+- **Full SQL Support** — Joins, subqueries, transactions, stored procedures, triggers, and prepared statements. No compromises on query capabilities.
+
+### Quick Example
+
+```bash
+# Start the server
+./flydb -data-dir ./data
+
+# Connect with the CLI
+./fsql
+```
+
+```sql
+-- Create a table
+CREATE TABLE users (id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE);
+
+-- Insert data
+INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
+
+-- Query data
+SELECT * FROM users WHERE name LIKE 'A%';
+```
 
 ---
 
 ## Table of Contents
 
-- [Features](#features)
+- [Overview](#overview)
+  - [Why FlyDB](#why-flydb)
+  - [Quick Example](#quick-example)
+- [Architecture](#architecture)
+  - [Storage Engine](#storage-engine)
+  - [Write-Ahead Logging (WAL)](#write-ahead-logging-wal)
+  - [B-Tree Indexes](#b-tree-indexes)
+  - [Transaction Support](#transaction-support)
+  - [Encryption at Rest](#encryption-at-rest)
+  - [SQL Processing Pipeline](#sql-processing-pipeline)
+  - [Binary Protocol](#binary-protocol)
+  - [Replication](#replication)
+  - [Authentication & Authorization](#authentication--authorization)
 - [Installation](#installation)
+  - [Quick Install (Recommended)](#quick-install-recommended)
+  - [Installation Options](#installation-options)
+  - [Build from Source](#build-from-source)
+  - [Installed Components](#installed-components)
+  - [Uninstallation](#uninstallation)
 - [Quick Start](#quick-start)
+  - [1. Start the Server](#1-start-the-server)
+  - [2. Connect with the CLI](#2-connect-with-the-cli)
+  - [3. Authenticate](#3-authenticate)
+  - [4. Basic Operations](#4-basic-operations)
+  - [5. Interactive Shell Commands](#5-interactive-shell-commands)
+  - [6. Multi-Line Statements](#6-multi-line-statements)
 - [Configuration](#configuration)
+  - [Interactive Wizard](#interactive-wizard)
+  - [Operative Modes](#operative-modes)
+  - [Configuration File](#configuration-file)
+  - [Configuration Precedence](#configuration-precedence)
+  - [Environment Variables](#environment-variables)
+  - [Server Options](#server-options)
+  - [Client Options](#client-options)
+  - [CLI Local Commands](#cli-local-commands)
+  - [Multi-line Editing](#multi-line-editing)
+  - [Examples](#examples)
+- [Security](#security)
+  - [Authentication](#authentication)
+  - [Encryption at Rest](#encryption-at-rest-1)
+  - [Row-Level Security](#row-level-security)
+- [Replication](#replication-1)
+  - [Start a Leader](#start-a-leader)
+  - [Start a Follower](#start-a-follower)
 - [Documentation](#documentation)
 - [Development](#development)
+  - [Running Tests](#running-tests)
+  - [Integration Tests](#integration-tests)
+  - [Manual Protocol Testing](#manual-protocol-testing)
+  - [Project Structure](#project-structure)
 - [License](#license)
 
 ---
 
-## Features
+## Architecture
 
-### SQL Support
+FlyDB implements a production-grade, layered architecture inspired by PostgreSQL's proven design. Each layer is purpose-built for performance, durability, and maintainability.
 
-| Category | Features |
-|----------|----------|
-| DDL | CREATE TABLE, DROP TABLE, ALTER TABLE, CREATE INDEX, CREATE VIEW |
-| DML | SELECT, INSERT, UPDATE, DELETE |
-| Queries | JOIN (INNER, LEFT, RIGHT, FULL), UNION, INTERSECT, EXCEPT, Subqueries, DISTINCT |
-| Clauses | WHERE, ORDER BY, GROUP BY, HAVING, LIMIT, OFFSET |
-| Functions | COUNT, SUM, AVG, MIN, MAX, String, Numeric, Date/Time functions |
-| Advanced | Transactions (with Savepoints), Prepared Statements, Stored Procedures, Views, Triggers |
-| Databases | CREATE DATABASE, DROP DATABASE, USE, Multi-database support with isolation |
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                           Client Layer                                 │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐    │
+│  │  flydb-shell│  │ JDBC Driver │  │ ODBC Driver │  │  Custom App │    │
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘    │
+└─────────┼────────────────┼────────────────┼────────────────┼───────────┘
+          │                │                │                │
+          ▼                ▼                ▼                ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                         Protocol Layer                                 │
+│  ┌─────────────────────────────┐  ┌─────────────────────────────────┐  │
+│  │   Text Protocol (:8888)     │  │   Binary Protocol (:8889)       │  │
+│  │   • Human-readable          │  │   • Type-Length-Value framing   │  │
+│  │   • Debugging/testing       │  │   • Prepared statements         │  │
+│  └─────────────────────────────┘  │   • Cursor operations           │  │
+│                                   └─────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                           SQL Layer                                    │
+│  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────────────┐  │
+│  │  Lexer   │───▶│  Parser  │───▶│ Executor │───▶│     Catalog      │  │
+│  │          │    │          │    │          │    │                  │  │
+│  │ Tokenize │    │ Build    │    │ Execute  │    │ Schema Registry  │  │
+│  │ SQL text │    │ AST      │    │ Plan     │    │ Table Metadata   │  │
+│  └──────────┘    └──────────┘    └──────────┘    └──────────────────┘  │
+└────────────────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                         Storage Layer                                  │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐ │
+│  │   Buffer Pool   │  │   Index Manager │  │   Transaction Manager   │ │
+│  │                 │  │                 │  │                         │ │
+│  │ • LRU-K (K=2)   │  │ • B-Tree        │  │ • Write buffering       │ │
+│  │ • Auto-sizing   │  │ • O(log N) ops  │  │ • Savepoints            │ │
+│  │ • Dirty tracking│  │ • Auto-maintain │  │ • Read-committed        │ │
+│  └────────┬────────┘  └─────────────────┘  └─────────────────────────┘ │
+│           │                                                            │
+│  ┌────────▼────────┐  ┌─────────────────┐  ┌─────────────────────────┐ │
+│  │    Heap File    │  │       WAL       │  │      Encryptor          │ │
+│  │                 │  │                 │  │                         │ │
+│  │ • 8KB pages     │  │ • Append-only   │  │ • AES-256-GCM           │ │
+│  │ • Slotted layout│  │ • Crash recovery│  │ • PBKDF2 key derivation │ │
+│  │ • Free list     │  │ • Checkpointing │  │ • Per-record encryption │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────┘
+          │
+          ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                       Replication Layer                                │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │                    Leader-Follower Replication                   │  │
+│  │  • WAL-based log shipping        • Automatic reconnection        │  │
+│  │  • Eventual consistency          • Offset-based sync             │  │
+│  └──────────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
-### Data Types
+### Storage Engine
 
-| Category | Types |
-|----------|-------|
-| Numeric | INT, BIGINT, SERIAL, FLOAT, DECIMAL |
-| String | TEXT, VARCHAR |
-| Boolean | BOOLEAN |
-| Date/Time | TIMESTAMP, DATE, TIME |
-| Binary | BLOB |
-| Structured | UUID, JSONB |
+The storage engine is the heart of FlyDB, implementing PostgreSQL-style page-based storage with intelligent caching.
 
-### Constraints
+**Slotted Page Architecture (8KB Pages)**
 
-PRIMARY KEY, FOREIGN KEY, NOT NULL, UNIQUE, AUTO_INCREMENT, DEFAULT, CHECK
+Each page uses a slotted layout that efficiently handles variable-length records:
 
-### Storage and Durability
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Page Header (24 bytes)                       │
+│  PageID │ Type │ Flags │ SlotCount │ FreeStart │ FreeEnd │ LSN  │
+├─────────────────────────────────────────────────────────────────┤
+│  Slot Array (grows →)                                           │
+│  [Slot 0: offset,len] [Slot 1: offset,len] [Slot 2: offset,len] │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│                         Free Space                              │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  ← Records (grow ←)                                             │
+│  [Record N] [Record N-1] ... [Record 1] [Record 0]              │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-- Write-Ahead Logging (WAL) for crash recovery
-- In-memory storage with automatic persistence
-- B-Tree indexes for O(log N) lookups
-- **AES-256-GCM encryption at rest (enabled by default)**
-- **Multi-database support** with complete isolation between databases
-- Per-database encoding, locale, and collation settings
+- **Slot array** grows forward from the header
+- **Records** grow backward from the end of the page
+- **Free space** in the middle allows both to grow independently
+- **LSN (Log Sequence Number)** tracks the last WAL entry affecting this page
 
-### Security
+**LRU-K Buffer Pool**
 
-- **Data-at-rest encryption enabled by default** (AES-256-GCM)
-- Secure admin password setup on first run (generated or user-specified)
-- User authentication with bcrypt password hashing
-- Table-level access control (GRANT/REVOKE)
-- Row-Level Security (RLS) with predicate filtering
-- TLS support for encrypted connections
-- Environment variable configuration for automated deployments
-
-### Distributed Features
-
-- Leader-Follower replication
-- Automatic failover with leader election (Bully algorithm)
-- Binary replication protocol
-
-### Performance
-
-- Connection pooling
-- Query caching with LRU eviction and TTL
-- Binary wire protocol for efficient communication
-
-### Driver Development
-
-FlyDB provides a complete binary wire protocol for developing external database drivers:
+The buffer pool caches frequently accessed pages in memory, using the LRU-K algorithm (K=2) for superior cache behavior with database workloads:
 
 | Feature | Description |
 |---------|-------------|
-| JDBC/ODBC Support | Full protocol support for standard database drivers |
-| Server-Side Cursors | Scrollable cursors for large result sets |
-| Metadata Queries | GetTables, GetColumns, GetTypeInfo for schema discovery |
-| Transaction Control | BEGIN, COMMIT, ROLLBACK with isolation levels |
-| Session Management | Connection options, auto-commit, server info |
+| **Auto-sizing** | Automatically uses 25% of available RAM (min 2MB, max 1GB) |
+| **LRU-K eviction** | Tracks last K accesses to distinguish hot vs. cold pages |
+| **Dirty page tracking** | Only writes modified pages back to disk |
+| **Pin counting** | Prevents eviction of pages in active use |
+| **Hit rate monitoring** | Exposes cache statistics for tuning |
 
-See [Driver Development Guide](docs/driver-development.md) for complete protocol specification.
+**Heap File Management**
 
-### Real-Time
+The heap file manages page allocation with an efficient free list:
 
-- WATCH command for table change notifications
-- Event streaming for data changes
+```
+FreeListHead → Page 5 → Page 12 → Page 3 → InvalidPageID
+```
+
+- Deleted pages are added to the free list for reuse
+- New allocations prefer free list pages over file extension
+- Eliminates the need for expensive file compaction
+
+### Write-Ahead Logging (WAL)
+
+Every write operation is logged before being applied, ensuring durability even during crashes:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        WAL Record Format                        │
+├──────────┬──────────┬──────────┬───────────┬──────────┬─────────┤
+│ Op (1B)  │ KeyLen   │   Key    │ ValueLen  │  Value   │  ...    │
+│ PUT=1    │ (4B)     │ (var)    │ (4B)      │  (var)   │         │
+│ DEL=2    │          │          │           │          │         │
+└──────────┴──────────┴──────────┴───────────┴──────────┴─────────┘
+```
+
+**Recovery Process:**
+1. On startup, load the last checkpoint (if available)
+2. Replay WAL entries after the checkpoint
+3. Rebuild in-memory state from replayed operations
+
+**Checkpointing:**
+- Periodically flushes all dirty pages to disk
+- Records checkpoint marker with timestamp and page count
+- Enables WAL truncation to bound recovery time
+
+### B-Tree Indexes
+
+FlyDB implements classic B-Tree indexes for O(log N) lookups:
+
+| Property | Value |
+|----------|-------|
+| **Minimum degree (t)** | 16 (configurable) |
+| **Max keys per node** | 2t-1 = 31 |
+| **Min keys per node** | t-1 = 15 (except root) |
+| **Search complexity** | O(log N) |
+| **Insert complexity** | O(log N) |
+| **Delete complexity** | O(log N) |
+
+Indexes are automatically maintained on INSERT, UPDATE, and DELETE operations.
+
+### Transaction Support
+
+FlyDB provides ACID transactions with optimistic concurrency:
+
+| Property | Implementation |
+|----------|----------------|
+| **Atomicity** | Write buffering — all operations applied together or not at all |
+| **Consistency** | Constraint validation before commit |
+| **Isolation** | Read-committed — reads see only committed data |
+| **Durability** | WAL persistence before commit acknowledgment |
+
+**Savepoint Support:**
+```sql
+BEGIN;
+INSERT INTO users (name) VALUES ('Alice');
+SAVEPOINT sp1;
+INSERT INTO users (name) VALUES ('Bob');
+ROLLBACK TO sp1;  -- Bob's insert is undone
+COMMIT;           -- Only Alice is committed
+```
+
+### Encryption at Rest
+
+All data is encrypted using AES-256-GCM with authenticated encryption:
+
+| Component | Details |
+|-----------|---------|
+| **Algorithm** | AES-256-GCM (hardware-accelerated via AES-NI) |
+| **Key derivation** | PBKDF2 with SHA-256, 100,000 iterations |
+| **Nonce** | Random 12-byte nonce per record |
+| **Authentication** | GCM tag provides integrity verification |
+| **Overhead** | 28 bytes per record (12B nonce + 16B tag) |
+
+### SQL Processing Pipeline
+
+SQL statements flow through a three-stage pipeline:
+
+**1. Lexer (Tokenization)**
+```
+"SELECT name FROM users WHERE id = 1"
+    ↓
+[SELECT] [name] [FROM] [users] [WHERE] [id] [=] [1] [EOF]
+```
+
+**2. Parser (AST Construction)**
+
+Recursive descent parser builds an Abstract Syntax Tree:
+```
+SelectStmt {
+    Columns: ["name"]
+    TableName: "users"
+    Where: BinaryExpr{Left: "id", Op: "=", Right: 1}
+}
+```
+
+**3. Executor (Query Execution)**
+- Validates table existence via Catalog
+- Applies Row-Level Security filters
+- Performs nested-loop joins for multi-table queries
+- Sorts results for ORDER BY
+- Applies LIMIT/OFFSET pagination
+
+### Binary Protocol
+
+The binary protocol enables efficient client-server communication:
+
+```
+┌────────┬─────────┬─────────┬───────┬────────────┬─────────────┐
+│ Magic  │ Version │ MsgType │ Flags │ Length(4B) │ Payload...  │
+│ 0xFD   │ 0x01    │         │       │            │             │
+└────────┴─────────┴─────────┴───────┴────────────┴─────────────┘
+```
+
+| Message Type | Code | Description |
+|--------------|------|-------------|
+| Query | 0x01 | SQL query request |
+| QueryResult | 0x02 | Query response with rows |
+| Error | 0x03 | Error response |
+| Prepare | 0x04 | Prepare statement |
+| Execute | 0x06 | Execute prepared statement |
+| Auth | 0x08 | Authentication request |
+
+### Replication
+
+Leader-follower replication provides read scalability and fault tolerance:
+
+**Replication Flow:**
+1. Follower connects to leader's replication port (default: 9999)
+2. Follower sends its current WAL offset
+3. Leader streams WAL entries from that offset
+4. Follower applies entries to local storage
+
+**Consistency Model:** Eventual consistency with ~100ms replication lag
+
+**Failure Handling:**
+- Followers automatically reconnect after network partitions
+- WAL offset ensures no data loss or duplication
+- Followers catch up by replaying missed entries
+
+### Authentication & Authorization
+
+**Authentication:**
+- bcrypt password hashing with timing-attack resistance
+- Secure password generation for initial admin setup
+- Dummy comparison for non-existent users (prevents enumeration)
+
+**Row-Level Security (RLS):**
+```sql
+-- User can only see their own orders
+GRANT SELECT ON orders WHERE user_id = 'alice' TO alice;
+```
+
+RLS predicates are automatically applied to all queries, ensuring data isolation at the row level.
 
 ---
 
 ## Installation
 
-### Prerequisites
-
-- Go 1.21 or later (only required for building from source)
-- Linux or macOS
-
 ### Quick Install (Recommended)
 
-Install FlyDB with a single command:
+Install FlyDB with a single command. The installer automatically detects your platform and downloads the appropriate pre-built binaries:
 
 ```bash
-curl -sSL https://get.flydb.dev | bash
+curl -sSL https://raw.githubusercontent.com/firefly-oss/flydb/main/install.sh | bash
 ```
 
-This downloads pre-built binaries and installs them to `~/.local/bin` (or `/usr/local/bin` with sudo).
-
-#### Quick Install Options
+To install with specific options (non-interactive):
 
 ```bash
-# Install with custom options
-curl -sSL https://get.flydb.dev | bash -s -- --prefix ~/.local --yes
-
-# Install specific version
-curl -sSL https://get.flydb.dev | bash -s -- --version 01.26.0 --yes
-
-# Install without system service
-curl -sSL https://get.flydb.dev | bash -s -- --no-service --yes
+curl -sSL https://raw.githubusercontent.com/firefly-oss/flydb/main/install.sh | bash -s -- --prefix ~/.local --yes
 ```
 
-### Install from Source
-
-If you prefer to build from source or want to contribute:
-
-```bash
-# Clone the repository
-git clone https://github.com/firefly-oss/flydb.git
-cd flydb
-
-# Interactive installation (recommended for first-time users)
-./install.sh
-
-# Non-interactive installation with defaults
-./install.sh --yes
-
-# Force build from source (even if binaries are available)
-./install.sh --from-source --yes
-```
-
-#### Installation Options
+### Installation Options
 
 | Option | Description |
 |--------|-------------|
-| `--prefix <path>` | Installation prefix (default: `~/.local` or `/usr/local` with sudo) |
-| `--version <ver>` | Install specific version |
-| `--from-source` | Force building from source (requires Go 1.21+) |
-| `--from-binary` | Force downloading pre-built binaries |
-| `--yes` | Non-interactive mode, accept all defaults |
-| `--no-service` | Skip system service installation |
+| `--prefix <path>` | Installation directory (default: `/usr/local` for root, `~/.local` for user) |
+| `--version <ver>` | Install a specific version |
+| `--from-source` | Build from source instead of downloading binaries (requires Go 1.21+) |
+| `--from-binary` | Force download of pre-built binaries |
+| `--no-service` | Skip system service installation (systemd/launchd) |
 | `--no-config` | Skip configuration file creation |
-| `--help` | Show all available options |
+| `--init-db` | Initialize a new database during installation |
+| `--yes`, `-y` | Non-interactive mode, accept all defaults |
+| `--uninstall` | Remove FlyDB installation |
 
-#### Examples
+### Build from Source
+
+If you prefer to build from source or need to modify the code:
 
 ```bash
-# Install to custom location
-./install.sh --prefix /opt/flydb
+git clone https://github.com/firefly-oss/flydb.git
+cd flydb
 
-# System-wide installation (requires sudo)
-sudo ./install.sh --prefix /usr/local
+# Option 1: Use the installer (recommended)
+./install.sh --from-source
 
-# Download binaries instead of building (in source directory)
-./install.sh --from-binary --yes
-
-# Automated/CI installation
-./install.sh --yes --no-service --prefix ~/.local
+# Option 2: Build manually (requires Go 1.21+)
+go build -o flydb ./cmd/flydb
+go build -o flydb-shell ./cmd/flydb-shell
 ```
+
+### Installed Components
+
+The installation creates:
+
+| Binary | Description |
+|--------|-------------|
+| `flydb` | The database server daemon |
+| `flydb-shell` | The interactive SQL client |
+| `fsql` | Symlink to `flydb-shell` for convenience |
+
+Default locations:
+- **Binaries**: `/usr/local/bin` (system) or `~/.local/bin` (user)
+- **Configuration**: `/etc/flydb/flydb.conf` (system) or `~/.config/flydb/flydb.conf` (user)
+- **Data**: `/var/lib/flydb` (system) or `~/.local/share/flydb` (user)
 
 ### Uninstallation
 
-To remove FlyDB from your system:
+To remove FlyDB:
 
 ```bash
 # Interactive uninstallation
 ./uninstall.sh
 
-# Preview what would be removed
-./uninstall.sh --dry-run
-
-# Non-interactive uninstallation
+# Non-interactive (removes binaries, services, and config)
 ./uninstall.sh --yes
 
-# Also remove data directories (WARNING: deletes databases!)
+# Preview what would be removed without deleting anything
+./uninstall.sh --dry-run
+
+# Also remove data directories (WARNING: deletes all databases!)
 ./uninstall.sh --remove-data --yes
 ```
 
-The uninstall script automatically detects and removes:
-- FlyDB binaries (`flydb`, `flydb-shell`, `fsql`)
-- System service files (systemd on Linux, launchd on macOS)
-- Configuration directories (use `--no-config` to preserve)
-- Data directories (only with `--remove-data` flag)
-
-### Manual Build
-
-If you prefer to build from source:
+Or use the installer's uninstall mode:
 
 ```bash
-git clone https://github.com/firefly-oss/flydb.git
-cd flydb
-go build -o flydb ./cmd/flydb
-go build -o flydb-shell ./cmd/flydb-shell
-ln -s flydb-shell fsql  # Optional: create fsql symlink
+./install.sh --uninstall
 ```
 
 ---
@@ -241,164 +479,192 @@ ln -s flydb-shell fsql  # Optional: create fsql symlink
 
 ### 1. Start the Server
 
-#### Interactive Wizard (Recommended for First-Time Setup)
-
-Run FlyDB without any arguments to launch the interactive configuration wizard:
+**Interactive Mode (Recommended for First-Time Setup):**
 
 ```bash
-./flydb
+flydb
 ```
 
-The wizard guides you through:
-- Selecting the operative mode (Standalone, Master, or Slave)
-- Configuring network ports
-- Setting the database file path
-- Configuring logging options
+Running `flydb` without arguments launches an interactive wizard that guides you through configuration. On first run, the server will:
+- Generate an admin password (save this securely!)
+- Generate an encryption passphrase if encryption is enabled
+- Create the default database
 
-#### Command-Line Mode
-
-For scripted or automated deployments, use command-line flags:
+**Command-Line Mode:**
 
 ```bash
-./flydb -port 8888 -role standalone
+# Start with default settings (data stored in ~/.local/share/flydb)
+flydb -role standalone
+
+# Start with custom data directory
+flydb -data-dir /var/lib/flydb -port 8888
+
+# Start as master node for replication
+flydb -role master -port 8888 -repl-port 9999 -data-dir /var/lib/flydb
+
+# Start as slave node
+flydb -role slave -master localhost:9999 -data-dir /var/lib/flydb/slave
 ```
 
-### 2. First-Time Setup (Admin Password)
+**Server Options:**
 
-On first startup with a new database, FlyDB will automatically create an admin user:
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-port` | Text protocol port | 8888 |
+| `-binary-port` | Binary protocol port (used by fsql) | 8889 |
+| `-repl-port` | Replication port (master only) | 9999 |
+| `-role` | Server role: `standalone`, `master`, `slave` | master |
+| `-master` | Master address for slave mode | - |
+| `-data-dir` | Data storage directory | `~/.local/share/flydb` |
+| `-log-level` | Log level: `debug`, `info`, `warn`, `error` | info |
+| `-log-json` | Enable JSON log output | false |
+| `-config` | Path to configuration file | - |
 
-**Option A: Generated Password (Default)**
+**Environment Variables:**
 
-If no password is specified, FlyDB generates a secure random password and displays it:
+| Variable | Description |
+|----------|-------------|
+| `FLYDB_DATA_DIR` | Data directory for database storage |
+| `FLYDB_PORT` | Server port for text protocol |
+| `FLYDB_BINARY_PORT` | Server port for binary protocol |
+| `FLYDB_ENCRYPTION_PASSPHRASE` | Encryption passphrase (required if encryption enabled) |
+| `FLYDB_ADMIN_PASSWORD` | Admin password for first-time setup |
 
-```
-═══════════════════════════════════════════════════════════════
-  FIRST-TIME SETUP: Admin credentials generated
-═══════════════════════════════════════════════════════════════
+### 2. Connect with the CLI
 
-  Username: admin
-  Password: xK7#mP2$nQ9@wL4
+The `flydb-shell` (aliased as `fsql`) is an interactive SQL client with readline support, tab completion, and command history.
 
-  IMPORTANT: Save this password securely!
-  This password will NOT be shown again.
-═══════════════════════════════════════════════════════════════
-```
-
-**Option B: Environment Variable**
-
-Set the `FLYDB_ADMIN_PASSWORD` environment variable before starting:
+**Connect to Local Server:**
 
 ```bash
-export FLYDB_ADMIN_PASSWORD="your-secure-password"
-./flydb -port 8888 -role standalone
-```
-
-### 3. Connect with the CLI
-
-```bash
+# Connect to localhost:8889 (default)
 fsql
-# or: ./flydb-shell
+
+# Connect to a specific database
+fsql -d mydb
 ```
 
-The CLI provides an interactive REPL with tab completion, command history, and helpful local commands. Type `\h` for help.
+**Connect to Remote Server:**
 
-### 4. Authenticate
+```bash
+fsql -H 192.168.1.100 -p 8889
+```
 
-The CLI supports secure password entry with masking:
+**Execute a Command and Exit:**
+
+```bash
+fsql -e "SELECT * FROM users"
+fsql -d mydb -e "INSPECT TABLES"
+```
+
+**CLI Options:**
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-H`, `--host` | Server hostname or IP | localhost |
+| `-p`, `--port` | Server port (binary protocol) | 8889 |
+| `-d`, `--database` | Database to connect to | default |
+| `-e`, `--execute` | Execute command and exit | - |
+| `-f`, `--format` | Output format: `table`, `json`, `plain` | table |
+| `--verbose` | Enable verbose output with timing | false |
+| `--no-color` | Disable colored output | false |
+
+### 3. Authenticate
+
+FlyDB requires authentication before executing SQL commands. On first server start, admin credentials are generated and displayed.
 
 ```
-flydb[not authenticated]> AUTH
-Username: admin
+flydb> AUTH admin <password>
+AUTH OK
+
+flydb:default>
+```
+
+For secure password entry, use `AUTH` or `AUTH <username>` without the password:
+
+```
+flydb> AUTH admin
 Password: ********
-AUTH OK (admin)
+AUTH OK
 ```
 
-Or authenticate with username on the command line:
-
-```
-flydb[not authenticated]> AUTH admin
-Password: ********
-AUTH OK (admin)
-```
-
-### 5. Create a Table
+### 4. Basic Operations
 
 ```sql
-flydb:default> CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE);
-CREATE TABLE OK
+-- Create a database
+CREATE DATABASE myapp;
+
+-- Switch to the database
+USE myapp;
+
+-- Create a table with constraints
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT UNIQUE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Insert data
+INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
+INSERT INTO users (name, email) VALUES ('Bob', 'bob@example.com');
+
+-- Query data
+SELECT * FROM users WHERE name LIKE 'A%';
+
+-- Create an index for faster lookups
+CREATE INDEX idx_users_email ON users (email);
+
+-- Update data
+UPDATE users SET name = 'Alice Smith' WHERE id = 1;
+
+-- Delete data
+DELETE FROM users WHERE id = 2;
+
+-- View table structure
+INSPECT TABLE users;
 ```
 
-### 6. Insert Data
+### 5. Interactive Shell Commands
 
-```sql
-flydb:default> INSERT INTO users VALUES (1, 'Alice', 'alice@example.com');
-INSERT 1
-flydb:default> INSERT INTO users VALUES (2, 'Bob', 'bob@example.com');
-INSERT 1
+The CLI supports PostgreSQL-style backslash commands:
+
+| Command | Description |
+|---------|-------------|
+| `\q`, `\quit` | Exit the CLI |
+| `\h`, `\help` | Display help information |
+| `\c <db>` | Switch to a different database |
+| `\dt` | List all tables |
+| `\di` | List all indexes |
+| `\du` | List all users |
+| `\db`, `\l` | List all databases |
+| `\s`, `\status` | Show connection status |
+| `\timing` | Toggle query timing display |
+| `\x` | Toggle expanded (vertical) output |
+| `\clear` | Clear the screen |
+| `\! <cmd>` | Execute a shell command |
+| `\sql` | Enter SQL mode (all input treated as SQL) |
+| `\normal` | Return to normal mode |
+
+### 6. Multi-Line Statements
+
+SQL statements can span multiple lines. The CLI waits for a semicolon before executing:
+
+```
+flydb:default> SELECT id, name, email
+        -> FROM users
+        -> WHERE created_at > '2024-01-01'
+        -> ORDER BY name;
 ```
 
-### 7. Query Data
+Use a backslash at the end of a line for explicit continuation:
 
-```sql
-flydb:default> SELECT * FROM users;
-+----+-------+-------------------+
-| id | name  | email             |
-+----+-------+-------------------+
-| 1  | Alice | alice@example.com |
-| 2  | Bob   | bob@example.com   |
-+----+-------+-------------------+
-(2 rows)
-
-flydb:default> SELECT name FROM users WHERE id = 1;
-+-------+
-| name  |
-+-------+
-| Alice |
-+-------+
-(1 row)
+```
+flydb:default> SELECT * FROM users \
+        -> WHERE id = 1;
 ```
 
-### 8. Update and Delete
-
-```sql
-flydb:default> UPDATE users SET email = 'alice@newdomain.com' WHERE id = 1;
-UPDATE 1
-
-flydb:default> DELETE FROM users WHERE id = 2;
-DELETE 1
-```
-
-### 9. Working with Multiple Databases
-
-FlyDB supports multiple isolated databases within a single server instance:
-
-```sql
--- Create a new database with custom settings
-flydb:default> CREATE DATABASE analytics WITH ENCODING 'UTF8' LOCALE 'en_US' COLLATION 'unicode';
-CREATE DATABASE OK
-
--- Switch to the new database
-flydb:default> USE analytics
-USE analytics OK
-
--- Create tables in the new database (isolated from default)
-flydb:analytics> CREATE TABLE events (id INT PRIMARY KEY, name TEXT, timestamp TIMESTAMP);
-CREATE TABLE OK
-
--- List all databases
-flydb:analytics> INSPECT DATABASES;
-+------------+-------+----------+--------+-----------+--------+------+
-| name       | owner | encoding | locale | collation | tables | size |
-+------------+-------+----------+--------+-----------+--------+------+
-| default    | admin | UTF8     | en_US  | default   | 1      | 4 KB |
-| analytics  | admin | UTF8     | en_US  | unicode   | 1      | 2 KB |
-+------------+-------+----------+--------+-----------+--------+------+
-(2 rows)
-
--- Switch back to default database
-flydb:analytics> USE default
-USE default OK
-```
+For complete SQL syntax, data types, functions, and query features, see the **[API Reference](docs/api.md)**.
 
 ---
 
@@ -595,68 +861,66 @@ Follower:
 ./flydb -port 8889 -role slave -master localhost:9999 -data-dir /var/lib/flydb-replica
 ```
 
-### Security Configuration
+---
 
-#### Admin Password Setup
+## Security
 
-On first startup with a new database, FlyDB requires an admin password to be set. There are three ways to configure this:
+### Authentication
 
-| Method | Use Case | Description |
-|--------|----------|-------------|
-| Environment Variable | Automated/CI deployments | Set `FLYDB_ADMIN_PASSWORD` before starting |
-| Generated Password | Interactive use | FlyDB generates and displays a secure password |
-| Interactive Wizard | First-time setup | Wizard prompts for password when run without args |
-
-**Environment Variable (Recommended for Production)**
+FlyDB uses bcrypt for password hashing. On first startup, an admin user is created:
 
 ```bash
-export FLYDB_ADMIN_PASSWORD="your-secure-password-here"
-./flydb -port 8888 -role standalone -db production.fdb
+# Option 1: Set password via environment variable
+export FLYDB_ADMIN_PASSWORD="your-secure-password"
+./flydb -data-dir ./data
+
+# Option 2: Let FlyDB generate a password (displayed once at startup)
+./flydb -data-dir ./data
 ```
 
-**Generated Password**
+### Encryption at Rest
 
-If no password is provided, FlyDB generates a 16-character cryptographically secure password containing letters, numbers, and special characters. This password is displayed once at startup and must be saved securely.
+All data is encrypted using AES-256-GCM by default. Set the encryption passphrase:
 
-#### Changing the Admin Password
+```bash
+export FLYDB_ENCRYPTION_PASSPHRASE="your-passphrase"
+./flydb -data-dir ./data
+```
 
-After initial setup, you can change the admin password using SQL:
+To disable encryption:
+
+```bash
+./flydb -data-dir ./data -encryption-enabled=false
+```
+
+### Row-Level Security
+
+Grant access to specific rows using predicate filters:
 
 ```sql
-ALTER USER admin IDENTIFIED BY 'new-secure-password'
+-- User can only see their own orders
+GRANT SELECT ON orders WHERE user_id = 'alice' TO alice;
 ```
 
-#### Security Best Practices
+---
 
-1. **Never use default or weak passwords** - Always use strong, unique passwords
-2. **Save generated passwords securely** - Use a password manager
-3. **Use environment variables in production** - Avoid hardcoding passwords in scripts
-4. **Enable TLS** - Use encrypted connections in production
-5. **Rotate passwords regularly** - Change admin password periodically
+## Replication
 
-#### Data-at-Rest Encryption
-FlyDB encrypts all data stored on disk using AES-256-GCM. When encryption is enabled, you **must** provide a passphrase. There are two ways to set the passphrase:
+FlyDB supports leader-follower replication with automatic failover.
 
-**Option 1: Environment Variable (Recommended for Production)**
+### Start a Leader
 
 ```bash
-export FLYDB_ENCRYPTION_PASSPHRASE="your-secure-passphrase"
-./flydb -role standalone
+./flydb -role master -port 8888 -repl-port 9999 -data-dir ./data
 ```
 
-**Option 2: Interactive Wizard**
-
-When running FlyDB without arguments, the setup wizard will prompt you to enter a passphrase:
+### Start a Follower
 
 ```bash
-./flydb
-# Wizard will prompt:
-#   Step 4: Data-at-Rest Encryption
-#   Enable encryption? (y/n) [y]: y
-#   Encryption passphrase: ********
+./flydb -role slave -port 8889 -master localhost:9999 -data-dir ./data-replica
 ```
 
-The wizard automatically detects if `FLYDB_ENCRYPTION_PASSPHRASE` is already set and uses it.
+Followers automatically sync from the leader and can be promoted if the leader fails.
 
 ---
 
@@ -716,7 +980,8 @@ flydb/
         sdk/                SDK types for driver development
         server/             TCP server and replication
         sql/                Lexer, parser, executor, catalog
-        storage/            KVStore, WAL, B-Tree, encryption
+        storage/            Storage engine, WAL, B-Tree, encryption
+            disk/           Buffer pool, heap file, page management
         wizard/             Interactive configuration wizard
     docs/                   Technical documentation
     install.sh              Installation script
