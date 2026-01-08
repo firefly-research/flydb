@@ -11,7 +11,7 @@ FlyDB is a lightweight SQL database written in Go, designed to demonstrate core 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Client Applications                        │
-│              (TCP clients, connection pools, CLI)               │
+│         (fsql CLI, TCP clients, connection pools, drivers)      │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                     ┌───────────┴───────────┐
@@ -19,7 +19,7 @@ FlyDB is a lightweight SQL database written in Go, designed to demonstrate core 
 ┌──────────────────────────┐   ┌──────────────────────────┐
 │   Text Protocol (:8888)  │   │  Binary Protocol (:8889) │
 │   • Line-based commands  │   │  • Length-prefixed JSON  │
-│   • Human-readable       │   │  • Efficient for clients │
+│   • Human-readable       │   │  • Efficient for drivers │
 └──────────────────────────┘   └──────────────────────────┘
                     │                       │
                     └───────────┬───────────┘
@@ -30,6 +30,12 @@ FlyDB is a lightweight SQL database written in Go, designed to demonstrate core 
 │  │ TCP Server  │  │ Replicator  │  │   Cluster Manager       │  │
 │  │ (server.go) │  │(replication)│  │   (leader election)     │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Database Manager                           │    │
+│  │  • Multi-database support    • Per-connection context   │    │
+│  │  • Database lifecycle        • Metadata management      │    │
+│  └─────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -39,12 +45,21 @@ FlyDB is a lightweight SQL database written in Go, designed to demonstrate core 
 │  │  Lexer  │→ │ Parser  │→ │ Executor │→ │ Query Cache     │    │
 │  └─────────┘  └─────────┘  └──────────┘  └─────────────────┘    │
 │                                │                                │
-│                    ┌───────────┴───────────┐                    │
-│                    ▼                       ▼                    │
-│            ┌─────────────┐         ┌─────────────┐              │
-│            │   Catalog   │         │  Prepared   │              │
-│            │  (schemas)  │         │ Statements  │              │
-│            └─────────────┘         └─────────────┘              │
+│              ┌─────────────────┼─────────────────┐              │
+│              ▼                 ▼                 ▼              │
+│      ┌─────────────┐   ┌─────────────┐   ┌─────────────┐        │
+│      │   Catalog   │   │  Prepared   │   │  Triggers   │        │
+│      │  (schemas)  │   │ Statements  │   │  Manager    │        │
+│      └─────────────┘   └─────────────┘   └─────────────┘        │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Internationalization (I18N)                │    │
+│  │  ┌───────────┐  ┌───────────┐  ┌───────────────────┐    │    │
+│  │  │ Collator  │  │  Encoder  │  │  Locale Support   │    │    │
+│  │  │ (sorting) │  │(validation│  │  (golang.org/x/   │    │    │
+│  │  │           │  │           │  │   text/collate)   │    │    │
+│  │  └───────────┘  └───────────┘  └───────────────────┘    │    │
+│  └─────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -64,17 +79,22 @@ FlyDB is a lightweight SQL database written in Go, designed to demonstrate core 
 │  │ (in-memory) │  │ (durability)│  │     (B-Tree indexes)    │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 │                                                                 │
-│  ┌─────────────┐  ┌─────────────┐                               │
-│  │ Transaction │  │  Encryptor  │                               │
-│  │  Manager    │  │ (AES-256)   │                               │
-│  └─────────────┘  └─────────────┘                               │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │ Transaction │  │  Encryptor  │  │   Database Instance     │  │
+│  │  Manager    │  │ (AES-256)   │  │   (per-db isolation)    │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
-                    ┌───────────────────────┐
-                    │     File System       │
-                    │   (WAL file: .wal)    │
-                    └───────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                       File System                               │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │  data_dir/                                              │    │
+│  │  ├── default.fdb      (default database)                │    │
+│  │  ├── myapp.fdb        (user database)                   │    │
+│  │  └── analytics.fdb    (user database)                   │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## Component Overview
@@ -124,6 +144,29 @@ The storage layer provides persistence and data management:
 | Index Manager | `index.go` | Index lifecycle management |
 | Transaction | `transaction.go` | ACID transaction support |
 | Encryptor | `encryption.go` | AES-256-GCM encryption |
+| Database | `database.go` | Database struct with metadata |
+| DatabaseManager | `database.go` | Multi-database lifecycle management |
+| Collation | `collation.go` | String comparison rules |
+| Encoding | `encoding.go` | Character encoding validation |
+
+### CLI/Shell (`cmd/flydb-shell/`)
+
+The interactive shell provides a PostgreSQL-like experience:
+
+| Feature | Description |
+|---------|-------------|
+| Multi-mode | Normal mode (commands) and SQL mode (direct SQL) |
+| Tab completion | Commands, keywords, table names |
+| History | Persistent command history with readline |
+| Database context | Tracks current database, shown in prompt |
+| Backslash commands | `\dt`, `\du`, `\db`, `\c`, etc. |
+
+**Shell Prompt Format:**
+```
+flydb>                    -- Normal mode (default database)
+flydb/mydb>               -- Normal mode (non-default database)
+flydb/mydb[sql]>          -- SQL mode (non-default database)
+```
 
 ### Supporting Packages
 
@@ -136,6 +179,9 @@ The storage layer provides persistence and data management:
 | `internal/errors/` | Structured error handling with codes |
 | `internal/logging/` | Structured logging framework |
 | `internal/banner/` | Startup banner display |
+| `internal/config/` | Configuration management with YAML support |
+| `internal/wizard/` | Interactive setup wizard |
+| `pkg/cli/` | CLI utilities (colors, formatting, prompts) |
 
 ## Data Flow
 
@@ -223,6 +269,214 @@ The storage layer provides persistence and data management:
 5. Follower updates its WAL offset
 ```
 
+## Multi-Database Architecture
+
+FlyDB supports multiple isolated databases within a single server instance:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      DatabaseManager                            │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐  │
+│  │   Database:     │  │   Database:     │  │   Database:     │  │
+│  │   "default"     │  │   "analytics"   │  │   "staging"     │  │
+│  │                 │  │                 │  │                 │  │
+│  │  ┌───────────┐  │  │  ┌───────────┐  │  │  ┌───────────┐  │  │
+│  │  │  KVStore  │  │  │  │  KVStore  │  │  │  │  KVStore  │  │  │
+│  │  └───────────┘  │  │  └───────────┘  │  │  └───────────┘  │  │
+│  │  ┌───────────┐  │  │  ┌───────────┐  │  │  ┌───────────┐  │  │
+│  │  │  Executor │  │  │  │  Executor │  │  │  │  Executor │  │  │
+│  │  └───────────┘  │  │  └───────────┘  │  │  └───────────┘  │  │
+│  │  ┌───────────┐  │  │  ┌───────────┐  │  │  ┌───────────┐  │  │
+│  │  │  Catalog  │  │  │  │  Catalog  │  │  │  │  Catalog  │  │  │
+│  │  └───────────┘  │  │  └───────────┘  │  │  └───────────┘  │  │
+│  │                 │  │                 │  │                 │  │
+│  │  Metadata:      │  │  Metadata:      │  │  Metadata:      │  │
+│  │  - Encoding     │  │  - Encoding     │  │  - Encoding     │  │
+│  │  - Locale       │  │  - Locale       │  │  - Locale       │  │
+│  │  - Collation    │  │  - Collation    │  │  - Collation    │  │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘  │
+│                                                                 │
+│  File System:                                                   │
+│  data_dir/                                                      │
+│  ├── default.fdb                                                │
+│  ├── analytics.fdb                                              │
+│  └── staging.fdb                                                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Database Isolation
+
+Each database has:
+- **Separate KVStore**: Complete data isolation
+- **Own Executor**: Independent query execution
+- **Own Catalog**: Separate table schemas
+- **Own Indexes**: B-Tree indexes scoped to database
+- **Metadata**: Encoding, locale, collation, owner
+
+### Database Metadata
+
+| Property | Description | Values |
+|----------|-------------|--------|
+| Owner | User who created the database | Username |
+| Encoding | Character encoding | UTF8, LATIN1, ASCII, UTF16 |
+| Locale | Locale for sorting | en_US, de_DE, fr_FR, etc. |
+| Collation | String comparison rules | default, binary, nocase, unicode |
+| Description | Optional description | Free text |
+| ReadOnly | Read-only mode | true/false |
+
+### Connection Database Context
+
+Each client connection maintains its own database context:
+
+```
+┌─────────────────┐     ┌─────────────────┐
+│  Connection 1   │     │  Connection 2   │
+│  Database: app  │     │  Database: logs │
+└────────┬────────┘     └────────┬────────┘
+         │                       │
+         ▼                       ▼
+┌─────────────────┐     ┌─────────────────┐
+│  Executor: app  │     │  Executor: logs │
+└─────────────────┘     └─────────────────┘
+```
+
+## Collation, Encoding, and Locale System
+
+FlyDB provides comprehensive internationalization support through its collation, encoding, and locale subsystems. These features enable proper handling of text data across different languages and character sets.
+
+### Collation Architecture
+
+Collation determines how strings are compared and sorted. FlyDB implements the `Collator` interface:
+
+```go
+type Collator interface {
+    Compare(a, b string) int  // Returns -1, 0, or 1
+    Equal(a, b string) bool   // Equality check
+    SortKey(s string) []byte  // Key for efficient sorting
+}
+```
+
+**Supported Collations:**
+
+| Collation | Description | Use Case |
+|-----------|-------------|----------|
+| `default` | Go's native string comparison | General purpose, fast |
+| `nocase` | Case-insensitive comparison | Email addresses, usernames |
+| `binary` | Byte-by-byte comparison | Exact matching, hashes |
+| `unicode` | Locale-aware Unicode collation | International text |
+
+**Collation Flow in Query Execution:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      SQL Query                                  │
+│  SELECT * FROM users WHERE name = 'José' ORDER BY name          │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Executor                                   │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │ Collator (from database metadata)                       │    │
+│  │ - Unicode collator with locale "es_ES"                  │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                              │                                  │
+│              ┌───────────────┴───────────────┐                  │
+│              ▼                               ▼                  │
+│  ┌─────────────────────┐         ┌─────────────────────┐        │
+│  │ WHERE Evaluation    │         │ ORDER BY Sorting    │        │
+│  │ collator.Equal()    │         │ collator.Compare()  │        │
+│  └─────────────────────┘         └─────────────────────┘        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Encoding Architecture
+
+Encoding ensures data integrity by validating that text conforms to the database's character encoding:
+
+```go
+type Encoder interface {
+    Validate(s string) error      // Check if string is valid
+    Encode(s string) ([]byte, error)   // Convert to bytes
+    Decode(b []byte) (string, error)   // Convert from bytes
+    Name() string                 // Encoding name
+}
+```
+
+**Supported Encodings:**
+
+| Encoding | Description | Byte Range |
+|----------|-------------|------------|
+| `UTF8` | Unicode UTF-8 (default) | 1-4 bytes per char |
+| `ASCII` | 7-bit ASCII | 1 byte per char |
+| `LATIN1` | ISO-8859-1 | 1 byte per char |
+| `UTF16` | Unicode UTF-16 | 2-4 bytes per char |
+
+**Encoding Validation Flow:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  INSERT INTO users (name) VALUES ('Müller')                     │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      Executor                                   │
+│                              │                                  │
+│              ┌───────────────┴───────────────┐                  │
+│              ▼                               ▼                  │
+│  ┌─────────────────────┐         ┌─────────────────────┐        │
+│  │ Type Validation     │         │ Encoding Validation │        │
+│  │ ValidateValue()     │         │ encoder.Validate()  │        │
+│  └─────────────────────┘         └─────────────────────┘        │
+│              │                               │                  │
+│              │         ┌─────────────────────┘                  │
+│              │         │                                        │
+│              │    ┌────▼────┐                                   │
+│              │    │ ASCII?  │──No──► Error: invalid encoding    │
+│              │    │ UTF8?   │──Yes─► Continue                   │
+│              │    └─────────┘                                   │
+│              ▼                                                  │
+│  ┌─────────────────────┐                                        │
+│  │ Store in KVStore    │                                        │
+│  └─────────────────────┘                                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Locale Support
+
+Locale affects how the Unicode collator sorts and compares strings. FlyDB uses Go's `golang.org/x/text/collate` package for locale-aware operations:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Locale Examples                              │
+├─────────────────────────────────────────────────────────────────┤
+│  Locale: en_US                                                  │
+│  Sort: A, B, C, ... Z, a, b, c, ... z                           │
+│                                                                 │
+│  Locale: de_DE                                                  │
+│  Sort: A, Ä, B, C, ... (ä sorts with a)                         │
+│  Special: ß = ss                                                │
+│                                                                 │
+│  Locale: sv_SE                                                  │
+│  Sort: A, B, C, ... Z, Å, Ä, Ö                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Database Creation with I18N Options
+
+```sql
+CREATE DATABASE german_app
+  ENCODING UTF8
+  LOCALE de_DE
+  COLLATION unicode;
+```
+
+This creates a database where:
+- All text is validated as UTF-8
+- String comparisons use German sorting rules
+- Umlauts (ä, ö, ü) sort correctly with their base letters
+
 ## Key Storage Conventions
 
 FlyDB uses a key prefix convention to organize data in the KVStore:
@@ -234,6 +488,8 @@ FlyDB uses a key prefix convention to organize data in the KVStore:
 | `schema:<table>` | Table schema definition | `schema:users` |
 | `_sys_users:<username>` | User credentials | `_sys_users:alice` |
 | `_sys_privs:<user>:<table>` | User permissions | `_sys_privs:alice:orders` |
+| `_sys_db_privs:<user>:<db>` | Database permissions | `_sys_db_privs:alice:analytics` |
+| `_sys_db_meta` | Database metadata | `_sys_db_meta` |
 | `index:<table>:<column>` | Index metadata | `index:users:email` |
 | `proc:<name>` | Stored procedure | `proc:get_user` |
 | `view:<name>` | View definition | `view:active_users` |
@@ -312,9 +568,92 @@ FlyDB supports automatic failover using the Bully algorithm:
 └────────────────────────────────────────────────────────────────┘
 ```
 
+## SQL Command Summary
+
+FlyDB supports a comprehensive SQL dialect:
+
+### Data Definition Language (DDL)
+
+| Command | Description |
+|---------|-------------|
+| `CREATE TABLE` | Create a new table with columns and constraints |
+| `DROP TABLE` | Remove a table |
+| `ALTER TABLE` | Modify table structure |
+| `CREATE INDEX` | Create a B-Tree index on a column |
+| `DROP INDEX` | Remove an index |
+| `CREATE DATABASE` | Create a new database with options |
+| `DROP DATABASE` | Remove a database |
+| `USE <database>` | Switch to a database |
+
+### Data Manipulation Language (DML)
+
+| Command | Description |
+|---------|-------------|
+| `SELECT` | Query data with WHERE, ORDER BY, LIMIT, JOIN |
+| `INSERT` | Insert rows (single or bulk) |
+| `UPDATE` | Modify existing rows |
+| `DELETE` | Remove rows |
+| `INSERT ... ON CONFLICT` | Upsert support |
+
+### Transaction Control
+
+| Command | Description |
+|---------|-------------|
+| `BEGIN` | Start a transaction |
+| `COMMIT` | Commit the transaction |
+| `ROLLBACK` | Rollback the transaction |
+| `SAVEPOINT` | Create a savepoint |
+| `RELEASE SAVEPOINT` | Release a savepoint |
+
+### Access Control
+
+| Command | Description |
+|---------|-------------|
+| `CREATE USER` | Create a new user |
+| `DROP USER` | Remove a user |
+| `GRANT` | Grant permissions |
+| `REVOKE` | Revoke permissions |
+
+### Inspection
+
+| Command | Description |
+|---------|-------------|
+| `INSPECT TABLES` | List all tables |
+| `INSPECT TABLE <name>` | Show table details |
+| `INSPECT USERS` | List all users |
+| `INSPECT INDEXES` | List all indexes |
+| `INSPECT DATABASES` | List all databases |
+| `INSPECT DATABASE <name>` | Show database details |
+| `INSPECT SERVER` | Show server information |
+| `INSPECT STATUS` | Show server status |
+
+## Shell Commands (fsql)
+
+The `fsql` shell provides PostgreSQL-like backslash commands:
+
+| Command | Description |
+|---------|-------------|
+| `\q`, `\quit` | Exit the shell |
+| `\h`, `\help` | Show help |
+| `\clear` | Clear the screen |
+| `\s`, `\status` | Show connection status |
+| `\v`, `\version` | Show version |
+| `\timing` | Toggle query timing |
+| `\x` | Toggle expanded output |
+| `\o [file]` | Set output to file |
+| `\! <cmd>` | Execute shell command |
+| `\dt` | List tables |
+| `\du` | List users |
+| `\di` | List indexes |
+| `\db`, `\l` | List databases |
+| `\c`, `\connect <db>` | Switch database |
+| `\sql` | Enter SQL mode |
+| `\normal` | Return to normal mode |
+
 ## See Also
 
 - [Implementation Details](implementation.md) - Technical deep-dives
 - [Design Decisions](design-decisions.md) - Rationale and trade-offs
 - [API Reference](api.md) - SQL syntax and commands
+- [Driver Development Guide](driver-development.md) - Building database drivers
 

@@ -6,12 +6,18 @@ This document provides technical details on the key algorithms, data structures,
 
 1. [Storage Engine](#storage-engine)
 2. [Write-Ahead Log (WAL)](#write-ahead-log-wal)
-3. [B-Tree Indexes](#b-tree-indexes)
-4. [SQL Processing Pipeline](#sql-processing-pipeline)
-5. [Transaction Support](#transaction-support)
-6. [Authentication & Authorization](#authentication--authorization)
-7. [Replication](#replication)
-8. [Query Cache](#query-cache)
+3. [Multi-Database Architecture](#multi-database-architecture)
+4. [Collation System](#collation-system)
+5. [Encoding System](#encoding-system)
+6. [B-Tree Indexes](#b-tree-indexes)
+7. [SQL Processing Pipeline](#sql-processing-pipeline)
+8. [Prepared Statements](#prepared-statements)
+9. [Triggers](#triggers)
+10. [Transaction Support](#transaction-support)
+11. [Authentication & Authorization](#authentication--authorization)
+12. [Replication](#replication)
+13. [Clustering](#clustering)
+14. [Query Cache](#query-cache)
 
 ---
 
@@ -129,6 +135,288 @@ err := wal.Replay(0, func(op byte, key string, value []byte) {
         delete(data, key)
     }
 })
+```
+
+---
+
+## Multi-Database Architecture
+
+### DatabaseManager
+
+The `DatabaseManager` handles multiple isolated databases:
+
+```go
+type DatabaseManager struct {
+    dataDir   string               // Base directory for all databases
+    databases map[string]*Database // Lazy-loaded database instances
+    encConfig EncryptionConfig     // Shared encryption configuration
+    mu        sync.RWMutex
+}
+
+type Database struct {
+    Name     string
+    Path     string            // Full path to .fdb file
+    Store    *KVStore          // Dedicated KVStore instance
+    Metadata *DatabaseMetadata // Encoding, collation, locale settings
+}
+```
+
+### Database Metadata
+
+Each database stores its configuration in the key `_sys_db_meta`:
+
+```go
+type DatabaseMetadata struct {
+    Name        string            // Database name
+    Owner       string            // Creator username
+    Encoding    CharacterEncoding // UTF8, LATIN1, ASCII, UTF16
+    Collation   Collation         // default, binary, nocase, unicode
+    Locale      string            // e.g., "en_US", "de_DE"
+    CreatedAt   time.Time
+    UpdatedAt   time.Time
+    Description string
+    ReadOnly    bool
+    MaxSize     int64
+    Properties  map[string]string // Extensible properties
+}
+```
+
+### Per-Connection Database Context
+
+The server tracks which database each connection is using:
+
+```go
+type Server struct {
+    connDatabases map[net.Conn]string  // Connection -> database name
+    connDbMu      sync.Mutex
+}
+
+func (s *Server) SetConnectionDatabase(conn net.Conn, dbName string) {
+    s.connDbMu.Lock()
+    defer s.connDbMu.Unlock()
+    s.connDatabases[conn] = dbName
+}
+
+func (s *Server) GetConnectionDatabase(conn net.Conn) string {
+    s.connDbMu.Lock()
+    defer s.connDbMu.Unlock()
+    return s.connDatabases[conn]
+}
+```
+
+### Database Operations
+
+**Create Database:**
+```go
+func (dm *DatabaseManager) CreateDatabase(name string, meta *DatabaseMetadata) error {
+    dm.mu.Lock()
+    defer dm.mu.Unlock()
+
+    path := filepath.Join(dm.dataDir, name+".fdb")
+    store, err := NewKVStore(path, dm.encConfig)
+    if err != nil {
+        return err
+    }
+
+    db := &Database{Name: name, Path: path, Store: store, Metadata: meta}
+    dm.databases[name] = db
+
+    // Persist metadata
+    metaJSON, _ := json.Marshal(meta)
+    return store.Put("_sys_db_meta", metaJSON)
+}
+```
+
+**Get Database (Lazy Loading):**
+```go
+func (dm *DatabaseManager) GetDatabase(name string) (*Database, error) {
+    dm.mu.RLock()
+    if db, ok := dm.databases[name]; ok {
+        dm.mu.RUnlock()
+        return db, nil
+    }
+    dm.mu.RUnlock()
+
+    // Load from disk
+    dm.mu.Lock()
+    defer dm.mu.Unlock()
+
+    path := filepath.Join(dm.dataDir, name+".fdb")
+    store, err := NewKVStore(path, dm.encConfig)
+    if err != nil {
+        return nil, err
+    }
+
+    // Load metadata
+    metaJSON, _ := store.Get("_sys_db_meta")
+    var meta DatabaseMetadata
+    json.Unmarshal(metaJSON, &meta)
+
+    db := &Database{Name: name, Path: path, Store: store, Metadata: &meta}
+    dm.databases[name] = db
+    return db, nil
+}
+```
+
+---
+
+## Collation System
+
+### Collator Interface
+
+Collation determines how strings are compared and sorted:
+
+```go
+type Collator interface {
+    Compare(a, b string) int  // -1 if a < b, 0 if a == b, 1 if a > b
+    Equal(a, b string) bool
+}
+```
+
+### Implementations
+
+**DefaultCollator** - Uses Go's native string comparison:
+```go
+type DefaultCollator struct{}
+
+func (c *DefaultCollator) Compare(a, b string) int {
+    if a < b { return -1 }
+    if a > b { return 1 }
+    return 0
+}
+```
+
+**BinaryCollator** - Byte-by-byte comparison:
+```go
+type BinaryCollator struct{}
+
+func (c *BinaryCollator) Compare(a, b string) int {
+    return bytes.Compare([]byte(a), []byte(b))
+}
+```
+
+**NocaseCollator** - Case-insensitive comparison:
+```go
+type NocaseCollator struct{}
+
+func (c *NocaseCollator) Compare(a, b string) int {
+    return strings.Compare(strings.ToLower(a), strings.ToLower(b))
+}
+```
+
+**UnicodeCollator** - Locale-aware Unicode collation:
+```go
+type UnicodeCollator struct {
+    collator *collate.Collator
+}
+
+func NewUnicodeCollator(locale string) *UnicodeCollator {
+    tag := language.Make(locale)
+    return &UnicodeCollator{
+        collator: collate.New(tag),
+    }
+}
+
+func (c *UnicodeCollator) Compare(a, b string) int {
+    return c.collator.CompareString(a, b)
+}
+```
+
+### Usage in Executor
+
+The executor uses the database's collator for string comparisons:
+
+```go
+func (e *Executor) stringsEqual(a, b string) bool {
+    if e.collator != nil {
+        return e.collator.Equal(a, b)
+    }
+    return a == b
+}
+
+func (e *Executor) compareStrings(a, b string) int {
+    if e.collator != nil {
+        return e.collator.Compare(a, b)
+    }
+    if a < b { return -1 }
+    if a > b { return 1 }
+    return 0
+}
+```
+
+---
+
+## Encoding System
+
+### Encoder Interface
+
+Encoders validate and convert string data:
+
+```go
+type Encoder interface {
+    Encode(s string) ([]byte, error)
+    Decode(b []byte) (string, error)
+    Validate(s string) error
+    Name() string
+}
+```
+
+### Implementations
+
+**UTF8Encoder** - Go's native encoding:
+```go
+type UTF8Encoder struct{}
+
+func (e *UTF8Encoder) Validate(s string) error {
+    if !utf8.ValidString(s) {
+        return errors.New("invalid UTF-8 string")
+    }
+    return nil
+}
+```
+
+**ASCIIEncoder** - 7-bit ASCII only:
+```go
+type ASCIIEncoder struct{}
+
+func (e *ASCIIEncoder) Validate(s string) error {
+    for _, r := range s {
+        if r > 127 {
+            return fmt.Errorf("character %q is not valid ASCII", r)
+        }
+    }
+    return nil
+}
+```
+
+**Latin1Encoder** - ISO-8859-1:
+```go
+type Latin1Encoder struct{}
+
+func (e *Latin1Encoder) Validate(s string) error {
+    for _, r := range s {
+        if r > 255 {
+            return fmt.Errorf("character %q is not valid Latin-1", r)
+        }
+    }
+    return nil
+}
+```
+
+### Validation During INSERT/UPDATE
+
+The executor validates string data against the database encoding:
+
+```go
+func (e *Executor) validateEncoding(value interface{}) error {
+    if e.encoder == nil {
+        return nil
+    }
+    if str, ok := value.(string); ok {
+        return e.encoder.Validate(str)
+    }
+    return nil
+}
 ```
 
 ---
@@ -335,14 +623,97 @@ func (e *Executor) Execute(stmt Statement, user string) (string, error) {
 2. Check query cache for cached results
 3. Retrieve table schema from Catalog
 4. Scan rows from KVStore (or use index if available)
-5. Apply WHERE filters
+5. Apply WHERE filters (using collator for string comparisons)
 6. Apply Row-Level Security (RLS) conditions
 7. Apply JOINs if present
 8. Apply GROUP BY and aggregate functions
 9. Apply HAVING filter
-10. Apply ORDER BY
+10. Apply ORDER BY (using collator for string sorting)
 11. Apply LIMIT and OFFSET
 12. Format and return results
+
+---
+
+## Prepared Statements
+
+### PreparedStatementManager
+
+Prepared statements allow parsing once and executing multiple times:
+
+```go
+type PreparedStatementManager struct {
+    statements map[string]*PreparedStatement
+    mu         sync.RWMutex
+}
+
+type PreparedStatement struct {
+    Name       string
+    Query      string
+    ParamCount int
+}
+```
+
+### Operations
+
+**Prepare:**
+```go
+func (m *PreparedStatementManager) Prepare(name, query string) error {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+
+    // Count parameter placeholders (?)
+    paramCount := strings.Count(query, "?")
+
+    m.statements[name] = &PreparedStatement{
+        Name:       name,
+        Query:      query,
+        ParamCount: paramCount,
+    }
+    return nil
+}
+```
+
+**Execute:**
+```go
+func (m *PreparedStatementManager) Execute(name string, params []string) (string, error) {
+    m.mu.RLock()
+    stmt, ok := m.statements[name]
+    m.mu.RUnlock()
+
+    if !ok {
+        return "", fmt.Errorf("prepared statement %s not found", name)
+    }
+
+    if len(params) != stmt.ParamCount {
+        return "", fmt.Errorf("expected %d parameters, got %d", stmt.ParamCount, len(params))
+    }
+
+    // Substitute parameters
+    query := stmt.Query
+    for _, param := range params {
+        query = strings.Replace(query, "?", "'"+param+"'", 1)
+    }
+
+    // Parse and execute
+    lexer := NewLexer(query)
+    parser := NewParser(lexer)
+    parsedStmt, err := parser.Parse()
+    if err != nil {
+        return "", err
+    }
+    return e.Execute(parsedStmt, user)
+}
+```
+
+**Deallocate:**
+```go
+func (m *PreparedStatementManager) Deallocate(name string) error {
+    m.mu.Lock()
+    defer m.mu.Unlock()
+    delete(m.statements, name)
+    return nil
+}
+```
 
 ---
 
@@ -420,16 +791,30 @@ func (e *Executor) executeTriggers(tableName string, timing TriggerTiming, event
 
 ### Transaction Model
 
-FlyDB supports ACID transactions with snapshot isolation:
+FlyDB supports transactions with Read Committed isolation and savepoint support:
 
 ```go
 type Transaction struct {
-    id          uint64
-    store       Engine
-    writeBuffer map[string][]byte  // Uncommitted writes
-    deleteSet   map[string]bool    // Uncommitted deletes
-    committed   bool
-    mu          sync.Mutex
+    store      *KVStore
+    buffer     []TxOperation      // Ordered list of pending operations
+    readCache  map[string][]byte  // Read-your-writes cache
+    deleteSet  map[string]bool    // Pending deletes
+    state      TxState            // Active, Committed, or RolledBack
+    savepoints []Savepoint        // Named savepoints
+    mu         sync.Mutex
+}
+
+type TxOperation struct {
+    Op    byte   // OpPut or OpDelete
+    Key   string
+    Value []byte
+}
+
+type Savepoint struct {
+    Name           string
+    BufferPosition int               // Position in buffer to rollback to
+    ReadCacheSnap  map[string][]byte // Snapshot of read cache
+    DeleteSetSnap  map[string]bool   // Snapshot of delete set
 }
 ```
 
@@ -501,9 +886,80 @@ func (tx *Transaction) Commit() error {
 func (tx *Transaction) Rollback() error {
     tx.mu.Lock()
     defer tx.mu.Unlock()
-    tx.writeBuffer = nil
+    tx.buffer = nil
+    tx.readCache = nil
     tx.deleteSet = nil
+    tx.state = TxRolledBack
     return nil
+}
+```
+
+### Savepoints
+
+Savepoints allow partial rollback within a transaction:
+
+**Create Savepoint:**
+```go
+func (tx *Transaction) Savepoint(name string) error {
+    tx.mu.Lock()
+    defer tx.mu.Unlock()
+
+    // Snapshot current state
+    sp := Savepoint{
+        Name:           name,
+        BufferPosition: len(tx.buffer),
+        ReadCacheSnap:  copyMap(tx.readCache),
+        DeleteSetSnap:  copyMap(tx.deleteSet),
+    }
+    tx.savepoints = append(tx.savepoints, sp)
+    return nil
+}
+```
+
+**Rollback to Savepoint:**
+```go
+func (tx *Transaction) RollbackToSavepoint(name string) error {
+    tx.mu.Lock()
+    defer tx.mu.Unlock()
+
+    // Find the savepoint
+    idx := -1
+    for i, sp := range tx.savepoints {
+        if sp.Name == name {
+            idx = i
+            break
+        }
+    }
+    if idx == -1 {
+        return fmt.Errorf("savepoint %s not found", name)
+    }
+
+    sp := tx.savepoints[idx]
+
+    // Restore state to savepoint
+    tx.buffer = tx.buffer[:sp.BufferPosition]
+    tx.readCache = sp.ReadCacheSnap
+    tx.deleteSet = sp.DeleteSetSnap
+
+    // Remove this and all later savepoints
+    tx.savepoints = tx.savepoints[:idx]
+    return nil
+}
+```
+
+**Release Savepoint:**
+```go
+func (tx *Transaction) ReleaseSavepoint(name string) error {
+    tx.mu.Lock()
+    defer tx.mu.Unlock()
+
+    for i, sp := range tx.savepoints {
+        if sp.Name == name {
+            tx.savepoints = append(tx.savepoints[:i], tx.savepoints[i+1:]...)
+            return nil
+        }
+    }
+    return fmt.Errorf("savepoint %s not found", name)
 }
 ```
 
@@ -630,6 +1086,110 @@ func (r *Replicator) pullFromLeader() {
     // Read and apply WAL entries
 }
 ```
+
+---
+
+## Clustering
+
+### ClusterManager
+
+The `ClusterManager` handles node discovery and leader election:
+
+```go
+type ClusterManager struct {
+    nodeID     string
+    nodes      map[string]*ClusterNode
+    leader     string
+    isLeader   bool
+    listenAddr string
+    mu         sync.RWMutex
+}
+
+type ClusterNode struct {
+    ID       string
+    Address  string
+    LastSeen time.Time
+    IsLeader bool
+}
+```
+
+### Bully Algorithm for Leader Election
+
+FlyDB uses the Bully algorithm for automatic leader election:
+
+```go
+func (cm *ClusterManager) StartElection() {
+    cm.mu.Lock()
+    defer cm.mu.Unlock()
+
+    // Send ELECTION to all nodes with higher IDs
+    higherNodes := cm.getHigherNodes()
+
+    if len(higherNodes) == 0 {
+        // No higher nodes, become leader
+        cm.becomeLeader()
+        cm.broadcastCoordinator()
+        return
+    }
+
+    // Wait for response from higher nodes
+    responses := cm.sendElectionMessages(higherNodes)
+
+    if len(responses) == 0 {
+        // No responses, become leader
+        cm.becomeLeader()
+        cm.broadcastCoordinator()
+    }
+    // Otherwise, wait for COORDINATOR message
+}
+
+func (cm *ClusterManager) handleCoordinator(nodeID string) {
+    cm.mu.Lock()
+    defer cm.mu.Unlock()
+    cm.leader = nodeID
+    cm.isLeader = false
+}
+```
+
+### Heartbeat Mechanism
+
+Nodes send periodic heartbeats to detect failures:
+
+```go
+func (cm *ClusterManager) startHeartbeat() {
+    ticker := time.NewTicker(1 * time.Second)
+    for range ticker.C {
+        cm.sendHeartbeats()
+        cm.checkForDeadNodes()
+    }
+}
+
+func (cm *ClusterManager) checkForDeadNodes() {
+    cm.mu.Lock()
+    defer cm.mu.Unlock()
+
+    timeout := 5 * time.Second
+    for id, node := range cm.nodes {
+        if time.Since(node.LastSeen) > timeout {
+            delete(cm.nodes, id)
+            if id == cm.leader {
+                // Leader is dead, start election
+                go cm.StartElection()
+            }
+        }
+    }
+}
+```
+
+### Cluster Protocol Messages
+
+| Message | Format | Description |
+|---------|--------|-------------|
+| ELECTION | `ELECTION <node_id>` | Request election |
+| OK | `OK <node_id>` | Acknowledge election |
+| COORDINATOR | `COORDINATOR <node_id>` | Announce new leader |
+| HEARTBEAT | `HEARTBEAT <node_id>` | Keep-alive signal |
+| JOIN | `JOIN <node_id> <address>` | Join cluster |
 
 ---
 

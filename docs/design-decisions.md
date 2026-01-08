@@ -6,13 +6,18 @@ This document explains the key design decisions made in FlyDB, including the rat
 
 1. [In-Memory Storage with WAL](#in-memory-storage-with-wal)
 2. [Key-Value Foundation](#key-value-foundation)
-3. [Simple Text Protocol](#simple-text-protocol)
-4. [Bully Algorithm for Leader Election](#bully-algorithm-for-leader-election)
-5. [Eventual Consistency for Replication](#eventual-consistency-for-replication)
-6. [B-Tree for Indexes](#b-tree-for-indexes)
-7. [bcrypt for Password Hashing](#bcrypt-for-password-hashing)
-8. [AES-256-GCM for Encryption](#aes-256-gcm-for-encryption)
-9. [Go as Implementation Language](#go-as-implementation-language)
+3. [Multi-Database Architecture](#multi-database-architecture)
+4. [Internationalization (I18N)](#internationalization-i18n)
+5. [Simple Text Protocol](#simple-text-protocol)
+6. [Bully Algorithm for Leader Election](#bully-algorithm-for-leader-election)
+7. [Eventual Consistency for Replication](#eventual-consistency-for-replication)
+8. [B-Tree for Indexes](#b-tree-for-indexes)
+9. [Transaction Model](#transaction-model)
+10. [bcrypt for Password Hashing](#bcrypt-for-password-hashing)
+11. [Row-Level Security](#row-level-security)
+12. [AES-256-GCM for Encryption](#aes-256-gcm-for-encryption)
+13. [Go as Implementation Language](#go-as-implementation-language)
+14. [Role-Based Access Control](#role-based-access-control)
 
 ---
 
@@ -89,6 +94,102 @@ _sys_privs:<u>:<t>   → Permissions
 1. **Page-based storage**: More efficient for large tables, but complex
 2. **Columnar storage**: Better for analytics, but complex for OLTP
 3. **Document store**: Similar trade-offs, less educational value
+
+---
+
+## Multi-Database Architecture
+
+### Decision
+
+Support multiple isolated databases, each stored in its own `.fdb` file.
+
+### Rationale
+
+1. **Isolation**: Databases share no state, preventing cross-contamination
+2. **Management**: Easy to backup, restore, or delete individual databases
+3. **Lazy Loading**: Databases loaded on first access, reducing startup time
+4. **Per-Connection Context**: Each client connection tracks its current database
+
+### Implementation
+
+```go
+type DatabaseManager struct {
+    dataDir   string               // Base directory (e.g., /var/lib/flydb/)
+    databases map[string]*Database // Lazy-loaded databases
+}
+
+type Database struct {
+    Name     string
+    Path     string            // e.g., /var/lib/flydb/myapp.fdb
+    Store    *KVStore
+    Metadata *DatabaseMetadata
+}
+```
+
+### Database Metadata
+
+Each database stores its own metadata (encoding, collation, locale) in the key `_sys_db_meta`:
+
+```go
+type DatabaseMetadata struct {
+    Name      string            // Database name
+    Owner     string            // Creator username
+    Encoding  CharacterEncoding // UTF8, LATIN1, ASCII, UTF16
+    Collation Collation         // default, binary, nocase, unicode
+    Locale    string            // e.g., "en_US", "de_DE"
+}
+```
+
+### Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|--------------|
+| Complete isolation | One file per database |
+| Independent management | No cross-database queries |
+| Portable databases | Separate executor per database |
+| Per-database settings | Memory for each loaded database |
+
+---
+
+## Internationalization (I18N)
+
+### Decision
+
+Support pluggable character encodings and collations per database.
+
+### Rationale
+
+1. **Flexibility**: Different applications have different text requirements
+2. **Locale-Aware Sorting**: Unicode collation for proper international sorting
+3. **Storage Efficiency**: ASCII databases use less space than UTF-16
+4. **Validation**: Catch encoding errors at write time, not read time
+
+### Supported Encodings
+
+| Encoding | Description | Use Case |
+|----------|-------------|----------|
+| UTF-8 | Go's native encoding | General purpose (default) |
+| ASCII | 7-bit characters only | Legacy systems |
+| Latin-1 | Western European | ISO-8859-1 compatibility |
+| UTF-16 | 16-bit Unicode | Windows compatibility |
+
+### Supported Collations
+
+| Collation | Implementation | Use Case |
+|-----------|----------------|----------|
+| `default` | Go's native `<` operator | General purpose, fast |
+| `binary` | Byte-by-byte comparison | Exact matching, hashes |
+| `nocase` | `strings.ToLower()` comparison | Case-insensitive search |
+| `unicode` | `golang.org/x/text/collate` | Locale-aware sorting |
+
+### Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|--------------|
+| Proper international sorting | Unicode collation is slower |
+| Encoding validation | Validation overhead on writes |
+| Per-database settings | Complexity in executor |
+| Locale support | External dependency for Unicode |
 
 ---
 
@@ -239,9 +340,10 @@ Use B-Tree data structure for secondary indexes.
 
 ### Implementation Details
 
-- **Minimum degree (t)**: Configurable, default 2
-- **Node capacity**: 2t-1 keys per node
+- **Minimum degree (t)**: Configurable, default 16 (optimized for in-memory use)
+- **Node capacity**: 2t-1 keys per node (up to 31 keys with default t=16)
 - **Leaf nodes**: Store actual row key references
+- **Automatic maintenance**: Indexes updated on INSERT, UPDATE, DELETE
 
 ### Trade-offs
 
@@ -261,11 +363,62 @@ Use B-Tree data structure for secondary indexes.
 
 ---
 
+## Transaction Model
+
+### Decision
+
+Use optimistic concurrency with write buffering and savepoint support.
+
+### Rationale
+
+1. **Simplicity**: No complex locking protocols
+2. **Performance**: Reads don't block writes
+3. **Easy Rollback**: Discard buffer on ROLLBACK
+4. **Partial Rollback**: Savepoints allow undoing part of a transaction
+
+### Implementation
+
+```go
+type Transaction struct {
+    store      *KVStore
+    buffer     []TxOperation      // Pending operations
+    readCache  map[string][]byte  // Read-your-writes
+    deleteSet  map[string]bool    // Pending deletes
+    savepoints []Savepoint
+}
+
+type Savepoint struct {
+    Name           string
+    BufferPosition int  // Position in buffer to rollback to
+}
+```
+
+### Isolation Level
+
+**Read Committed**: Reads see committed data from the underlying store, plus any uncommitted writes from the current transaction (read-your-writes).
+
+### Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|--------------|
+| Simple implementation | No serializable isolation |
+| Reads don't block | Last writer wins (no conflict detection) |
+| Easy rollback | No MVCC |
+| Savepoint support | Single writer at a time |
+
+### Alternatives Considered
+
+1. **MVCC**: True snapshot isolation, but complex implementation
+2. **Pessimistic Locking**: Stronger isolation, but potential deadlocks
+3. **Serializable**: Strongest isolation, but significant overhead
+
+---
+
 ## bcrypt for Password Hashing
 
 ### Decision
 
-Use bcrypt with default cost factor for password hashing.
+Use bcrypt with cost factor 10 for password hashing.
 
 ### Rationale
 
@@ -277,8 +430,10 @@ Use bcrypt with default cost factor for password hashing.
 ### Implementation
 
 ```go
+const DefaultBcryptCost = 10
+
 // Hashing
-hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+hash, _ := bcrypt.GenerateFromPassword([]byte(password), DefaultBcryptCost)
 
 // Verification
 err := bcrypt.CompareHashAndPassword(hash, []byte(password))
@@ -298,6 +453,60 @@ err := bcrypt.CompareHashAndPassword(hash, []byte(password))
 1. **Argon2**: Newer, memory-hard, but less library support
 2. **scrypt**: Memory-hard, good alternative
 3. **PBKDF2**: Widely supported, but less resistant to GPU attacks
+
+---
+
+## Row-Level Security
+
+### Decision
+
+Implement Row-Level Security (RLS) as part of the GRANT statement.
+
+### Rationale
+
+1. **Simplicity**: RLS tied to permissions, not separate policies
+2. **Transparency**: Users see filtered data without knowing RLS exists
+3. **Enforcement**: Applied at executor level, cannot be bypassed
+4. **Familiar Syntax**: Extends standard GRANT with WHERE clause
+
+### Syntax
+
+```sql
+-- Grant SELECT with row filter
+GRANT SELECT ON orders WHERE user_id = 'alice' TO alice;
+
+-- User 'alice' only sees rows where user_id = 'alice'
+SELECT * FROM orders;  -- Automatically filtered
+```
+
+### Implementation
+
+```go
+type Permission struct {
+    TableName string `json:"table_name"`
+    RLS       *RLS   `json:"rls,omitempty"`
+}
+
+type RLS struct {
+    Column string `json:"column"`
+    Value  string `json:"value"`
+}
+```
+
+### Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|--------------|
+| Simple to understand | Only single-column filters |
+| Integrated with GRANT | No complex expressions |
+| Automatic enforcement | Per-table, not per-query |
+| No separate policy table | Limited to equality checks |
+
+### Alternatives Considered
+
+1. **Separate RLS policies**: More flexible, but more complex
+2. **View-based security**: Requires creating views per user
+3. **Application-level filtering**: Not enforced by database
 
 ---
 
@@ -368,6 +577,61 @@ Implement FlyDB in Go.
 2. **C++**: Maximum control, but complex memory management
 3. **Java**: Good ecosystem, but JVM overhead
 4. **Python**: Easy to write, but too slow for database
+
+---
+
+## Role-Based Access Control
+
+### Decision
+
+Implement a role-based access control (RBAC) system with roles, privileges, and user-role assignments, supporting both global and database-scoped permissions.
+
+### Rationale
+
+1. **Scalability**: Managing permissions through roles is more scalable than per-user grants
+2. **Maintainability**: Changing a role's privileges automatically affects all users with that role
+3. **Flexibility**: Database-scoped roles allow fine-grained control per database
+4. **Industry Standard**: RBAC is the de facto standard for enterprise access control
+
+### Design
+
+The RBAC system consists of three main components:
+
+1. **Roles**: Named collections of privileges (e.g., `admin`, `reader`, `writer`)
+2. **Privileges**: Specific permissions on objects (SELECT, INSERT, UPDATE, DELETE, ALL)
+3. **User-Role Assignments**: Mappings between users and roles, optionally scoped to databases
+
+### Built-in Roles
+
+| Role | Description | Privileges |
+|------|-------------|------------|
+| `admin` | Full administrative access | ALL on all objects |
+| `reader` | Read-only access | SELECT on all tables |
+| `writer` | Write access | INSERT, UPDATE, DELETE on all tables |
+| `owner` | Full access to owned objects | ALL on database-scoped objects |
+
+### Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|--------------|
+| Centralized permission management | Additional complexity |
+| Easy to audit who has what access | Role explosion if not managed |
+| Supports principle of least privilege | Requires careful role design |
+| Database-scoped roles for multi-tenancy | More storage for role metadata |
+
+### Alternatives Considered
+
+1. **ACL (Access Control Lists)**: More flexible but harder to manage at scale
+2. **ABAC (Attribute-Based Access Control)**: More powerful but significantly more complex
+3. **Simple user-table grants**: Simpler but doesn't scale well
+
+### Implementation Details
+
+- Roles stored with `_sys_roles:` prefix in system database
+- Role privileges stored with `_sys_role_privs:` prefix
+- User-role assignments stored with `_sys_user_roles:` prefix
+- Built-in roles are marked with `is_built_in: true` and cannot be dropped
+- Authorization checks cascade: admin status → role privileges → direct grants
 
 ---
 

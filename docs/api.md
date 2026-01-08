@@ -7,6 +7,7 @@ This document provides a complete reference for FlyDB's SQL syntax, protocol com
 1. [Protocol Commands](#protocol-commands)
    - [Text Protocol Commands](#text-protocol-commands)
    - [Binary Protocol](#binary-protocol)
+   - [CLI Commands](#cli-commands)
 2. [SQL Statements](#sql-statements)
    - [Data Definition Language (DDL)](#data-definition-language-ddl)
    - [Data Manipulation Language (DML)](#data-manipulation-language-dml)
@@ -15,7 +16,8 @@ This document provides a complete reference for FlyDB's SQL syntax, protocol com
    - [Triggers](#triggers)
    - [User Management](#user-management)
    - [Prepared Statements](#prepared-statements)
-   - [Database Introspection](#database-introspection)
+   - [Database Management](#database-management)
+   - [Database Inspection](#database-inspection)
 3. [Data Types](#data-types)
 4. [Operators and Functions](#operators-and-functions)
    - [Comparison Operators](#comparison-operators)
@@ -145,6 +147,168 @@ The binary protocol provides a complete wire protocol for developing external JD
 4. **Disconnect**: Close TCP connection
 
 See [Driver Development Guide](driver-development.md) for complete protocol specification and code examples.
+
+### CLI Commands
+
+The `fsql` interactive client (flydb-shell) provides local commands (prefixed with `\`) that are processed locally without server communication. These commands are inspired by PostgreSQL's `psql` client.
+
+#### Navigation and Help
+
+| Command | Aliases | Description |
+|---------|---------|-------------|
+| `\q` | `\quit` | Exit the CLI |
+| `\h` | `\help` | Display help information |
+| `\clear` | - | Clear the screen |
+| `\s` | `\status`, `\conninfo` | Show connection status and session settings |
+| `\v` | `\version` | Show CLI version |
+
+#### Session Settings
+
+| Command | Description |
+|---------|-------------|
+| `\timing` | Toggle query execution time display |
+| `\x` | Toggle expanded (vertical) output mode |
+| `\o [file]` | Redirect output to file (no argument resets to stdout) |
+| `\sql` | Enter SQL mode (all input treated as SQL) |
+| `\normal` | Return to normal mode with auto-detection |
+
+#### Shortcuts
+
+| Command | Description | Equivalent |
+|---------|-------------|------------|
+| `\dt` | List all tables | `INSPECT TABLES` |
+| `\du` | List all users | `INSPECT USERS` |
+| `\di` | List all indexes | `INSPECT INDEXES` |
+| `\db`, `\l` | List all databases | `INSPECT DATABASES` |
+| `\c <db>`, `\connect <db>` | Switch to database | `USE <database>` |
+
+#### Shell Integration
+
+| Command | Description |
+|---------|-------------|
+| `\! <command>` | Execute a shell command |
+
+#### Examples
+
+```
+flydb> \timing
+Timing is on.
+
+flydb> SELECT * FROM users
++----+-------+-------------------+
+| id | name  | email             |
++----+-------+-------------------+
+| 1  | Alice | alice@example.com |
++----+-------+-------------------+
+(1 row)
+Time: 1.234ms
+
+flydb> \o results.txt
+Output set to file: results.txt
+
+flydb> SELECT * FROM users
+flydb> \o
+Output reset to stdout.
+
+flydb> \! ls -la
+total 16
+drwxr-xr-x  4 user  staff  128 Jan  8 10:00 .
+...
+
+flydb> \dt
++-------+---------------------------+
+| Table | Schema                    |
++-------+---------------------------+
+| users | id INT, name TEXT, ...    |
++-------+---------------------------+
+
+flydb> \s
+
+  Connection Status
+  ──────────────────────────────
+
+    Status: ● Connected
+    Server: localhost:8889
+    Protocol: Binary
+    Format: table
+
+  Session Settings
+  ──────────────────────────────
+
+    Timing: on
+    Expanded: off
+    Output: stdout
+```
+
+#### Keyboard Shortcuts
+
+| Shortcut | Description |
+|----------|-------------|
+| `Ctrl+C` | Cancel current input / interrupt |
+| `Ctrl+D` | Exit the CLI (same as `\q`) |
+| `Ctrl+R` | Reverse search through command history |
+| `↑` / `↓` | Navigate command history |
+| `Tab` | Auto-complete commands and SQL keywords |
+
+#### Authentication
+
+The CLI supports secure password entry for the AUTH command:
+
+```
+flydb> AUTH
+Username: admin
+Password: ********
+AUTH OK (admin)
+
+flydb> AUTH admin
+Password: ********
+AUTH OK (admin)
+```
+
+When using `AUTH username password` on the command line, a security warning is displayed and the password is masked in command history.
+
+#### SQL Execution Modes
+
+The CLI provides three ways to execute SQL commands:
+
+**1. Auto-Detection (Default)**
+
+Common SQL keywords are automatically recognized and executed:
+- `SELECT`, `INSERT`, `UPDATE`, `DELETE`
+- `CREATE`, `DROP`, `ALTER`, `TRUNCATE`
+- `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`
+- `PREPARE`, `EXECUTE`, `DEALLOCATE`
+- `GRANT`, `REVOKE`, `CALL`, `INSPECT`, `WITH`
+
+```
+flydb> SELECT * FROM users
+flydb> CREATE TABLE orders (id INT PRIMARY KEY)
+```
+
+**2. Explicit SQL Prefix**
+
+Use the `SQL` prefix to execute any SQL statement that isn't auto-detected:
+
+```
+flydb> SQL SHOW TABLES
+flydb> SQL EXPLAIN SELECT * FROM users
+```
+
+**3. SQL Mode**
+
+Enter SQL mode where all input is treated as SQL (except local `\` commands):
+
+```
+flydb> \sql
+Entering SQL mode. All input will be executed as SQL.
+
+flydb[sql]> SHOW TABLES
+flydb[sql]> any_command_here_is_sql
+flydb[sql]> \normal
+Returning to normal mode with SQL auto-detection.
+
+flydb>
+```
 
 ---
 
@@ -843,68 +1007,242 @@ EXECUTE get_user (123)
 DEALLOCATE get_user
 ```
 
-### Database Introspection
+### Database Management
 
-The INTROSPECT command provides metadata about database objects. Requires admin privileges.
+FlyDB supports multiple isolated databases within a single server instance.
 
-#### INTROSPECT USERS
+#### CREATE DATABASE
 
-List all database users.
+Create a new database with optional settings.
 
 ```sql
-INTROSPECT USERS
+CREATE DATABASE [IF NOT EXISTS] database_name
+  [WITH ENCODING 'encoding']
+  [LOCALE 'locale']
+  [COLLATION 'collation']
+  [OWNER 'username']
 ```
 
-#### INTROSPECT TABLES
+**Options:**
 
-List all tables with their column schemas.
+| Option | Values | Default | Description |
+|--------|--------|---------|-------------|
+| ENCODING | UTF8, LATIN1, ASCII, UTF16 | UTF8 | Character encoding |
+| LOCALE | en_US, de_DE, fr_FR, etc. | en_US | Locale for sorting |
+| COLLATION | default, binary, nocase, unicode | default | String comparison rules |
+| OWNER | username | current user | Database owner |
 
+**Examples:**
 ```sql
-INTROSPECT TABLES
+-- Create a simple database
+CREATE DATABASE analytics
+
+-- Create with custom settings
+CREATE DATABASE reports WITH ENCODING 'UTF8' LOCALE 'de_DE' COLLATION 'unicode' OWNER 'alice'
+
+-- Create only if it doesn't exist
+CREATE DATABASE IF NOT EXISTS staging
 ```
 
-#### INTROSPECT TABLE
+#### DROP DATABASE
 
-Get detailed information about a specific table.
-
-```sql
-INTROSPECT TABLE table_name
-```
-
-#### INTROSPECT INDEXES
-
-List all indexes in the database.
+Remove a database and all its data.
 
 ```sql
-INTROSPECT INDEXES
-```
-
-#### INTROSPECT SERVER
-
-Show server information (version, status, etc.).
-
-```sql
-INTROSPECT SERVER
-```
-
-#### INTROSPECT STATUS
-
-Show overall database status and statistics.
-
-```sql
-INTROSPECT STATUS
+DROP DATABASE [IF EXISTS] database_name
 ```
 
 **Examples:**
 ```sql
-INTROSPECT USERS
+-- Drop a database
+DROP DATABASE staging
+
+-- Drop only if it exists (no error if database doesn't exist)
+DROP DATABASE IF EXISTS temp_db
+```
+
+**Notes:**
+- Cannot drop the default database
+- Cannot drop a database that has active connections
+- Requires admin privileges
+
+#### USE
+
+Switch to a different database for the current connection.
+
+```sql
+USE database_name
+```
+
+**Example:**
+```sql
+USE analytics
+-- All subsequent queries run against the analytics database
+```
+
+### Database Inspection
+
+The INSPECT command provides metadata about database objects. Requires admin privileges.
+
+#### INSPECT DATABASES
+
+List all databases with their metadata.
+
+```sql
+INSPECT DATABASES
+```
+
+**Example output:**
+```
++------------+-------+----------+--------+-----------+
+| name       | owner | encoding | locale | collation |
++------------+-------+----------+--------+-----------+
+| default    | admin | UTF8     | en_US  | default   |
+| analytics  | alice | UTF8     | de_DE  | unicode   |
++------------+-------+----------+--------+-----------+
+(2 rows)
+```
+
+#### INSPECT USERS
+
+List all database users.
+
+```sql
+INSPECT USERS
+```
+
+#### INSPECT USER
+
+Get detailed information about a specific user, including their roles and effective database access.
+
+```sql
+INSPECT USER username
+```
+
+**Example output for admin user:**
+```
+Username: admin
+Admin: true
+Status: active
+Default Database:
+Created: 2026-01-08T20:02:40+01:00
+Last Login: 2026-01-08T20:03:40+01:00
+
+Assigned Roles:
+  admin (global)
+
+Effective Database Access:
+  * (all databases via admin role)
+```
+
+**Example output for regular user:**
+```
+Username: alice
+Admin: false
+Status: active
+Default Database: analytics
+Created: 2026-01-08T20:05:00+01:00
+Last Login: 2026-01-08T20:10:00+01:00
+
+Assigned Roles:
+  reader (database: analytics)
+  writer (database: sales)
+
+Effective Database Access:
+  analytics (via reader)
+  sales (via writer)
+```
+
+#### INSPECT USER ROLES
+
+Get the roles assigned to a specific user.
+
+```sql
+INSPECT USER username ROLES
+```
+
+#### INSPECT USER PRIVILEGES
+
+Get the effective privileges for a specific user.
+
+```sql
+INSPECT USER username PRIVILEGES
+```
+
+#### INSPECT ROLES
+
+List all roles in the system.
+
+```sql
+INSPECT ROLES
+```
+
+#### INSPECT ROLE
+
+Get detailed information about a specific role.
+
+```sql
+INSPECT ROLE role_name
+```
+
+#### INSPECT PRIVILEGES
+
+List all privileges in the system.
+
+```sql
+INSPECT PRIVILEGES
+```
+
+#### INSPECT TABLES
+
+List all tables with their column schemas.
+
+```sql
+INSPECT TABLES
+```
+
+#### INSPECT TABLE
+
+Get detailed information about a specific table.
+
+```sql
+INSPECT TABLE table_name
+```
+
+#### INSPECT INDEXES
+
+List all indexes in the database.
+
+```sql
+INSPECT INDEXES
+```
+
+#### INSPECT SERVER
+
+Show server information (version, status, etc.).
+
+```sql
+INSPECT SERVER
+```
+
+#### INSPECT STATUS
+
+Show overall database status and statistics.
+
+```sql
+INSPECT STATUS
+```
+
+**Examples:**
+```sql
+INSPECT USERS
 -- Returns: username
 --          admin
 --          alice
 --          bob
 --          (3 rows)
 
-INTROSPECT TABLE users
+INSPECT TABLE users
 -- Returns detailed schema information for the users table
 ```
 
@@ -1002,6 +1340,8 @@ INTROSPECT TABLE users
 | `AVG(col)` | Average of values | `SELECT AVG(age) FROM users` |
 | `MIN(col)` | Minimum value | `SELECT MIN(price) FROM products` |
 | `MAX(col)` | Maximum value | `SELECT MAX(created_at) FROM users` |
+| `GROUP_CONCAT(col, sep)` | Concatenate values with separator | `SELECT GROUP_CONCAT(name, ', ') FROM users` |
+| `STRING_AGG(col, sep)` | Concatenate values with separator (alias) | `SELECT STRING_AGG(tag, ';') FROM tags` |
 
 ### String Functions
 
@@ -1092,7 +1432,7 @@ The wizard guides you through:
    - Replication port (master only, default: 9999)
 
 3. **Storage Configuration**
-   - Database file path (default: flydb.wal)
+   - Database file path (default: flydb.fdb)
 
 4. **Logging Configuration**
    - Log level (debug, info, warn, error)
@@ -1111,7 +1451,7 @@ FlyDB is configured via command-line flags:
 | `-port` | `8888` | Text protocol port |
 | `-binary-port` | `8889` | Binary protocol port |
 | `-repl-port` | `9999` | Replication port (master only) |
-| `-db` | `flydb.wal` | WAL file path |
+| `-db` | `flydb.fdb` | WAL file path |
 | `-role` | `master` | Server role: `standalone`, `master`, or `slave` |
 | `-master` | - | Master address for slave mode (host:port) |
 | `-log-level` | `info` | Log level: debug, info, warn, error |
@@ -1125,20 +1465,93 @@ FlyDB is configured via command-line flags:
 | `master` | Leader node | Accepts slaves on repl-port |
 | `slave` | Follower node | Connects to master |
 
+### Encryption Configuration
+
+**⚠️ BREAKING CHANGE: Encryption is enabled by default starting from version 01.26.1.**
+
+FlyDB encrypts all WAL data on disk using AES-256-GCM. When encryption is enabled (the default), you **must** provide a passphrase.
+
+#### Environment Variables for Encryption
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FLYDB_ENCRYPTION_ENABLED` | `true` | Enable/disable data-at-rest encryption |
+| `FLYDB_ENCRYPTION_PASSPHRASE` | - | **Required** when encryption enabled - passphrase for key derivation |
+
+#### Setting the Passphrase
+
+There are two ways to provide the encryption passphrase:
+
+**Option 1: Environment Variable (Recommended for Production)**
+
+```bash
+# Set the passphrase (required when encryption is enabled)
+export FLYDB_ENCRYPTION_PASSPHRASE="your-secure-passphrase"
+./flydb -role standalone
+```
+
+**Option 2: Interactive Wizard**
+
+When running FlyDB without arguments, the setup wizard will prompt for a passphrase:
+
+```bash
+./flydb
+# Wizard prompts:
+#   Step 4: Data-at-Rest Encryption
+#   Enable encryption? (y/n) [y]: y
+#   Encryption passphrase: ********
+```
+
+The wizard automatically detects if `FLYDB_ENCRYPTION_PASSPHRASE` is already set and uses it.
+
+#### Disabling Encryption
+
+To disable encryption, set `encryption_enabled = false` in your config file:
+
+```toml
+# flydb.conf
+encryption_enabled = false
+```
+
+Or via environment variable:
+
+```bash
+export FLYDB_ENCRYPTION_ENABLED=false
+./flydb -role standalone
+```
+
+#### Migration from Previous Versions
+
+If upgrading from a version where encryption was disabled by default:
+
+| Option | Action |
+|--------|--------|
+| Enable encryption | Set `FLYDB_ENCRYPTION_PASSPHRASE` environment variable |
+| Keep encryption disabled | Add `encryption_enabled = false` to config file |
+
+> ⚠️ **WARNING**: Keep your passphrase safe! Data cannot be recovered without it.
+
 ### Example Startup
 
 ```bash
 # Interactive wizard (recommended for first-time setup)
 ./flydb
 
-# Standalone mode (development)
-./flydb -role standalone -db dev.wal
+# Standalone mode with encryption (default)
+export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
+./flydb -role standalone -db dev.fdb
+
+# Standalone mode without encryption
+export FLYDB_ENCRYPTION_ENABLED=false
+./flydb -role standalone -db dev.fdb
 
 # Master with replication
-./flydb -port 8888 -repl-port 9999 -role master -db master.wal
+export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
+./flydb -port 8888 -repl-port 9999 -role master -db master.fdb
 
 # Slave connecting to master
-./flydb -port 8889 -role slave -master localhost:9999 -db slave.wal
+export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
+./flydb -port 8889 -role slave -master localhost:9999 -db slave.fdb
 
 # With debug logging
 ./flydb -role standalone -log-level debug
@@ -1149,10 +1562,35 @@ FlyDB is configured via command-line flags:
 
 ### Installation Script
 
-FlyDB includes an installation script for easy setup:
+FlyDB includes an installation script that supports both remote installation and local source builds.
+
+#### Quick Install (Remote)
+
+Install FlyDB with a single command:
 
 ```bash
-# Interactive installation (recommended)
+curl -sSL https://get.flydb.dev | bash
+```
+
+With options:
+
+```bash
+# Install with custom prefix
+curl -sSL https://get.flydb.dev | bash -s -- --prefix ~/.local --yes
+
+# Install specific version
+curl -sSL https://get.flydb.dev | bash -s -- --version 01.26.0 --yes
+
+# Install without system service
+curl -sSL https://get.flydb.dev | bash -s -- --no-service --yes
+```
+
+#### Install from Source
+
+```bash
+# Clone and install interactively
+git clone https://github.com/firefly-software/flydb.git
+cd flydb
 ./install.sh
 
 # Non-interactive installation with defaults
@@ -1164,13 +1602,29 @@ FlyDB includes an installation script for easy setup:
 # System-wide installation
 sudo ./install.sh --prefix /usr/local
 
-# Preview installation without making changes
-./install.sh --dry-run
+# Force build from source (skip binary download)
+./install.sh --from-source --yes
+
+# Force download binaries (skip source build)
+./install.sh --from-binary --yes
 ```
 
+#### Installation Options
+
+| Option | Description |
+|--------|-------------|
+| `--prefix <path>` | Installation prefix (default: `~/.local` or `/usr/local` with sudo) |
+| `--version <ver>` | Install specific version |
+| `--from-source` | Force building from source (requires Go 1.21+) |
+| `--from-binary` | Force downloading pre-built binaries |
+| `--yes` | Non-interactive mode, accept all defaults |
+| `--no-service` | Skip system service installation |
+| `--no-config` | Skip configuration file creation |
+| `--help` | Show all available options |
+
 The script:
-- Downloads pre-built binaries or builds from source
-- Installs `flydb` daemon and `fly-cli` client
+- Auto-detects whether to build from source or download pre-built binaries
+- Installs `flydb` daemon and `flydb-shell` client (with `fsql` symlink)
 - Optionally sets up system service (systemd on Linux, launchd on macOS)
 - Creates default configuration files
 - Works on Linux and macOS
@@ -1194,7 +1648,7 @@ To remove FlyDB from your system:
 ```
 
 The script automatically detects and removes:
-- FlyDB binaries (`flydb`, `fly-cli`)
+- FlyDB binaries (`flydb`, `flydb-shell`, `fsql`)
 - System service files
 - Configuration directories (use `--no-config` to preserve)
 - Data directories (only with `--remove-data` flag)
