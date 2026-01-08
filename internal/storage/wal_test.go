@@ -17,7 +17,10 @@
 package storage
 
 import (
+	"encoding/binary"
+	"errors"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -27,7 +30,7 @@ func setupTestWAL(t *testing.T) (*WAL, string, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	walPath := tmpDir + "/test.wal"
+	walPath := tmpDir + "/test.fdb"
 	wal, err := OpenWAL(walPath)
 	if err != nil {
 		os.RemoveAll(tmpDir)
@@ -86,13 +89,13 @@ func TestWALSize(t *testing.T) {
 	wal, _, cleanup := setupTestWAL(t)
 	defer cleanup()
 
-	// Initial size should be 0
+	// Initial size should be WALHeaderSize (8 bytes for the header)
 	size, err := wal.Size()
 	if err != nil {
 		t.Fatalf("Size failed: %v", err)
 	}
-	if size != 0 {
-		t.Errorf("Expected initial size 0, got %d", size)
+	if size != WALHeaderSize {
+		t.Errorf("Expected initial size %d (header only), got %d", WALHeaderSize, size)
 	}
 
 	// Write a record
@@ -101,13 +104,13 @@ func TestWALSize(t *testing.T) {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	// Size should be > 0
+	// Size should be > header size
 	size, err = wal.Size()
 	if err != nil {
 		t.Fatalf("Size failed: %v", err)
 	}
-	if size == 0 {
-		t.Error("Expected size > 0 after write")
+	if size <= WALHeaderSize {
+		t.Errorf("Expected size > %d after write, got %d", WALHeaderSize, size)
 	}
 }
 
@@ -160,7 +163,7 @@ func setupEncryptedTestWAL(t *testing.T, passphrase string) (*WAL, string, func(
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	walPath := tmpDir + "/test_encrypted.wal"
+	walPath := tmpDir + "/test_encrypted.fdb"
 	config := EncryptionConfig{
 		Enabled:    true,
 		Passphrase: passphrase,
@@ -233,7 +236,7 @@ func TestEncryptedWALPersistence(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	walPath := tmpDir + "/test_encrypted.wal"
+	walPath := tmpDir + "/test_encrypted.fdb"
 	config := EncryptionConfig{
 		Enabled:    true,
 		Passphrase: passphrase,
@@ -284,7 +287,7 @@ func TestEncryptedWALWrongPassphrase(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	walPath := tmpDir + "/test_encrypted.wal"
+	walPath := tmpDir + "/test_encrypted.fdb"
 	config := EncryptionConfig{
 		Enabled:    true,
 		Passphrase: passphrase,
@@ -335,7 +338,7 @@ func TestEncryptedWALWithDirectKey(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	walPath := tmpDir + "/test_encrypted.wal"
+	walPath := tmpDir + "/test_encrypted.fdb"
 	config := EncryptionConfig{
 		Enabled: true,
 		Key:     key,
@@ -394,3 +397,210 @@ func TestUnencryptedWALIsNotEncrypted(t *testing.T) {
 	}
 }
 
+func TestEncryptionMismatchUnencryptedDBWithEncryptionEnabled(t *testing.T) {
+	// Create an unencrypted WAL file
+	tmpFile, err := os.CreateTemp("", "wal_mismatch_test_*.fdb")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	walPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(walPath)
+
+	// Create unencrypted WAL and write some data
+	wal, err := OpenWAL(walPath)
+	if err != nil {
+		t.Fatalf("Failed to open WAL: %v", err)
+	}
+	err = wal.Write(OpPut, "key1", []byte("value1"))
+	if err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+	wal.Close()
+
+	// Try to open with encryption enabled - should fail with clear error
+	encConfig := EncryptionConfig{
+		Enabled:    true,
+		Passphrase: "test-passphrase",
+	}
+	_, err = OpenWALWithEncryption(walPath, encConfig)
+	if err == nil {
+		t.Fatal("Expected error when opening unencrypted DB with encryption enabled")
+	}
+
+	// Check that it's an EncryptionMismatchError
+	var mismatchErr *EncryptionMismatchError
+	if !errors.As(err, &mismatchErr) {
+		t.Fatalf("Expected EncryptionMismatchError, got: %T: %v", err, err)
+	}
+
+	if mismatchErr.DatabaseEncrypted {
+		t.Error("Expected DatabaseEncrypted=false")
+	}
+	if !mismatchErr.ConfigEncrypted {
+		t.Error("Expected ConfigEncrypted=true")
+	}
+
+	// Check error message contains helpful guidance
+	if !strings.Contains(err.Error(), "encryption mismatch") {
+		t.Errorf("Error should mention 'encryption mismatch': %v", err)
+	}
+	if !strings.Contains(err.Error(), "encryption_enabled = false") {
+		t.Errorf("Error should suggest disabling encryption: %v", err)
+	}
+}
+
+func TestEncryptionMismatchEncryptedDBWithEncryptionDisabled(t *testing.T) {
+	// Create an encrypted WAL file
+	tmpFile, err := os.CreateTemp("", "wal_mismatch_test_*.fdb")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	walPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(walPath)
+
+	// Create encrypted WAL and write some data
+	encConfig := EncryptionConfig{
+		Enabled:    true,
+		Passphrase: "test-passphrase",
+	}
+	wal, err := OpenWALWithEncryption(walPath, encConfig)
+	if err != nil {
+		t.Fatalf("Failed to open WAL: %v", err)
+	}
+	err = wal.Write(OpPut, "key1", []byte("value1"))
+	if err != nil {
+		t.Fatalf("Failed to write: %v", err)
+	}
+	wal.Close()
+
+	// Try to open without encryption - should fail with clear error
+	noEncConfig := EncryptionConfig{
+		Enabled: false,
+	}
+	_, err = OpenWALWithEncryption(walPath, noEncConfig)
+	if err == nil {
+		t.Fatal("Expected error when opening encrypted DB without encryption")
+	}
+
+	// Check that it's an EncryptionMismatchError
+	var mismatchErr *EncryptionMismatchError
+	if !errors.As(err, &mismatchErr) {
+		t.Fatalf("Expected EncryptionMismatchError, got: %T: %v", err, err)
+	}
+
+	if !mismatchErr.DatabaseEncrypted {
+		t.Error("Expected DatabaseEncrypted=true")
+	}
+	if mismatchErr.ConfigEncrypted {
+		t.Error("Expected ConfigEncrypted=false")
+	}
+
+	// Check error message contains helpful guidance
+	if !strings.Contains(err.Error(), "encryption mismatch") {
+		t.Errorf("Error should mention 'encryption mismatch': %v", err)
+	}
+	if !strings.Contains(err.Error(), "FLYDB_ENCRYPTION_PASSPHRASE") {
+		t.Errorf("Error should suggest setting passphrase: %v", err)
+	}
+}
+
+func TestWALHeaderValidation(t *testing.T) {
+	// Create a new WAL file
+	tmpFile, err := os.CreateTemp("", "wal_header_test_*.fdb")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	walPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(walPath)
+
+	// Create unencrypted WAL
+	wal, err := OpenWAL(walPath)
+	if err != nil {
+		t.Fatalf("Failed to open WAL: %v", err)
+	}
+	wal.Close()
+
+	// Read the header and verify it
+	f, err := os.Open(walPath)
+	if err != nil {
+		t.Fatalf("Failed to open file: %v", err)
+	}
+	defer f.Close()
+
+	header := make([]byte, WALHeaderSize)
+	n, err := f.Read(header)
+	if err != nil {
+		t.Fatalf("Failed to read header: %v", err)
+	}
+	if n != WALHeaderSize {
+		t.Fatalf("Expected %d bytes, got %d", WALHeaderSize, n)
+	}
+
+	// Check magic number
+	magic := binary.BigEndian.Uint32(header[0:4])
+	if magic != WALMagic {
+		t.Errorf("Expected magic 0x%X, got 0x%X", WALMagic, magic)
+	}
+
+	// Check version
+	if header[4] != WALVersion {
+		t.Errorf("Expected version %d, got %d", WALVersion, header[4])
+	}
+
+	// Check flags (should be 0 for unencrypted)
+	if header[5] != 0 {
+		t.Errorf("Expected flags 0 for unencrypted, got %d", header[5])
+	}
+}
+
+func TestWALHeaderEncryptedFlag(t *testing.T) {
+	// Create a new encrypted WAL file
+	tmpFile, err := os.CreateTemp("", "wal_header_enc_test_*.fdb")
+	if err != nil {
+		t.Fatalf("Failed to create temp file: %v", err)
+	}
+	walPath := tmpFile.Name()
+	tmpFile.Close()
+	defer os.Remove(walPath)
+
+	// Create encrypted WAL
+	encConfig := EncryptionConfig{
+		Enabled:    true,
+		Passphrase: "test-passphrase",
+	}
+	wal, err := OpenWALWithEncryption(walPath, encConfig)
+	if err != nil {
+		t.Fatalf("Failed to open WAL: %v", err)
+	}
+	wal.Close()
+
+	// Read the header and verify it
+	f, err := os.Open(walPath)
+	if err != nil {
+		t.Fatalf("Failed to open file: %v", err)
+	}
+	defer f.Close()
+
+	header := make([]byte, WALHeaderSize)
+	n, err := f.Read(header)
+	if err != nil {
+		t.Fatalf("Failed to read header: %v", err)
+	}
+	if n != WALHeaderSize {
+		t.Fatalf("Expected %d bytes, got %d", WALHeaderSize, n)
+	}
+
+	// Check magic number
+	magic := binary.BigEndian.Uint32(header[0:4])
+	if magic != WALMagic {
+		t.Errorf("Expected magic 0x%X, got 0x%X", WALMagic, magic)
+	}
+
+	// Check flags (should have encrypted bit set)
+	if header[5] != WALFlagEncrypted {
+		t.Errorf("Expected flags %d for encrypted, got %d", WALFlagEncrypted, header[5])
+	}
+}

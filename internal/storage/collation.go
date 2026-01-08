@@ -122,11 +122,11 @@ func (c *UnicodeCollator) Equal(a, b string) bool {
 }
 
 // GetCollator returns a Collator for the given collation type and locale.
-func GetCollator(collationType CollationType, locale string) Collator {
+func GetCollator(collationType Collation, locale string) Collator {
 	switch collationType {
 	case CollationBinary:
 		return &BinaryCollator{}
-	case CollationNocase:
+	case CollationCaseInsensitive:
 		return &NocaseCollator{}
 	case CollationUnicode:
 		return NewUnicodeCollator(locale)
@@ -136,9 +136,9 @@ func GetCollator(collationType CollationType, locale string) Collator {
 }
 
 // NormalizeForCollation normalizes a string for the given collation.
-func NormalizeForCollation(s string, collationType CollationType) string {
+func NormalizeForCollation(s string, collationType Collation) string {
 	switch collationType {
-	case CollationNocase:
+	case CollationCaseInsensitive:
 		return strings.ToLower(s)
 	case CollationUnicode:
 		// Normalize Unicode to NFC form

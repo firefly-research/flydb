@@ -136,14 +136,38 @@ type KVStore struct {
 //
 // Example:
 //
-//	store, err := storage.NewKVStore("/var/lib/flydb/data.wal")
+//	store, err := storage.NewKVStore("/var/lib/flydb/data.fdb")
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //	defer store.Close()
 func NewKVStore(walPath string) (*KVStore, error) {
-	// Open or create the WAL file.
-	wal, err := OpenWAL(walPath)
+	return NewKVStoreWithEncryption(walPath, EncryptionConfig{Enabled: false})
+}
+
+// NewKVStoreWithEncryption creates a new KVStore with optional encryption.
+// When encryption is enabled, all WAL entries are encrypted using AES-256-GCM.
+//
+// Parameters:
+//   - walPath: Path to the WAL file (created if it doesn't exist)
+//   - encConfig: Encryption configuration
+//
+// Returns the initialized KVStore, or an error if initialization fails.
+//
+// Example:
+//
+//	config := storage.EncryptionConfig{
+//	    Enabled:    true,
+//	    Passphrase: "my-secret-passphrase",
+//	}
+//	store, err := storage.NewKVStoreWithEncryption("/var/lib/flydb/data.fdb", config)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer store.Close()
+func NewKVStoreWithEncryption(walPath string, encConfig EncryptionConfig) (*KVStore, error) {
+	// Open or create the WAL file with encryption config.
+	wal, err := OpenWALWithEncryption(walPath, encConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +193,11 @@ func NewKVStore(walPath string) (*KVStore, error) {
 	}
 
 	return store, nil
+}
+
+// IsEncrypted returns true if the KVStore is using encryption.
+func (s *KVStore) IsEncrypted() bool {
+	return s.wal.IsEncrypted()
 }
 
 // WAL returns the underlying Write-Ahead Log.

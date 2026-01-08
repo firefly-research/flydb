@@ -27,7 +27,7 @@ func setupTestKVStore(t *testing.T) (*KVStore, string, func()) {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 
-	walPath := tmpDir + "/test.wal"
+	walPath := tmpDir + "/test.fdb"
 	store, err := NewKVStore(walPath)
 	if err != nil {
 		os.RemoveAll(tmpDir)
@@ -141,7 +141,7 @@ func TestKVStorePersistence(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	walPath := tmpDir + "/test.wal"
+	walPath := tmpDir + "/test.fdb"
 
 	// Create store and write data
 	store1, err := NewKVStore(walPath)
@@ -167,3 +167,67 @@ func TestKVStorePersistence(t *testing.T) {
 	}
 }
 
+func TestKVStoreWithEncryption(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "flydb_kv_enc_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	walPath := tmpDir + "/test_encrypted.fdb"
+	encConfig := EncryptionConfig{
+		Enabled:    true,
+		Passphrase: "test-passphrase",
+	}
+
+	// Create encrypted store and write data
+	store1, err := NewKVStoreWithEncryption(walPath, encConfig)
+	if err != nil {
+		t.Fatalf("Failed to create encrypted KVStore: %v", err)
+	}
+
+	if !store1.IsEncrypted() {
+		t.Error("Expected store to be encrypted")
+	}
+
+	store1.Put("secret_key", []byte("secret_value"))
+	store1.Close()
+
+	// Reopen store with same passphrase and verify data persisted
+	store2, err := NewKVStoreWithEncryption(walPath, encConfig)
+	if err != nil {
+		t.Fatalf("Failed to reopen encrypted KVStore: %v", err)
+	}
+	defer store2.Close()
+
+	val, err := store2.Get("secret_key")
+	if err != nil {
+		t.Fatalf("Get failed after reopen: %v", err)
+	}
+	if string(val) != "secret_value" {
+		t.Errorf("Expected 'secret_value', got '%s'", string(val))
+	}
+}
+
+func TestKVStoreEncryptionDisabled(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "flydb_kv_noenc_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	walPath := tmpDir + "/test_unencrypted.fdb"
+	encConfig := EncryptionConfig{
+		Enabled: false,
+	}
+
+	store, err := NewKVStoreWithEncryption(walPath, encConfig)
+	if err != nil {
+		t.Fatalf("Failed to create KVStore: %v", err)
+	}
+	defer store.Close()
+
+	if store.IsEncrypted() {
+		t.Error("Expected store to not be encrypted")
+	}
+}

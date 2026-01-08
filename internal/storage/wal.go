@@ -25,10 +25,10 @@ data survives crashes and restarts.
 How WAL Works:
 ==============
 
-	1. Before any write operation (Put/Delete), the operation is appended to the WAL
-	2. The WAL is an append-only file - records are never modified or deleted
-	3. On startup, the WAL is replayed to rebuild the in-memory state
-	4. The WAL can be replayed from any offset for replication
+ 1. Before any write operation (Put/Delete), the operation is appended to the WAL
+ 2. The WAL is an append-only file - records are never modified or deleted
+ 3. On startup, the WAL is replayed to rebuild the in-memory state
+ 4. The WAL can be replayed from any offset for replication
 
 WAL Record Format:
 ==================
@@ -60,10 +60,10 @@ Replication:
 
 The WAL is also used for leader-follower replication:
 
-	1. Followers track their current WAL offset
-	2. When syncing, followers request records from their offset
-	3. The leader streams WAL records to followers
-	4. Followers apply records and update their offset
+ 1. Followers track their current WAL offset
+ 2. When syncing, followers request records from their offset
+ 3. The leader streams WAL records to followers
+ 4. Followers apply records and update their offset
 
 This provides eventual consistency between leader and followers.
 
@@ -104,7 +104,7 @@ func wrapPathError(err error, path string, operation string) error {
 		return fmt.Errorf("permission denied: cannot %s '%s'. "+
 			"Try one of the following:\n"+
 			"  • Run with sudo: sudo flydb\n"+
-			"  • Use a different path: flydb --db ./flydb.wal\n"+
+			"  • Use a different path: flydb --db ./flydb.fdb\n"+
 			"  • Create the directory with proper permissions: sudo mkdir -p %s && sudo chown $USER %s",
 			operation, path, filepath.Dir(path), filepath.Dir(path))
 	}
@@ -121,6 +121,74 @@ const (
 	// The record contains only the key (value is empty).
 	OpDelete byte = 2
 )
+
+// WAL file header constants.
+const (
+	// WALMagic is the magic number identifying FlyDB WAL files.
+	// "FLYW" in ASCII (FLYdb Wal)
+	WALMagic uint32 = 0x464C5957
+
+	// WALVersion is the current WAL format version.
+	WALVersion byte = 1
+
+	// WALHeaderSize is the size of the WAL header in bytes.
+	// Magic (4) + Version (1) + Flags (1) + Reserved (2) = 8 bytes
+	WALHeaderSize = 8
+
+	// WAL header flag bits
+	WALFlagEncrypted byte = 0x01 // Bit 0: encryption enabled
+)
+
+// ErrEncryptionMismatch is returned when trying to open an encrypted database
+// without encryption enabled, or vice versa.
+var ErrEncryptionMismatch = errors.New("encryption configuration mismatch")
+
+// ErrInvalidWALFile is returned when the WAL file has an invalid format.
+var ErrInvalidWALFile = errors.New("invalid WAL file format")
+
+// EncryptionMismatchError provides detailed information about encryption mismatches.
+type EncryptionMismatchError struct {
+	DatabaseEncrypted bool   // True if the database file is encrypted
+	ConfigEncrypted   bool   // True if the config has encryption enabled
+	Message           string // Human-readable error message
+}
+
+func (e *EncryptionMismatchError) Error() string {
+	return e.Message
+}
+
+func (e *EncryptionMismatchError) Unwrap() error {
+	return ErrEncryptionMismatch
+}
+
+// newEncryptionMismatchError creates a helpful error message for encryption mismatches.
+func newEncryptionMismatchError(dbEncrypted, configEncrypted bool) *EncryptionMismatchError {
+	if configEncrypted && !dbEncrypted {
+		return &EncryptionMismatchError{
+			DatabaseEncrypted: false,
+			ConfigEncrypted:   true,
+			Message: "encryption mismatch: database was created WITHOUT encryption, " +
+				"but encryption is now ENABLED.\n\n" +
+				"To fix this, choose one of:\n" +
+				"  • Disable encryption to use this database:\n" +
+				"      Set encryption_enabled = false in your config file, or\n" +
+				"      Set FLYDB_ENCRYPTION_ENABLED=false environment variable\n" +
+				"  • Start fresh with an encrypted database:\n" +
+				"      Delete the existing database file and restart",
+		}
+	}
+	return &EncryptionMismatchError{
+		DatabaseEncrypted: true,
+		ConfigEncrypted:   false,
+		Message: "encryption mismatch: database was created WITH encryption, " +
+			"but encryption is now DISABLED.\n\n" +
+			"To fix this, choose one of:\n" +
+			"  • Enable encryption to use this database:\n" +
+			"      Set FLYDB_ENCRYPTION_PASSPHRASE environment variable\n" +
+			"  • Start fresh with an unencrypted database:\n" +
+			"      Delete the existing database file and restart",
+	}
+}
 
 // WAL (Write-Ahead Log) provides durability for the database.
 // All modifications are appended to the WAL file before being applied
@@ -163,7 +231,7 @@ type WAL struct {
 //
 // Example:
 //
-//	wal, err := storage.OpenWAL("/var/lib/flydb/data.wal")
+//	wal, err := storage.OpenWAL("/var/lib/flydb/data.fdb")
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -188,7 +256,7 @@ func OpenWAL(path string) (*WAL, error) {
 //	    Enabled:    true,
 //	    Passphrase: "my-secret-passphrase",
 //	}
-//	wal, err := storage.OpenWALWithEncryption("/var/lib/flydb/data.wal", config)
+//	wal, err := storage.OpenWALWithEncryption("/var/lib/flydb/data.fdb", config)
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
@@ -202,7 +270,7 @@ func OpenWALWithEncryption(path string, config EncryptionConfig) (*WAL, error) {
 		}
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return nil, wrapPathError(err, path, "open database file")
 	}
@@ -216,7 +284,128 @@ func OpenWALWithEncryption(path string, config EncryptionConfig) (*WAL, error) {
 		}
 	}
 
+	// Check file size to determine if this is a new or existing file
+	stat, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("failed to stat database file: %w", err)
+	}
+
+	if stat.Size() == 0 {
+		// New file: write the header
+		if err := writeWALHeader(f, config.Enabled); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("failed to write WAL header: %w", err)
+		}
+	} else {
+		// Existing file: validate the header
+		if err := validateWALHeader(f, config.Enabled); err != nil {
+			f.Close()
+			return nil, err
+		}
+		// Seek to end for appending
+		if _, err := f.Seek(0, io.SeekEnd); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("failed to seek to end of WAL: %w", err)
+		}
+	}
+
 	return &WAL{file: f, encryptor: encryptor}, nil
+}
+
+// writeWALHeader writes the WAL file header.
+func writeWALHeader(f *os.File, encrypted bool) error {
+	header := make([]byte, WALHeaderSize)
+
+	// Magic number (4 bytes)
+	binary.BigEndian.PutUint32(header[0:4], WALMagic)
+
+	// Version (1 byte)
+	header[4] = WALVersion
+
+	// Flags (1 byte)
+	if encrypted {
+		header[5] = WALFlagEncrypted
+	}
+
+	// Reserved (2 bytes) - already zero
+
+	_, err := f.Write(header)
+	return err
+}
+
+// validateWALHeader reads and validates the WAL file header.
+// Returns an error if the header is invalid or encryption settings don't match.
+func validateWALHeader(f *os.File, configEncrypted bool) error {
+	// Seek to beginning to read header
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to seek to WAL header: %w", err)
+	}
+
+	header := make([]byte, WALHeaderSize)
+	n, err := f.Read(header)
+	if err != nil {
+		return fmt.Errorf("failed to read WAL header: %w", err)
+	}
+
+	// Handle legacy WAL files without header (pre-01.26.1)
+	if n < WALHeaderSize {
+		return handleLegacyWAL(f, header[:n], configEncrypted)
+	}
+
+	magic := binary.BigEndian.Uint32(header[0:4])
+	if magic != WALMagic {
+		// This might be a legacy WAL file without header
+		return handleLegacyWAL(f, header, configEncrypted)
+	}
+
+	version := header[4]
+	if version > WALVersion {
+		return fmt.Errorf("%w: WAL version %d is newer than supported version %d",
+			ErrInvalidWALFile, version, WALVersion)
+	}
+
+	flags := header[5]
+	dbEncrypted := (flags & WALFlagEncrypted) != 0
+
+	// Check for encryption mismatch
+	if dbEncrypted != configEncrypted {
+		return newEncryptionMismatchError(dbEncrypted, configEncrypted)
+	}
+
+	return nil
+}
+
+// handleLegacyWAL handles WAL files created before the header was added.
+// It attempts to detect whether the file is encrypted based on content.
+func handleLegacyWAL(f *os.File, firstBytes []byte, configEncrypted bool) error {
+	if len(firstBytes) == 0 {
+		// Empty file, treat as new
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		return writeWALHeader(f, configEncrypted)
+	}
+
+	// Try to detect if this is an unencrypted legacy WAL
+	// Unencrypted WAL starts with operation byte (1 or 2)
+	firstByte := firstBytes[0]
+	looksUnencrypted := (firstByte == OpPut || firstByte == OpDelete)
+
+	if configEncrypted && looksUnencrypted {
+		return newEncryptionMismatchError(false, true)
+	}
+
+	if !configEncrypted && !looksUnencrypted {
+		// First byte is not a valid operation, likely encrypted data
+		return newEncryptionMismatchError(true, false)
+	}
+
+	// Legacy file matches config, seek back to start for replay
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	return nil
 }
 
 // IsEncrypted returns true if the WAL is using encryption.
@@ -334,8 +523,16 @@ func (w *WAL) Size() (int64, error) {
 //	    }
 //	})
 func (w *WAL) Replay(startOffset int64, fn func(op byte, key string, value []byte)) error {
+	// Adjust offset to account for header if starting from beginning
+	actualOffset := startOffset
+	if startOffset == 0 {
+		actualOffset = WALHeaderSize
+	}
+
 	// Seek to the starting position.
-	w.file.Seek(startOffset, 0)
+	if _, err := w.file.Seek(actualOffset, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to seek in WAL: %w", err)
+	}
 	reader := bufio.NewReader(w.file)
 
 	// Use encrypted or unencrypted replay based on configuration

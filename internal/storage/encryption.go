@@ -49,6 +49,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io"
+	"strings"
 
 	"golang.org/x/crypto/pbkdf2"
 )
@@ -160,3 +161,19 @@ func (e *Encryptor) Decrypt(ciphertext []byte) ([]byte, error) {
 	return e.gcm.Open(nil, nonce, ciphertext, nil)
 }
 
+// ErrEncryptionFailed is returned when decryption fails due to wrong passphrase.
+var ErrEncryptionFailed = errors.New("encryption/decryption failed - incorrect passphrase")
+
+// IsEncryptionError checks if an error is related to encryption/decryption failure.
+// This typically indicates a wrong passphrase was used.
+func IsEncryptionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// GCM authentication failure indicates wrong key/passphrase
+	return strings.Contains(errStr, "message authentication failed") ||
+		strings.Contains(errStr, "cipher:") ||
+		strings.Contains(errStr, "decryption failed") ||
+		errors.Is(err, ErrEncryptionFailed)
+}

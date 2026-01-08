@@ -167,3 +167,34 @@ func (e *UTF16Encoder) Decode(b []byte) (string, error) {
 	return string(utf16.Decode(u16)), nil
 }
 
+// Validate implements Encoder.
+func (e *UTF16Encoder) Validate(s string) error {
+	// All valid Go strings can be encoded as UTF-16
+	return nil
+}
+
+// Name implements Encoder.
+func (e *UTF16Encoder) Name() string {
+	return "UTF16"
+}
+
+// GetEncoder returns an Encoder for the given character encoding.
+func GetEncoder(encoding CharacterEncoding) Encoder {
+	switch encoding {
+	case EncodingLatin1:
+		return &Latin1Encoder{}
+	case EncodingASCII:
+		return &ASCIIEncoder{}
+	case EncodingUTF16:
+		return &UTF16Encoder{}
+	default:
+		return &UTF8Encoder{}
+	}
+}
+
+// ValidateStringForEncoding validates that a string can be stored with the given encoding.
+func ValidateStringForEncoding(s string, encoding CharacterEncoding) error {
+	encoder := GetEncoder(encoding)
+	return encoder.Validate(s)
+}
+
