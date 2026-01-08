@@ -56,16 +56,19 @@ Command-Line Flags:
   -repl-port : TCP port for replication (master only, default: 9999)
   -role      : Server role - "master" or "slave" (default: master)
   -master    : Master address for slave nodes (format: host:port)
-  -db        : Path to the WAL database file (default: flydb.wal)
+  -data-dir  : Directory for database storage (default: ./data)
 
 Usage Examples:
 ===============
 
+  Start a standalone server:
+    ./flydb -data-dir ./data
+
   Start a master node:
-    ./flydb -port 8888 -repl-port 9999 -role master -db master.wal
+    ./flydb -port 8888 -repl-port 9999 -role master -data-dir ./data
 
   Start a slave node:
-    ./flydb -port 8889 -role slave -master localhost:9999 -db slave.wal
+    ./flydb -port 8889 -role slave -master localhost:9999 -data-dir ./data
 */
 package main
 
@@ -109,11 +112,19 @@ func printUsage() {
 	fmt.Println("  -repl-port <port>        Replication port for master mode (default: 9999)")
 	fmt.Println("  -role <role>             Server role: standalone, master, slave (default: master)")
 	fmt.Println("  -master <host:port>      Master address for slave mode")
-	fmt.Println("  -db <path>               Path to WAL database file (default: flydb.wal)")
+	fmt.Printf("  -data-dir <path>         Directory for database storage (default: %s)\n", config.GetDefaultDataDir())
 	fmt.Println("  -log-level <level>       Log level: debug, info, warn, error (default: info)")
 	fmt.Println("  -log-json                Enable JSON log output")
 	fmt.Println("  -version                 Show version information")
 	fmt.Println("  -help                    Show this help message")
+	fmt.Println()
+
+	fmt.Println(cli.Highlight("ENVIRONMENT VARIABLES:"))
+	fmt.Println("  FLYDB_DATA_DIR           Data directory for database storage")
+	fmt.Println("  FLYDB_PORT               Server port for text protocol")
+	fmt.Println("  FLYDB_BINARY_PORT        Server port for binary protocol")
+	fmt.Println("  FLYDB_ENCRYPTION_PASSPHRASE  Encryption passphrase (required if encryption enabled)")
+	fmt.Println("  FLYDB_ADMIN_PASSWORD     Admin password for first-time setup")
 	fmt.Println()
 
 	fmt.Println(cli.Highlight("EXAMPLES:"))
@@ -125,10 +136,10 @@ func printUsage() {
 	fmt.Println("  flydb -role standalone -port 8888")
 	fmt.Println()
 	fmt.Println("  " + cli.Dimmed("# Start master server (production)"))
-	fmt.Println("  flydb -role master -port 8888 -repl-port 9999 -db /var/lib/flydb/data.wal")
+	fmt.Println("  flydb -role master -port 8888 -repl-port 9999 -db /var/lib/flydb/data.fdb")
 	fmt.Println()
 	fmt.Println("  " + cli.Dimmed("# Start slave server"))
-	fmt.Println("  flydb -role slave -master localhost:9999 -db /var/lib/flydb/slave.wal")
+	fmt.Println("  flydb -role slave -master localhost:9999 -db /var/lib/flydb/slave.fdb")
 	fmt.Println()
 	fmt.Println("  " + cli.Dimmed("# Start with debug logging"))
 	fmt.Println("  flydb -log-level debug -log-json")
@@ -139,8 +150,8 @@ func printUsage() {
 	fmt.Println()
 
 	fmt.Println(cli.Highlight("CONNECTING:"))
-	fmt.Println("  Use fly-cli to connect to the server:")
-	fmt.Println("    fly-cli -h localhost -p 8889")
+	fmt.Println("  Use fsql to connect to the server:")
+	fmt.Println("    fsql -h localhost -p 8889")
 	fmt.Println()
 }
 
@@ -170,6 +181,7 @@ func main() {
 	role := flag.String("role", cfg.Role, "Server role: 'master', 'slave', or 'standalone'")
 	masterAddr := flag.String("master", cfg.MasterAddr, "Master address (host:port) for slave mode")
 	dbPath := flag.String("db", cfg.DBPath, "Path to the WAL database file")
+	dataDir := flag.String("data-dir", cfg.DataDir, "Directory for multi-database storage (enables multi-database mode)")
 	logLevel := flag.String("log-level", cfg.LogLevel, "Log level: debug, info, warn, error")
 	logJSON := flag.Bool("log-json", cfg.LogJSON, "Enable JSON log output")
 	configFile := flag.String("config", "", "Path to configuration file")
@@ -198,8 +210,9 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Error loading config file: %v\n", err)
 			os.Exit(1)
 		}
+		// Re-apply environment variables (they have higher priority than config file)
+		cfgMgr.LoadFromEnv()
 		cfg = cfgMgr.Get()
-		// Re-apply defaults from new config for flags that weren't explicitly set
 	}
 
 	// Track if we're running in interactive wizard mode
@@ -222,27 +235,47 @@ func main() {
 		if wizardConfig.ConfigFile != "" {
 			cfg.ConfigFile = wizardConfig.ConfigFile
 		}
+
+		// Apply environment variables for sensitive values that can't be set in wizard
+		// (e.g., encryption passphrase which should not be stored in config files)
+		cfgMgr.Set(cfg)
+		cfgMgr.LoadFromEnv()
+		cfg = cfgMgr.Get()
 	} else {
 		// Display the startup banner with version and copyright information.
 		// This provides visual feedback that the server is starting.
 		banner.Print()
 
 		// Apply command-line flags to configuration (highest priority)
-		// Parse port strings to integers
-		if portInt, err := strconv.Atoi(*port); err == nil {
-			cfg.Port = portInt
-		}
-		if binaryPortInt, err := strconv.Atoi(*binaryPort); err == nil {
-			cfg.BinaryPort = binaryPortInt
-		}
-		if replPortInt, err := strconv.Atoi(*replPort); err == nil {
-			cfg.ReplPort = replPortInt
-		}
-		cfg.Role = *role
-		cfg.MasterAddr = *masterAddr
-		cfg.DBPath = *dbPath
-		cfg.LogLevel = *logLevel
-		cfg.LogJSON = *logJSON
+		// Only apply flags that were explicitly set by the user
+		flag.Visit(func(f *flag.Flag) {
+			switch f.Name {
+			case "port":
+				if portInt, err := strconv.Atoi(*port); err == nil {
+					cfg.Port = portInt
+				}
+			case "binary-port":
+				if binaryPortInt, err := strconv.Atoi(*binaryPort); err == nil {
+					cfg.BinaryPort = binaryPortInt
+				}
+			case "repl-port":
+				if replPortInt, err := strconv.Atoi(*replPort); err == nil {
+					cfg.ReplPort = replPortInt
+				}
+			case "role":
+				cfg.Role = *role
+			case "master":
+				cfg.MasterAddr = *masterAddr
+			case "db":
+				cfg.DBPath = *dbPath
+			case "data-dir":
+				cfg.DataDir = *dataDir
+			case "log-level":
+				cfg.LogLevel = *logLevel
+			case "log-json":
+				cfg.LogJSON = *logJSON
+			}
+		})
 	}
 
 	// Validate the final configuration
@@ -267,31 +300,157 @@ func main() {
 	}
 
 	log.Info("FlyDB server starting",
-		"version", "01.26.1",
+		"version", banner.Version,
 		"role", cfg.Role,
 		"port", cfg.Port,
 		"binary_port", cfg.BinaryPort,
-		"db_path", cfg.DBPath,
+		"data_dir", cfg.DataDir,
 	)
 
+	// Ensure DataDir is set (use default if not specified)
+	if cfg.DataDir == "" {
+		cfg.DataDir = config.GetDefaultDataDir()
+	}
+
+	// Check if this is a first-time setup (no existing database files)
+	isFirstTimeSetup := !storage.DataDirectoryHasData(cfg.DataDir)
+
+	// Configure encryption if enabled
+	encConfig := storage.EncryptionConfig{
+		Enabled:    cfg.EncryptionEnabled,
+		Passphrase: cfg.EncryptionPassphrase,
+	}
+
+	// Handle missing passphrase when encryption is enabled
+	if cfg.EncryptionEnabled && cfg.EncryptionPassphrase == "" {
+		if isFirstTimeSetup {
+			// First-time setup: generate a passphrase automatically
+			generatedPassphrase, err := auth.GenerateSecurePassword(24)
+			if err != nil {
+				log.Error("Failed to generate encryption passphrase", "error", err)
+				os.Exit(1)
+			}
+
+			cfg.EncryptionPassphrase = generatedPassphrase
+			encConfig.Passphrase = generatedPassphrase
+
+			fmt.Println()
+			fmt.Println("  " + cli.Warning("═══════════════════════════════════════════════════════════"))
+			fmt.Println("  " + cli.Warning("  FIRST-TIME SETUP: Encryption Passphrase Generated"))
+			fmt.Println("  " + cli.Warning("═══════════════════════════════════════════════════════════"))
+			fmt.Println()
+			fmt.Printf("    %s %s\n", cli.Dimmed("Passphrase:"), cli.Highlight(generatedPassphrase))
+			fmt.Println()
+			fmt.Println("  " + cli.Warning("IMPORTANT: Save this passphrase securely!"))
+			fmt.Println("  " + cli.Warning("Data cannot be recovered without it!"))
+			fmt.Println()
+			fmt.Printf("    %s\n", cli.Dimmed("Set this environment variable before starting:"))
+			fmt.Printf("    %s\n", cli.Info("export FLYDB_ENCRYPTION_PASSPHRASE=\""+generatedPassphrase+"\""))
+			fmt.Println()
+
+			log.Info("Generated encryption passphrase for first-time setup")
+		} else {
+			// Existing data but no passphrase: FAIL - cannot decrypt existing data
+			fmt.Println()
+			cli.PrintError("Encryption is enabled but no passphrase was provided.")
+			fmt.Println()
+			fmt.Println("  " + cli.Warning("Existing encrypted data was found in: ") + cli.Highlight(cfg.DataDir))
+			fmt.Println()
+			fmt.Println("  " + cli.Highlight("You MUST provide the original passphrase to access your data."))
+			fmt.Println()
+			fmt.Println("  " + cli.Dimmed("Set the encryption passphrase environment variable:"))
+			fmt.Println("    export FLYDB_ENCRYPTION_PASSPHRASE=\"your-passphrase\"")
+			fmt.Println()
+			fmt.Println("  " + cli.Warning("If you have lost your passphrase, your data cannot be recovered."))
+			fmt.Println()
+			log.Error("Encryption passphrase required for existing data", "data_dir", cfg.DataDir)
+			os.Exit(1)
+		}
+	}
+
 	// Initialize the Storage Layer.
+	// FlyDB always uses multi-database mode with DatabaseManager.
+	// Each database is stored in a separate directory under cfg.DataDir.
+	//
 	// The KVStore is the core storage engine that provides:
 	//   - In-memory key-value storage for fast reads
 	//   - WAL-backed persistence for durability
 	//   - Automatic state recovery on startup by replaying the WAL
-	//
-	// The WAL (Write-Ahead Log) ensures that all writes are persisted to disk
-	// before being acknowledged, providing crash recovery guarantees.
-	log.Debug("Initializing storage layer", "path", cfg.DBPath)
-	kv, err := storage.NewKVStore(cfg.DBPath)
+	var kv *storage.KVStore
+	var dbManager *storage.DatabaseManager
+
+	log.Info("Initializing database manager", "data_dir", cfg.DataDir)
+
+	var err error
+	dbManager, err = storage.NewDatabaseManager(cfg.DataDir, encConfig)
 	if err != nil {
-		log.Error("Failed to initialize storage", "error", err, "path", cfg.DBPath)
+		// Check if this is an encryption error (wrong passphrase)
+		if storage.IsEncryptionError(err) {
+			fmt.Println()
+			cli.PrintError("Failed to decrypt database - incorrect passphrase!")
+			fmt.Println()
+			fmt.Println("  " + cli.Warning("The passphrase you provided does not match the one used to encrypt the data."))
+			fmt.Println()
+			fmt.Println("  " + cli.Highlight("Please verify your passphrase and try again."))
+			fmt.Println()
+			fmt.Println("  " + cli.Dimmed("Current passphrase source:"))
+			if os.Getenv(config.EnvEncryptionPassphrase) != "" {
+				fmt.Println("    Environment variable: FLYDB_ENCRYPTION_PASSPHRASE")
+			} else {
+				fmt.Println("    Configuration file or wizard")
+			}
+			fmt.Println()
+			fmt.Println("  " + cli.Warning("If you have lost your passphrase, your data cannot be recovered."))
+			fmt.Println()
+			log.Error("Encryption passphrase incorrect", "data_dir", cfg.DataDir)
+			os.Exit(1)
+		}
+		log.Error("Failed to initialize database manager", "error", err, "data_dir", cfg.DataDir)
 		os.Exit(1)
 	}
-	log.Info("Storage layer initialized", "path", cfg.DBPath)
 
-	// Initialize the authentication manager and check if admin exists.
+	// Get the system database's KVStore for admin initialization
+	// Users are stored in the system database for global access across all databases
+	systemDB, err := dbManager.GetSystemDatabase()
+	if err != nil {
+		// Check if this is an encryption error (wrong passphrase)
+		if storage.IsEncryptionError(err) {
+			fmt.Println()
+			cli.PrintError("Failed to decrypt database - incorrect passphrase!")
+			fmt.Println()
+			fmt.Println("  " + cli.Warning("The passphrase you provided does not match the one used to encrypt the data."))
+			fmt.Println()
+			fmt.Println("  " + cli.Highlight("Please verify your passphrase and try again."))
+			fmt.Println()
+			fmt.Println("  " + cli.Warning("If you have lost your passphrase, your data cannot be recovered."))
+			fmt.Println()
+			log.Error("Encryption passphrase incorrect", "data_dir", cfg.DataDir)
+			os.Exit(1)
+		}
+		log.Error("Failed to get system database", "error", err)
+		os.Exit(1)
+	}
+	kv = systemDB.Store
+
+	log.Info("Database manager initialized", "data_dir", cfg.DataDir)
+
+	// Initialize the authentication manager backed by the system database.
+	// This ensures users are global across all databases.
 	authMgr := auth.NewAuthManager(kv)
+
+	// Initialize built-in RBAC roles BEFORE creating admin user.
+	// This ensures the admin role exists when we try to assign it.
+	if err := authMgr.InitializeBuiltInRoles(); err != nil {
+		log.Error("Failed to initialize built-in roles", "error", err)
+		// Continue anyway - roles can be created later
+	}
+
+	// Ensure existing admin user has the admin role (for upgrades from older versions)
+	if err := authMgr.EnsureAdminHasRole(); err != nil {
+		log.Error("Failed to ensure admin has admin role", "error", err)
+		// Continue anyway - this is not critical
+	}
+
 	if !authMgr.AdminExists() {
 		log.Info("First-time setup detected: admin user does not exist")
 
@@ -427,7 +586,7 @@ func main() {
 	}
 
 	// Initialize and start the TCP server for client connections.
-	// The server uses dependency injection by accepting the existing KVStore,
+	// The server uses dependency injection by accepting the DatabaseManager,
 	// which ensures that the SQL executor and replicator share the same
 	// storage instance and WAL file.
 	//
@@ -435,10 +594,10 @@ func main() {
 	//   - Easier testing with mock storage
 	//   - Consistent state across all components
 	//   - Proper resource management
-	srv := server.NewServerWithStoreAndBinary(
+	srv := server.NewServerWithDatabaseManager(
 		fmt.Sprintf(":%d", cfg.Port),
 		fmt.Sprintf(":%d", cfg.BinaryPort),
-		kv,
+		dbManager,
 	)
 
 	// Set up graceful shutdown handling
@@ -457,9 +616,9 @@ func main() {
 			log.Error("Error during shutdown", "error", err)
 		}
 
-		// Close the storage layer
-		if err := kv.Close(); err != nil {
-			log.Error("Error closing storage", "error", err)
+		// Close the database manager
+		if err := dbManager.Close(); err != nil {
+			log.Error("Error closing database manager", "error", err)
 		}
 
 		cli.PrintSuccess("FlyDB server stopped gracefully")
@@ -473,7 +632,10 @@ func main() {
 	cli.KeyValue("Text Protocol", fmt.Sprintf("localhost:%d", cfg.Port), 20)
 	cli.KeyValue("Binary Protocol", fmt.Sprintf("localhost:%d", cfg.BinaryPort), 20)
 	cli.KeyValue("Role", cfg.Role, 20)
-	cli.KeyValue("Database", cfg.DBPath, 20)
+	cli.KeyValue("Data Directory", cfg.DataDir, 20)
+	if cfg.EncryptionEnabled {
+		cli.KeyValue("Encryption", "enabled", 20)
+	}
 	if cfg.ConfigFile != "" {
 		cli.KeyValue("Config File", cfg.ConfigFile, 20)
 	}
