@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [01.26.8] - 2026-01-08
+
+### Unified Disk-Based Storage Engine
+
+This release consolidates FlyDB's storage layer into a single, unified disk-based storage engine with intelligent memory caching. This is a major architectural improvement that provides better performance, scalability, and simpler configuration.
+
+### Added
+
+#### Disk Storage Engine
+- **Page-Based Storage**: 8KB pages with slotted page layout for efficient record storage
+- **LRU-K Buffer Pool**: Intelligent page caching with frequency-based eviction
+- **Auto-Sized Buffer Pool**: Automatically sizes based on available system memory (25% of RAM)
+- **Heap File Management**: Efficient page allocation with free space tracking
+- **Checkpoint System**: Periodic full database snapshots for faster recovery
+
+#### Storage Configuration
+- **`buffer_pool_size`**: Configure buffer pool size in pages (0 = auto-size)
+- **`checkpoint_secs`**: Configure checkpoint interval in seconds (default: 60)
+
+### Changed
+- **BREAKING: Removed memory engine option** - FlyDB now uses disk storage exclusively
+- **BREAKING: Database directory structure changed** - Each database is now a directory containing `data.db` and `wal.fdb`
+- `storage_engine` configuration option is now deprecated (ignored if set)
+- Default buffer pool auto-sizes based on available memory instead of fixed 1024 pages
+- Improved startup time with checkpoint-based recovery
+
+### Removed
+- `KVStore` in-memory storage implementation (replaced by disk engine)
+- `storage_engine` configuration option (disk is now the only option)
+
+### Migration Notes
+- Existing databases using the memory engine will need to be migrated
+- The new directory structure requires data migration for existing installations
+- Set `buffer_pool_size = 0` for automatic memory-based sizing (recommended)
+
+---
+
 ## [01.26.7] - 2026-01-08
 
 ### Enhanced Multi-line Editing in fsql CLI
