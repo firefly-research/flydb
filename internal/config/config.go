@@ -33,8 +33,9 @@ Example configuration file:
 	port = 8888
 	binary_port = 8889
 	replication_port = 9999
-	db_path = "/var/lib/flydb/data.fdb"
 	data_dir = "/var/lib/flydb"
+	buffer_pool_size = 0  # 0 = auto-size based on available memory
+	checkpoint_secs = 60  # Checkpoint interval in seconds
 	encryption_enabled = true
 	log_level = "info"
 	log_json = false
@@ -86,6 +87,9 @@ const (
 	EnvMasterAddr           = "FLYDB_MASTER_ADDR"
 	EnvDBPath               = "FLYDB_DB_PATH"
 	EnvDataDir              = "FLYDB_DATA_DIR"
+	EnvStorageEngine        = "FLYDB_STORAGE_ENGINE"
+	EnvBufferPoolSize       = "FLYDB_BUFFER_POOL_SIZE"
+	EnvCheckpointSecs       = "FLYDB_CHECKPOINT_SECS"
 	EnvLogLevel             = "FLYDB_LOG_LEVEL"
 	EnvLogJSON              = "FLYDB_LOG_JSON"
 	EnvAdminPassword        = "FLYDB_ADMIN_PASSWORD"
@@ -131,8 +135,11 @@ type Config struct {
 	MasterAddr string `toml:"master_addr" json:"master_addr"`
 
 	// Storage configuration
-	DBPath  string `toml:"db_path" json:"db_path"`
-	DataDir string `toml:"data_dir" json:"data_dir"` // Directory for multi-database storage
+	DBPath         string `toml:"db_path" json:"db_path"`
+	DataDir        string `toml:"data_dir" json:"data_dir"`               // Directory for multi-database storage
+	StorageEngine  string `toml:"storage_engine" json:"storage_engine"`   // Deprecated: FlyDB now uses disk storage exclusively
+	BufferPoolSize int    `toml:"buffer_pool_size" json:"buffer_pool_size"` // Buffer pool size in pages (0 = auto-size based on available memory)
+	CheckpointSecs int    `toml:"checkpoint_secs" json:"checkpoint_secs"` // Checkpoint interval in seconds (0 = disabled)
 
 	// Multi-database configuration
 	DefaultDatabase  string `toml:"default_database" json:"default_database"`   // Default database for new connections
@@ -168,6 +175,9 @@ func DefaultConfig() *Config {
 		MasterAddr:           "",
 		DBPath:               "flydb.fdb",
 		DataDir:              GetDefaultDataDir(),
+		StorageEngine:        "disk", // FlyDB uses disk storage exclusively
+		BufferPoolSize:       0,      // 0 = auto-size based on available memory
+		CheckpointSecs:       60,     // 1 minute
 		DefaultDatabase:      "default",
 		DefaultEncoding:      "UTF8",
 		DefaultLocale:        "en_US",
@@ -354,6 +364,19 @@ func (m *Manager) LoadFromEnv() {
 	if v := os.Getenv(EnvDataDir); v != "" {
 		cfg.DataDir = v
 	}
+	if v := os.Getenv(EnvStorageEngine); v != "" {
+		cfg.StorageEngine = v
+	}
+	if v := os.Getenv(EnvBufferPoolSize); v != "" {
+		if size, err := strconv.Atoi(v); err == nil {
+			cfg.BufferPoolSize = size
+		}
+	}
+	if v := os.Getenv(EnvCheckpointSecs); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil {
+			cfg.CheckpointSecs = secs
+		}
+	}
 	if v := os.Getenv(EnvLogLevel); v != "" {
 		cfg.LogLevel = v
 	}
@@ -510,6 +533,22 @@ func applyConfigValue(cfg *Config, key, value string) error {
 		cfg.MasterAddr = value
 	case "db_path":
 		cfg.DBPath = value
+	case "data_dir":
+		cfg.DataDir = value
+	case "storage_engine":
+		cfg.StorageEngine = value
+	case "buffer_pool_size":
+		size, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid buffer_pool_size value: %s", value)
+		}
+		cfg.BufferPoolSize = size
+	case "checkpoint_secs":
+		secs, err := strconv.Atoi(value)
+		if err != nil {
+			return fmt.Errorf("invalid checkpoint_secs value: %s", value)
+		}
+		cfg.CheckpointSecs = secs
 	case "log_level":
 		cfg.LogLevel = value
 	case "log_json":
