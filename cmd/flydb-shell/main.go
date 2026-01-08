@@ -20,7 +20,7 @@ Package main is the entry point for the FlyDB command-line interface (CLI) clien
 FlyDB CLI Overview:
 ===================
 
-The fly-cli is an interactive REPL (Read-Eval-Print Loop) client that connects
+The flydb-shell (fsql) is an interactive REPL (Read-Eval-Print Loop) client that connects
 to a FlyDB server over TCP. It provides a user-friendly interface for executing
 SQL commands and managing the database.
 
@@ -62,10 +62,10 @@ Usage Examples:
 ===============
 
   Connect to local server:
-    ./fly-cli
+    fsql
 
   Connect to remote server:
-    ./fly-cli -h 192.168.1.100 -p 8888
+    fsql -h 192.168.1.100 -p 8888
 
   Example session:
     flydb> AUTH admin admin
@@ -87,6 +87,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -124,38 +125,92 @@ const (
 // This struct encapsulates all connection parameters, making it easy
 // to pass configuration between functions and extend in the future.
 type CLIConfig struct {
-	Host    string           // Server hostname or IP address
-	Port    string           // Server port number (binary protocol)
-	Verbose bool             // Enable verbose output
-	Debug   bool             // Enable debug mode
-	Format  cli.OutputFormat // Output format (table, json, plain)
-	Execute string           // Command to execute and exit
+	Host     string           // Server hostname or IP address
+	Port     string           // Server port number (binary protocol)
+	Database string           // Database to connect to (empty = use server default)
+	Verbose  bool             // Enable verbose output
+	Debug    bool             // Enable debug mode
+	Format   cli.OutputFormat // Output format (table, json, plain)
+	Execute  string           // Command to execute and exit
+}
+
+// REPLState holds the runtime state for the REPL session.
+// These are toggleable options that can be changed during the session.
+type REPLState struct {
+	Timing          bool   // Show query execution time
+	ExpandedOutput  bool   // Use expanded (vertical) output format
+	OutputFile      string // File to write output to (empty = stdout)
+	outputWriter    *os.File
+	SQLMode         bool   // When true, all input is treated as SQL
+	CurrentDatabase string // Current database name (empty until authenticated)
+	Authenticated   bool   // Whether the user has authenticated
+	Username        string // The authenticated username
+}
+
+// Global REPL state
+var replState = &REPLState{
+	CurrentDatabase: "",    // Empty until authenticated
+	Authenticated:   false, // Must authenticate before SQL commands
 }
 
 // sqlKeywords defines the SQL keywords that trigger automatic SQL query handling.
 // When user input starts with any of these keywords, the CLI sends it as a query.
+// This list is synchronized with the lexer's keyword recognition.
 var sqlKeywords = []string{
-	"SELECT", "INSERT", "CREATE", "GRANT", "UPDATE", "DELETE", "INTROSPECT",
-	"BEGIN", "COMMIT", "ROLLBACK", "PREPARE", "EXECUTE", "DEALLOCATE",
+	// DML statements
+	"SELECT", "INSERT", "UPDATE", "DELETE",
+	// DDL statements
+	"CREATE", "DROP", "ALTER", "TRUNCATE",
+	// Transaction control
+	"BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE",
+	// Prepared statements
+	"PREPARE", "EXECUTE", "DEALLOCATE",
+	// User management
+	"GRANT", "REVOKE",
+	// Stored procedures
+	"CALL",
+	// Inspection
+	"INSPECT",
+	// Set operations (can start a query)
+	"WITH",
+	// Database management
+	"USE",
 }
 
 // allCompletions contains all completable commands and keywords for tab completion.
 var allCompletions = []string{
 	// Local commands
-	"\\q", "\\quit", "\\h", "\\help", "\\c", "\\clear", "\\s", "\\status", "\\v", "\\version",
+	"\\q", "\\quit", "\\h", "\\help", "\\c", "\\connect", "\\clear", "\\s", "\\status", "\\v", "\\version",
+	"\\timing", "\\x", "\\!", "\\o", "\\conninfo", "\\dt", "\\du", "\\db", "\\l", "\\sql", "\\normal", "\\di",
 	// Server commands
-	"PING", "AUTH",
-	// SQL keywords
-	"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "GRANT", "REVOKE",
-	"BEGIN", "COMMIT", "ROLLBACK", "PREPARE", "EXECUTE", "DEALLOCATE",
+	"PING", "AUTH", "SQL", "USE",
+	// SQL statement keywords (can start a statement)
+	"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "TRUNCATE",
+	"BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE",
+	"PREPARE", "EXECUTE", "DEALLOCATE",
+	"GRANT", "REVOKE", "CALL", "WITH",
+	// SQL clause keywords
 	"FROM", "WHERE", "AND", "OR", "NOT", "IN", "LIKE", "ORDER", "BY", "ASC", "DESC",
-	"LIMIT", "OFFSET", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON", "AS",
-	"VALUES", "INTO", "SET", "TABLE", "INDEX", "USER", "DATABASE",
-	"PRIMARY", "KEY", "UNIQUE", "NULL", "DEFAULT", "AUTO_INCREMENT",
-	"INT", "INTEGER", "TEXT", "VARCHAR", "BOOLEAN", "FLOAT", "DOUBLE", "TIMESTAMP",
-	// Introspection
-	"INTROSPECT USERS", "INTROSPECT TABLES", "INTROSPECT TABLE", "INTROSPECT INDEXES",
-	"INTROSPECT SERVER", "INTROSPECT STATUS",
+	"LIMIT", "OFFSET", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "ON", "AS",
+	"GROUP", "HAVING", "DISTINCT", "UNION", "INTERSECT", "EXCEPT", "ALL",
+	"VALUES", "INTO", "SET", "TABLE", "INDEX", "VIEW", "TRIGGER", "PROCEDURE",
+	"USER", "DATABASE", "IF", "EXISTS",
+	// Constraints
+	"PRIMARY", "KEY", "FOREIGN", "REFERENCES", "UNIQUE", "NULL", "DEFAULT",
+	"AUTO_INCREMENT", "CHECK", "CONSTRAINT",
+	// Data types
+	"INT", "INTEGER", "BIGINT", "SMALLINT", "SERIAL",
+	"TEXT", "VARCHAR", "CHAR",
+	"BOOLEAN", "BOOL",
+	"FLOAT", "DOUBLE", "REAL", "DECIMAL", "NUMERIC",
+	"TIMESTAMP", "DATETIME", "DATE", "TIME",
+	"BLOB", "BYTEA", "UUID", "JSONB", "JSON",
+	// Inspection
+	"INSPECT", "INSPECT USERS", "INSPECT TABLES", "INSPECT TABLE",
+	"INSPECT INDEXES", "INSPECT SERVER", "INSPECT STATUS",
+	"INSPECT DATABASES", "INSPECT DATABASE",
+	// Database management
+	"USE", "CREATE DATABASE", "DROP DATABASE",
 }
 
 // getHistoryFilePath returns the path to the history file.
@@ -202,6 +257,111 @@ func filterInput(r rune) (rune, bool) {
 		return r, false // Disable Ctrl+Z
 	}
 	return r, true
+}
+
+// isNonSQLCommand checks if the input is a command that doesn't require semicolon termination.
+// This includes local commands (\q, \h, etc.), server commands (PING, AUTH), and USE.
+func isNonSQLCommand(input string) bool {
+	if input == "" {
+		return true
+	}
+
+	// Local commands start with backslash
+	if strings.HasPrefix(input, "\\") {
+		return true
+	}
+
+	// Get the first word (command)
+	upper := strings.ToUpper(input)
+	parts := strings.Fields(upper)
+	if len(parts) == 0 {
+		return true
+	}
+	cmd := parts[0]
+
+	// Server commands that don't require semicolons
+	nonSQLCommands := map[string]bool{
+		"PING":   true,
+		"AUTH":   true,
+		"USE":    true,
+		"WATCH":  true,
+		"UNWATCH": true,
+	}
+
+	return nonSQLCommands[cmd]
+}
+
+// requiresSemicolon checks if the input is a SQL statement that requires semicolon termination.
+// Returns true for SQL statements, false for local commands and server commands.
+func requiresSemicolon(input string) bool {
+	if input == "" {
+		return false
+	}
+
+	// Local commands don't require semicolons
+	if strings.HasPrefix(input, "\\") {
+		return false
+	}
+
+	// Get the first word (command)
+	upper := strings.ToUpper(input)
+	parts := strings.Fields(upper)
+	if len(parts) == 0 {
+		return false
+	}
+	cmd := parts[0]
+
+	// Commands that don't require semicolons
+	nonSQLCommands := map[string]bool{
+		"PING":    true,
+		"AUTH":    true,
+		"USE":     true,
+		"WATCH":   true,
+		"UNWATCH": true,
+	}
+
+	if nonSQLCommands[cmd] {
+		return false
+	}
+
+	// SQL keywords that start statements requiring semicolons
+	sqlKeywords := map[string]bool{
+		"SELECT":     true,
+		"INSERT":     true,
+		"UPDATE":     true,
+		"DELETE":     true,
+		"CREATE":     true,
+		"DROP":       true,
+		"ALTER":      true,
+		"TRUNCATE":   true,
+		"BEGIN":      true,
+		"COMMIT":     true,
+		"ROLLBACK":   true,
+		"SAVEPOINT":  true,
+		"RELEASE":    true,
+		"PREPARE":    true,
+		"EXECUTE":    true,
+		"DEALLOCATE": true,
+		"GRANT":      true,
+		"REVOKE":     true,
+		"CALL":       true,
+		"WITH":       true,
+		"INSPECT": true,
+		"SQL":        true,
+		"EXPLAIN":    true,
+		"ANALYZE":    true,
+		"VACUUM":     true,
+		"REINDEX":    true,
+		"CLUSTER":    true,
+		"COPY":       true,
+		"SET":        true,
+		"SHOW":       true,
+		"RESET":      true,
+		"LOCK":       true,
+		"UNLOCK":     true,
+	}
+
+	return sqlKeywords[cmd]
 }
 
 // BinaryClient wraps the binary protocol connection.
@@ -370,6 +530,7 @@ func (c *BinaryClient) Close() error {
 type CLIFlags struct {
 	Host       string
 	Port       string
+	Database   string
 	Version    bool
 	Help       bool
 	Verbose    bool
@@ -388,6 +549,8 @@ func parseFlags() CLIFlags {
 	flag.StringVar(&flags.Host, "H", "localhost", "Server hostname or IP address (shorthand)")
 	flag.StringVar(&flags.Port, "port", "8889", "Server port number (binary protocol)")
 	flag.StringVar(&flags.Port, "p", "8889", "Server port number (shorthand)")
+	flag.StringVar(&flags.Database, "database", "", "Database to connect to (default: 'default')")
+	flag.StringVar(&flags.Database, "d", "", "Database to connect to (shorthand)")
 	flag.BoolVar(&flags.Version, "version", false, "Print version information and exit")
 	flag.BoolVar(&flags.Version, "v", false, "Print version information (shorthand)")
 	flag.BoolVar(&flags.Help, "help", false, "Show help information")
@@ -416,14 +579,15 @@ func printUsage() {
 	fmt.Println()
 
 	fmt.Println()
-	fmt.Println("    fly-cli [flags]")
-	fmt.Println("    fly-cli -e \"<command>\"")
+	fmt.Println("    fsql [flags]")
+	fmt.Println("    fsql -e \"<command>\"")
 	fmt.Println()
 
 	fmt.Println("  " + cli.Highlight("Flags"))
 	fmt.Println()
 	fmt.Printf("    %s, %s <host>      Server hostname or IP (default: localhost)\n", cli.Info("-H"), cli.Info("--host"))
 	fmt.Printf("    %s, %s <port>      Server port number (default: 8889)\n", cli.Info("-p"), cli.Info("--port"))
+	fmt.Printf("    %s, %s <name>  Database to connect to (default: 'default')\n", cli.Info("-d"), cli.Info("--database"))
 	fmt.Printf("    %s, %s          Print version information and exit\n", cli.Info("-v"), cli.Info("--version"))
 	fmt.Printf("        %s             Show this help message\n", cli.Info("--help"))
 	fmt.Printf("        %s          Enable verbose output with timing\n", cli.Info("--verbose"))
@@ -436,24 +600,28 @@ func printUsage() {
 
 	fmt.Println("  " + cli.Highlight("Examples"))
 	fmt.Println()
-	fmt.Println("    " + cli.Dimmed("# Connect to local server"))
-	fmt.Println("    " + cli.Success("fly-cli"))
+	fmt.Println("    " + cli.Dimmed("# Connect to local server (uses 'default' database)"))
+	fmt.Println("    " + cli.Success("fsql"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("# Connect to a specific database"))
+	fmt.Println("    " + cli.Success("fsql -d mydb"))
 	fmt.Println()
 	fmt.Println("    " + cli.Dimmed("# Connect to remote server"))
-	fmt.Println("    " + cli.Success("fly-cli -H 192.168.1.100 -p 8889"))
+	fmt.Println("    " + cli.Success("fsql -H 192.168.1.100 -p 8889"))
 	fmt.Println()
 	fmt.Println("    " + cli.Dimmed("# Execute a query and exit"))
-	fmt.Println("    " + cli.Success("fly-cli -e \"SELECT * FROM users\""))
+	fmt.Println("    " + cli.Success("fsql -e \"SELECT * FROM users\""))
 	fmt.Println()
-	fmt.Println("    " + cli.Dimmed("# Get JSON output"))
-	fmt.Println("    " + cli.Success("fly-cli -f json -e \"SELECT * FROM users\""))
+	fmt.Println("    " + cli.Dimmed("# Query a specific database"))
+	fmt.Println("    " + cli.Success("fsql -d mydb -e \"SELECT * FROM users\""))
 	fmt.Println()
 
 	fmt.Println("  " + cli.Highlight("Interactive Commands"))
 	fmt.Println()
 	fmt.Printf("    %s, %s         Exit the CLI\n", cli.Info("\\q"), cli.Info("\\quit"))
 	fmt.Printf("    %s, %s         Display help information\n", cli.Info("\\h"), cli.Info("\\help"))
-	fmt.Printf("    %s, %s        Clear the screen\n", cli.Info("\\c"), cli.Info("\\clear"))
+	fmt.Printf("    %s <db>          Switch to database\n", cli.Info("\\c"))
+	fmt.Printf("    %s            Clear the screen\n", cli.Info("\\clear"))
 	fmt.Printf("    %s, %s       Show connection status\n", cli.Info("\\s"), cli.Info("\\status"))
 	fmt.Println()
 
@@ -461,6 +629,7 @@ func printUsage() {
 	fmt.Println()
 	fmt.Printf("    %s        Default server host\n", cli.Info("FLYDB_HOST"))
 	fmt.Printf("    %s        Default server port\n", cli.Info("FLYDB_PORT"))
+	fmt.Printf("    %s    Default database name\n", cli.Info("FLYDB_DATABASE"))
 	fmt.Printf("    %s          Disable colored output\n", cli.Info("NO_COLOR"))
 	fmt.Println()
 
@@ -468,7 +637,7 @@ func printUsage() {
 	fmt.Println()
 }
 
-// main is the entry point for the fly-cli application.
+// main is the entry point for the flydb-shell (fsql) application.
 // It parses command-line flags and initiates the REPL loop.
 func main() {
 	flags := parseFlags()
@@ -480,7 +649,7 @@ func main() {
 
 	// Handle --version flag
 	if flags.Version {
-		fmt.Printf("fly-cli version %s\n", banner.Version)
+		fmt.Printf("fsql version %s\n", banner.Version)
 		fmt.Printf("%s\n", banner.Copyright)
 		os.Exit(0)
 	}
@@ -506,15 +675,19 @@ func main() {
 	if envPort := os.Getenv("FLYDB_PORT"); envPort != "" && flags.Port == "8889" {
 		flags.Port = envPort
 	}
+	if envDB := os.Getenv("FLYDB_DATABASE"); envDB != "" && flags.Database == "" {
+		flags.Database = envDB
+	}
 
 	// Create configuration struct and start the REPL.
 	config := CLIConfig{
-		Host:    flags.Host,
-		Port:    flags.Port,
-		Verbose: flags.Verbose,
-		Debug:   flags.Debug,
-		Format:  cli.ParseOutputFormat(flags.Format),
-		Execute: flags.Execute,
+		Host:     flags.Host,
+		Port:     flags.Port,
+		Database: flags.Database,
+		Verbose:  flags.Verbose,
+		Debug:    flags.Debug,
+		Format:   cli.ParseOutputFormat(flags.Format),
+		Execute:  flags.Execute,
 	}
 
 	startREPL(config)
@@ -552,6 +725,8 @@ func loadConfigFile(path string, flags *CLIFlags) error {
 			flags.Host = value
 		case "port":
 			flags.Port = value
+		case "database":
+			flags.Database = value
 		case "format":
 			flags.Format = value
 		case "verbose":
@@ -665,7 +840,12 @@ func startREPL(config CLIConfig) {
 		os.Exit(0)
 	}()
 
+	// Store the requested database for later (after authentication)
+	// Database selection will happen after successful AUTH
+	requestedDatabase := config.Database
+
 	// If executing a single command, do it and exit
+	// Note: The command must include AUTH if authentication is required
 	if config.Execute != "" {
 		response, err := processCommand(client, config.Execute, config)
 		if err != nil {
@@ -676,6 +856,9 @@ func startREPL(config CLIConfig) {
 		os.Exit(0)
 	}
 
+	// Store requested database in config for use after authentication
+	_ = requestedDatabase // Will be used after AUTH succeeds
+
 	fmt.Println()
 	// If not running in a terminal (piped input), use simple REPL
 	if !isTerminal() {
@@ -684,6 +867,11 @@ func startREPL(config CLIConfig) {
 	}
 
 	fmt.Println(cli.Success("✓ Connected to FlyDB server"))
+	fmt.Println()
+	cli.PrintWarning("Authentication required before executing SQL commands.")
+	fmt.Printf("  Use %s to authenticate\n", cli.Highlight("AUTH <username> <password>"))
+	fmt.Printf("  Or use %s for interactive login\n", cli.Highlight("AUTH"))
+	fmt.Println()
 	fmt.Printf("  Type %s to quit, %s for help, %s for completion\n",
 		cli.Highlight("\\q"),
 		cli.Highlight("\\h"),
@@ -706,11 +894,28 @@ func startREPL(config CLIConfig) {
 
 	// Main REPL loop: continuously read, evaluate, and print.
 	for {
-		// Set prompt based on multi-line state
+		// Set prompt based on multi-line state, SQL mode, authentication, and current database
 		if inMultiLine {
-			rl.SetPrompt(cli.Dimmed("     -> "))
+			rl.SetPrompt(cli.Dimmed("        -> "))
 		} else {
-			rl.SetPrompt(cli.Info("flydb") + cli.Dimmed(">") + " ")
+			// Build the prompt based on authentication state
+			var prompt string
+			if !replState.Authenticated {
+				// Not authenticated - show login prompt
+				prompt = cli.Warning("flydb") + cli.Dimmed("[not authenticated]>") + " "
+			} else {
+				// Authenticated - show database context
+				dbName := replState.CurrentDatabase
+				if dbName == "" {
+					dbName = "default"
+				}
+				prompt = cli.Info("flydb") + cli.Dimmed(":") + cli.Success(dbName)
+				if replState.SQLMode {
+					prompt += cli.Dimmed("[") + cli.Warning("sql") + cli.Dimmed("]")
+				}
+				prompt += cli.Dimmed(">") + " "
+			}
+			rl.SetPrompt(prompt)
 		}
 
 		// Read user input with readline (supports history, completion, editing)
@@ -745,7 +950,7 @@ func startREPL(config CLIConfig) {
 		// Trim whitespace from input for clean processing.
 		input := strings.TrimSpace(line)
 
-		// Handle multi-line input (lines ending with \)
+		// Handle explicit multi-line continuation (lines ending with \)
 		if strings.HasSuffix(input, "\\") {
 			multiLineBuffer.WriteString(strings.TrimSuffix(input, "\\"))
 			multiLineBuffer.WriteString(" ")
@@ -756,10 +961,31 @@ func startREPL(config CLIConfig) {
 		// If in multi-line mode, append this line
 		if inMultiLine {
 			multiLineBuffer.WriteString(input)
-			input = strings.TrimSpace(multiLineBuffer.String())
+			// Check if the statement is complete (ends with semicolon)
+			accumulated := strings.TrimSpace(multiLineBuffer.String())
+			if !strings.HasSuffix(accumulated, ";") && !isNonSQLCommand(accumulated) {
+				// Still incomplete, continue reading
+				multiLineBuffer.WriteString(" ")
+				continue
+			}
+			// Statement is complete
+			input = accumulated
 			multiLineBuffer.Reset()
 			inMultiLine = false
+		} else {
+			// Check if this is a SQL statement that needs semicolon termination
+			if input != "" && requiresSemicolon(input) && !strings.HasSuffix(input, ";") {
+				// Start multi-line mode for incomplete SQL statements
+				multiLineBuffer.WriteString(input)
+				multiLineBuffer.WriteString(" ")
+				inMultiLine = true
+				continue
+			}
 		}
+
+		// Strip trailing semicolon for command processing (server doesn't need it)
+		input = strings.TrimSuffix(input, ";")
+		input = strings.TrimSpace(input)
 
 		// Skip empty lines to avoid sending unnecessary requests.
 		if input == "" {
@@ -770,6 +996,28 @@ func startREPL(config CLIConfig) {
 		// These commands are processed locally without server communication.
 		if strings.HasPrefix(input, "\\") {
 			handleLocalCommand(input, config, client)
+			continue
+		}
+
+		// Handle AUTH command with secure password input
+		if isAuthCommand(input) {
+			// Remove AUTH command from history to prevent password exposure
+			// The history is saved automatically, so we need to remove the last entry
+			// if it contains a password (AUTH user pass format)
+			parts := strings.Fields(input)
+			if len(parts) >= 3 {
+				// AUTH with password on command line - remove from history
+				// We can't easily remove from readline history, so we'll save a sanitized version
+				sanitized := fmt.Sprintf("AUTH %s ********", parts[1])
+				rl.SaveHistory(sanitized)
+			}
+
+			response, err := handleAuthCommand(rl, client, input, config)
+			if err != nil {
+				printErrorMessage(err.Error())
+				continue
+			}
+			printResponseWithFormat(response, config.Format)
 			continue
 		}
 
@@ -808,15 +1056,127 @@ func startREPL(config CLIConfig) {
 	}
 }
 
+// isAuthCommand checks if the input is an AUTH command.
+func isAuthCommand(input string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(input))
+	return strings.HasPrefix(upper, "AUTH")
+}
+
+// handleAuthCommand handles the AUTH command with secure password input.
+// It supports three modes:
+// 1. "AUTH" - prompts for both username and password
+// 2. "AUTH username" - prompts for password only
+// 3. "AUTH username password" - warns about security and proceeds
+func handleAuthCommand(rl *readline.Instance, client *BinaryClient, input string, config CLIConfig) (string, error) {
+	parts := strings.Fields(input)
+
+	var username, password string
+
+	switch len(parts) {
+	case 1:
+		// Just "AUTH" - prompt for both username and password
+		fmt.Print(cli.Dimmed("Username: "))
+		usernameBytes, err := rl.Readline()
+		if err != nil {
+			return "", fmt.Errorf("cancelled")
+		}
+		username = strings.TrimSpace(usernameBytes)
+		if username == "" {
+			return "", cli.ErrMissingArgument("username", "AUTH <username> <password>")
+		}
+
+		// Read password with masking
+		password, err = readPasswordMasked(rl, "Password: ")
+		if err != nil {
+			return "", fmt.Errorf("cancelled")
+		}
+
+	case 2:
+		// "AUTH username" - prompt for password only
+		username = parts[1]
+
+		// Read password with masking
+		var err error
+		password, err = readPasswordMasked(rl, "Password: ")
+		if err != nil {
+			return "", fmt.Errorf("cancelled")
+		}
+
+	default:
+		// "AUTH username password" - warn about security but proceed
+		username = parts[1]
+		password = strings.Join(parts[2:], " ")
+
+		// Show security warning
+		cli.PrintWarning("Security: Passwords typed on command line may be visible in history.")
+		fmt.Println(cli.Dimmed("  Tip: Use 'AUTH' or 'AUTH <username>' for secure password entry."))
+		fmt.Println()
+	}
+
+	if password == "" {
+		return "", cli.ErrMissingArgument("password", "AUTH <username> <password>")
+	}
+
+	// Perform authentication
+	result, err := client.Auth(username, password)
+	if err != nil {
+		return "", err
+	}
+
+	// If authentication succeeded, update state
+	if strings.Contains(result, "OK") {
+		replState.Authenticated = true
+		replState.Username = username
+		replState.CurrentDatabase = "default" // Set default database after auth
+	}
+
+	return result, nil
+}
+
+// readPasswordMasked reads a password with asterisk masking.
+func readPasswordMasked(rl *readline.Instance, prompt string) (string, error) {
+	// Use readline's built-in password reading with custom mask rune
+	rl.SetMaskRune('*')
+	password, err := rl.ReadPassword(cli.Dimmed(prompt))
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(string(password)), nil
+}
+
 // runSimpleREPL runs a simple REPL without readline (fallback/piped mode).
 func runSimpleREPL(config CLIConfig, client *BinaryClient, addr string) {
 	scanner := bufio.NewScanner(os.Stdin)
 	interactive := isTerminal()
 
+	// Multi-line input buffer for simple REPL
+	var multiLineBuffer strings.Builder
+	inMultiLine := false
+
 	for {
 		// Only show prompt in interactive mode
 		if interactive {
-			fmt.Print(cli.Info("flydb") + cli.Dimmed(">") + " ")
+			// Build the prompt based on authentication state and multi-line state
+			var prompt string
+			if inMultiLine {
+				prompt = cli.Dimmed("        -> ")
+			} else if !replState.Authenticated {
+				// Not authenticated - show login prompt
+				prompt = cli.Warning("flydb") + cli.Dimmed("[not authenticated]>") + " "
+			} else {
+				// Authenticated - show database context
+				dbName := replState.CurrentDatabase
+				if dbName == "" {
+					dbName = "default"
+				}
+				prompt = cli.Info("flydb") + cli.Dimmed(":") + cli.Success(dbName)
+				if replState.SQLMode {
+					prompt += cli.Dimmed("[") + cli.Warning("sql") + cli.Dimmed("]")
+				}
+				prompt += cli.Dimmed(">") + " "
+			}
+			fmt.Print(prompt)
 		}
 		if !scanner.Scan() {
 			if interactive {
@@ -827,6 +1187,44 @@ func runSimpleREPL(config CLIConfig, client *BinaryClient, addr string) {
 		}
 
 		input := strings.TrimSpace(scanner.Text())
+
+		// Handle explicit multi-line continuation (lines ending with \)
+		if strings.HasSuffix(input, "\\") {
+			multiLineBuffer.WriteString(strings.TrimSuffix(input, "\\"))
+			multiLineBuffer.WriteString(" ")
+			inMultiLine = true
+			continue
+		}
+
+		// If in multi-line mode, append this line
+		if inMultiLine {
+			multiLineBuffer.WriteString(input)
+			// Check if the statement is complete (ends with semicolon)
+			accumulated := strings.TrimSpace(multiLineBuffer.String())
+			if !strings.HasSuffix(accumulated, ";") && !isNonSQLCommand(accumulated) {
+				// Still incomplete, continue reading
+				multiLineBuffer.WriteString(" ")
+				continue
+			}
+			// Statement is complete
+			input = accumulated
+			multiLineBuffer.Reset()
+			inMultiLine = false
+		} else {
+			// Check if this is a SQL statement that needs semicolon termination
+			if input != "" && requiresSemicolon(input) && !strings.HasSuffix(input, ";") {
+				// Start multi-line mode for incomplete SQL statements
+				multiLineBuffer.WriteString(input)
+				multiLineBuffer.WriteString(" ")
+				inMultiLine = true
+				continue
+			}
+		}
+
+		// Strip trailing semicolon for command processing (server doesn't need it)
+		input = strings.TrimSuffix(input, ";")
+		input = strings.TrimSpace(input)
+
 		if input == "" {
 			continue
 		}
@@ -837,6 +1235,17 @@ func runSimpleREPL(config CLIConfig, client *BinaryClient, addr string) {
 				continue
 			}
 			handleLocalCommand(input, config, client)
+			continue
+		}
+
+		// Handle AUTH command with secure password input in interactive mode
+		if interactive && isAuthCommand(input) {
+			response, err := handleAuthCommandSimple(client, input, config)
+			if err != nil {
+				printErrorMessage(err.Error())
+				continue
+			}
+			printResponseWithFormat(response, config.Format)
 			continue
 		}
 
@@ -869,6 +1278,98 @@ func runSimpleREPL(config CLIConfig, client *BinaryClient, addr string) {
 
 		printResponseWithFormat(response, config.Format)
 	}
+}
+
+// handleAuthCommandSimple handles AUTH command in simple REPL mode (without readline).
+func handleAuthCommandSimple(client *BinaryClient, input string, config CLIConfig) (string, error) {
+	parts := strings.Fields(input)
+
+	var username, password string
+
+	switch len(parts) {
+	case 1:
+		// Just "AUTH" - prompt for both username and password
+		fmt.Print(cli.Dimmed("Username: "))
+		reader := bufio.NewReader(os.Stdin)
+		usernameInput, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("cancelled")
+		}
+		username = strings.TrimSpace(usernameInput)
+		if username == "" {
+			return "", cli.ErrMissingArgument("username", "AUTH <username> <password>")
+		}
+
+		// Read password with masking using terminal raw mode
+		password, err = readPasswordTerminal("Password: ")
+		if err != nil {
+			return "", fmt.Errorf("cancelled")
+		}
+
+	case 2:
+		// "AUTH username" - prompt for password only
+		username = parts[1]
+
+		// Read password with masking
+		var err error
+		password, err = readPasswordTerminal("Password: ")
+		if err != nil {
+			return "", fmt.Errorf("cancelled")
+		}
+
+	default:
+		// "AUTH username password" - warn about security but proceed
+		username = parts[1]
+		password = strings.Join(parts[2:], " ")
+
+		// Show security warning
+		cli.PrintWarning("Security: Passwords typed on command line may be visible in history.")
+		fmt.Println(cli.Dimmed("  Tip: Use 'AUTH' or 'AUTH <username>' for secure password entry."))
+		fmt.Println()
+	}
+
+	if password == "" {
+		return "", cli.ErrMissingArgument("password", "AUTH <username> <password>")
+	}
+
+	// Perform authentication
+	result, err := client.Auth(username, password)
+	if err != nil {
+		return "", err
+	}
+
+	// If authentication succeeded, update state
+	if strings.Contains(result, "OK") {
+		replState.Authenticated = true
+		replState.Username = username
+		replState.CurrentDatabase = "default" // Set default database after auth
+	}
+
+	return result, nil
+}
+
+// readPasswordTerminal reads a password from terminal with masking.
+func readPasswordTerminal(prompt string) (string, error) {
+	fmt.Print(cli.Dimmed(prompt))
+
+	// Use golang.org/x/term for secure password reading
+	fd := int(os.Stdin.Fd())
+	if term.IsTerminal(fd) {
+		password, err := term.ReadPassword(fd)
+		fmt.Println() // Print newline after password input
+		if err != nil {
+			return "", err
+		}
+		return string(password), nil
+	}
+
+	// Fallback for non-terminal (piped input)
+	reader := bufio.NewReader(os.Stdin)
+	password, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(password), nil
 }
 
 // isConnectionError checks if an error indicates a connection problem.
@@ -920,7 +1421,20 @@ func processCommand(client *BinaryClient, input string, config CLIConfig) (strin
 		if err != nil {
 			return "", err
 		}
+		// If authentication succeeded, update state
+		if strings.Contains(result, "OK") {
+			replState.Authenticated = true
+			replState.Username = creds[0]
+			replState.CurrentDatabase = "default" // Set default database after auth
+		}
 		return result, nil
+	}
+
+	// Block all SQL commands until authenticated
+	if !replState.Authenticated {
+		return "", cli.NewCLIError("Authentication required").
+			WithSuggestion("Use 'AUTH <username> <password>' to authenticate").
+			WithSuggestion("Or use 'AUTH' for interactive login")
 	}
 
 	// Handle WATCH command (not supported in binary protocol yet)
@@ -929,33 +1443,72 @@ func processCommand(client *BinaryClient, input string, config CLIConfig) (strin
 			WithSuggestion("Use the text protocol for WATCH functionality")
 	}
 
-	// Check if it's a SQL command (with or without SQL prefix)
-	query := input
-	if cmd == "SQL" && len(parts) > 1 {
-		query = parts[1]
+	// Handle USE command directly (without SQL prefix requirement)
+	if cmd == "USE" {
+		if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+			return "", cli.ErrMissingArgument("database_name", "USE <database_name>")
+		}
+		dbName := strings.TrimSpace(parts[1])
+		// Execute the USE command on the server
+		result, err := client.Query("USE " + dbName)
+		if err != nil {
+			return "", err
+		}
+		// If successful, update local state
+		if strings.Contains(result, "OK") {
+			replState.CurrentDatabase = dbName
+		}
+		return result, nil
+	}
+
+	// Determine the SQL query to execute
+	var query string
+
+	// Check for explicit SQL prefix (e.g., "SQL SELECT * FROM users")
+	if cmd == "SQL" {
+		if len(parts) > 1 {
+			query = parts[1]
+		} else {
+			return "", cli.ErrMissingArgument("query", "SQL <query>")
+		}
+	} else if replState.SQLMode {
+		// In SQL mode, treat all input as SQL
+		query = input
 	} else {
-		// Check if it starts with a SQL keyword
+		// Normal mode: check if it starts with a SQL keyword
 		isSQLKeyword := false
 		for _, keyword := range sqlKeywords {
-			if strings.HasPrefix(upper, keyword) {
+			if strings.HasPrefix(upper, keyword+" ") || upper == keyword {
 				isSQLKeyword = true
 				break
 			}
 		}
 		if !isSQLKeyword {
-			return "", cli.ErrInvalidCommand(cmd)
+			return "", cli.NewCLIError(fmt.Sprintf("Unknown command: %s", cmd)).
+				WithSuggestion("Use 'SQL <query>' prefix to execute any SQL statement").
+				WithSuggestion("Use '\\sql' to enter SQL mode where all input is treated as SQL").
+				WithSuggestion("Type '\\h' for help on available commands")
 		}
+		query = input
 	}
 
-	// Execute the query with timing in verbose mode
+	// Execute the query with timing
 	start := time.Now()
 	result, err := client.Query(query)
+	elapsed := time.Since(start)
 	if err != nil {
 		return "", err
 	}
 
-	if config.Verbose {
-		result = fmt.Sprintf("%s\n%s", result, cli.Dimmed(fmt.Sprintf("(executed in %v)", time.Since(start))))
+	// Update current database if USE command was executed via SQL mode
+	if strings.HasPrefix(strings.ToUpper(query), "USE ") && strings.Contains(result, "OK") {
+		dbName := strings.TrimSpace(query[4:])
+		replState.CurrentDatabase = dbName
+	}
+
+	// Add timing information if enabled (via \timing or --verbose)
+	if config.Verbose || replState.Timing {
+		result = fmt.Sprintf("%s\n%s", result, cli.Dimmed(fmt.Sprintf("Time: %v", elapsed)))
 	}
 
 	return result, nil
@@ -984,7 +1537,15 @@ func isSQL(input string) bool {
 // These commands are handled locally by the CLI without server communication.
 // This pattern is inspired by PostgreSQL's psql client.
 func handleLocalCommand(cmd string, config CLIConfig, client *BinaryClient) {
-	switch cmd {
+	// Handle commands with arguments
+	parts := strings.SplitN(cmd, " ", 2)
+	baseCmd := parts[0]
+	arg := ""
+	if len(parts) > 1 {
+		arg = strings.TrimSpace(parts[1])
+	}
+
+	switch baseCmd {
 	case "\\q", "\\quit":
 		// Exit the CLI gracefully.
 		cli.PrintInfo("Goodbye!")
@@ -994,22 +1555,159 @@ func handleLocalCommand(cmd string, config CLIConfig, client *BinaryClient) {
 		// Display help information about available commands.
 		printHelp()
 
-	case "\\c", "\\clear":
+	case "\\clear":
 		// Clear the screen
 		fmt.Print("\033[H\033[2J")
 
-	case "\\s", "\\status":
+	case "\\s", "\\status", "\\conninfo":
 		// Show connection status
 		printStatus(config, client)
 
 	case "\\v", "\\version":
 		// Show version
-		fmt.Printf("fly-cli version %s\n", banner.Version)
+		fmt.Printf("fsql version %s\n", banner.Version)
+
+	case "\\timing":
+		// Toggle timing display
+		replState.Timing = !replState.Timing
+		if replState.Timing {
+			cli.PrintSuccess("Timing is on.")
+		} else {
+			cli.PrintInfo("Timing is off.")
+		}
+
+	case "\\x":
+		// Toggle expanded output
+		replState.ExpandedOutput = !replState.ExpandedOutput
+		if replState.ExpandedOutput {
+			cli.PrintSuccess("Expanded display is on.")
+		} else {
+			cli.PrintInfo("Expanded display is off.")
+		}
+
+	case "\\o":
+		// Set output file
+		if arg == "" {
+			// Close current output file and reset to stdout
+			if replState.outputWriter != nil {
+				replState.outputWriter.Close()
+				replState.outputWriter = nil
+				replState.OutputFile = ""
+				cli.PrintInfo("Output reset to stdout.")
+			} else {
+				cli.PrintInfo("Output is currently to stdout.")
+			}
+		} else {
+			// Open new output file
+			f, err := os.Create(arg)
+			if err != nil {
+				cli.PrintError("Cannot open file: %v", err)
+				return
+			}
+			if replState.outputWriter != nil {
+				replState.outputWriter.Close()
+			}
+			replState.outputWriter = f
+			replState.OutputFile = arg
+			cli.PrintSuccess("Output set to file: %s", arg)
+		}
+
+	case "\\!":
+		// Execute shell command
+		if arg == "" {
+			cli.PrintWarning("Usage: \\! <shell command>")
+			return
+		}
+		executeShellCommand(arg)
+
+	case "\\dt":
+		// List tables (shortcut for INSPECT TABLES)
+		response, err := processCommand(client, "INSPECT TABLES", config)
+		if err != nil {
+			printErrorMessage(err.Error())
+			return
+		}
+		printResponseWithFormat(response, config.Format)
+
+	case "\\du":
+		// List users (shortcut for INSPECT USERS)
+		response, err := processCommand(client, "INSPECT USERS", config)
+		if err != nil {
+			printErrorMessage(err.Error())
+			return
+		}
+		printResponseWithFormat(response, config.Format)
+
+	case "\\di":
+		// List indexes (shortcut for INSPECT INDEXES)
+		response, err := processCommand(client, "INSPECT INDEXES", config)
+		if err != nil {
+			printErrorMessage(err.Error())
+			return
+		}
+		printResponseWithFormat(response, config.Format)
+
+	case "\\db", "\\l":
+		// List databases (shortcut for INSPECT DATABASES)
+		response, err := processCommand(client, "INSPECT DATABASES", config)
+		if err != nil {
+			printErrorMessage(err.Error())
+			return
+		}
+		// Show current database indicator
+		fmt.Printf("Current database: %s\n\n", cli.Success(replState.CurrentDatabase))
+		printResponseWithFormat(response, config.Format)
+
+	case "\\c", "\\connect":
+		// Connect to a different database (shortcut for USE <database>)
+		if arg == "" {
+			cli.PrintWarning("Usage: \\c <database_name>")
+			fmt.Printf("Current database: %s\n", cli.Success(replState.CurrentDatabase))
+			return
+		}
+		response, err := processCommand(client, "USE "+arg, config)
+		if err != nil {
+			printErrorMessage(err.Error())
+			return
+		}
+		printResponseWithFormat(response, config.Format)
+
+	case "\\sql":
+		// Enter SQL mode - all input treated as SQL
+		replState.SQLMode = true
+		cli.PrintSuccess("Entering SQL mode. All input will be executed as SQL.")
+		fmt.Println(cli.Dimmed("  Type \\normal to return to normal mode."))
+		fmt.Println(cli.Dimmed("  Local commands (\\h, \\q, etc.) still work in SQL mode."))
+
+	case "\\normal":
+		// Exit SQL mode - return to normal mode with auto-detection
+		if replState.SQLMode {
+			replState.SQLMode = false
+			cli.PrintInfo("Returning to normal mode with SQL auto-detection.")
+		} else {
+			cli.PrintInfo("Already in normal mode.")
+		}
 
 	default:
-		// Unknown local command - inform the user.
-		cli.PrintWarning("Unknown command: %s. Type \\h for help.", cmd)
+		// Unknown local command - inform the user with suggestions.
+		cli.PrintWarning("Unknown command: %s", cmd)
+		fmt.Println(cli.Dimmed("  Type \\h for help on available commands."))
 	}
+}
+
+// executeShellCommand executes a shell command and displays output.
+func executeShellCommand(cmd string) {
+	fmt.Println()
+	// Use /bin/sh -c to execute the command
+	proc := exec.Command("/bin/sh", "-c", cmd)
+	proc.Stdout = os.Stdout
+	proc.Stderr = os.Stderr
+	proc.Stdin = os.Stdin
+	err := proc.Run()
+	if err != nil {
+		cli.PrintError("Command failed: %v", err)
+	}
+	fmt.Println()
 }
 
 // printStatus displays the current connection status.
@@ -1029,10 +1727,45 @@ func printStatus(config CLIConfig, client *BinaryClient) {
 		statusText = cli.Error("Disconnected")
 	}
 
+	// Get current database name
+	dbName := replState.CurrentDatabase
+	if dbName == "" {
+		dbName = "default"
+	}
+
 	fmt.Printf("    %s %s %s\n", cli.Dimmed("Status:"), statusIcon, statusText)
 	fmt.Printf("    %s %s\n", cli.Dimmed("Server:"), config.Host+":"+config.Port)
+	fmt.Printf("    %s %s\n", cli.Dimmed("Database:"), cli.Success(dbName))
 	fmt.Printf("    %s %s\n", cli.Dimmed("Protocol:"), "Binary")
 	fmt.Printf("    %s %s\n", cli.Dimmed("Format:"), string(config.Format))
+
+	// Show session settings
+	fmt.Println()
+	fmt.Println("  " + cli.Highlight("Session Settings"))
+	fmt.Println("  " + cli.Separator(30))
+	fmt.Println()
+
+	timingStatus := cli.Dimmed("off")
+	if replState.Timing {
+		timingStatus = cli.Success("on")
+	}
+	expandedStatus := cli.Dimmed("off")
+	if replState.ExpandedOutput {
+		expandedStatus = cli.Success("on")
+	}
+	sqlModeStatus := cli.Dimmed("off")
+	if replState.SQLMode {
+		sqlModeStatus = cli.Warning("on")
+	}
+	outputDest := "stdout"
+	if replState.OutputFile != "" {
+		outputDest = replState.OutputFile
+	}
+
+	fmt.Printf("    %s %s\n", cli.Dimmed("Timing:"), timingStatus)
+	fmt.Printf("    %s %s\n", cli.Dimmed("Expanded:"), expandedStatus)
+	fmt.Printf("    %s %s %s\n", cli.Dimmed("SQL Mode:"), sqlModeStatus, cli.Dimmed("(\\sql to enable, \\normal to disable)"))
+	fmt.Printf("    %s %s\n", cli.Dimmed("Output:"), outputDest)
 	fmt.Println()
 }
 
@@ -1049,9 +1782,20 @@ func printHelp() {
 	fmt.Println()
 	fmt.Printf("    %s, %s         Exit the CLI\n", cli.Info("\\q"), cli.Info("\\quit"))
 	fmt.Printf("    %s, %s         Display this help message\n", cli.Info("\\h"), cli.Info("\\help"))
-	fmt.Printf("    %s, %s        Clear the screen\n", cli.Info("\\c"), cli.Info("\\clear"))
+	fmt.Printf("    %s            Clear the screen\n", cli.Info("\\clear"))
 	fmt.Printf("    %s, %s       Show connection status\n", cli.Info("\\s"), cli.Info("\\status"))
 	fmt.Printf("    %s, %s      Show version information\n", cli.Info("\\v"), cli.Info("\\version"))
+	fmt.Printf("    %s              Toggle query timing display\n", cli.Info("\\timing"))
+	fmt.Printf("    %s                  Toggle expanded output mode\n", cli.Info("\\x"))
+	fmt.Printf("    %s [file]          Set output to file (no arg = stdout)\n", cli.Info("\\o"))
+	fmt.Printf("    %s <cmd>           Execute shell command\n", cli.Info("\\!"))
+	fmt.Printf("    %s                 List tables (shortcut)\n", cli.Info("\\dt"))
+	fmt.Printf("    %s                 List users (shortcut)\n", cli.Info("\\du"))
+	fmt.Printf("    %s                 List indexes (shortcut)\n", cli.Info("\\di"))
+	fmt.Printf("    %s, %s            List databases\n", cli.Info("\\db"), cli.Info("\\l"))
+	fmt.Printf("    %s, %s <db>   Switch to database\n", cli.Info("\\c"), cli.Info("\\connect"))
+	fmt.Printf("    %s               Enter SQL mode (all input = SQL)\n", cli.Info("\\sql"))
+	fmt.Printf("    %s            Return to normal mode\n", cli.Info("\\normal"))
 	fmt.Println()
 
 	// Server Commands
@@ -1059,6 +1803,7 @@ func printHelp() {
 	fmt.Println()
 	fmt.Printf("    %s                   Test server connectivity\n", cli.Info("PING"))
 	fmt.Printf("    %s <user> <pwd>      Authenticate with the server\n", cli.Info("AUTH"))
+	fmt.Printf("    %s <query>           Execute any SQL query explicitly\n", cli.Info("SQL"))
 	fmt.Println()
 
 	// SQL Commands
@@ -1090,21 +1835,42 @@ func printHelp() {
 	fmt.Printf("    %s               Rollback the transaction\n", cli.Info("ROLLBACK"))
 	fmt.Println()
 
-	// Introspection
-	fmt.Println("  " + cli.Highlight("Introspection"))
+	// Inspection
+	fmt.Println("  " + cli.Highlight("Inspection"))
 	fmt.Println()
-	fmt.Printf("    %s           List all database users\n", cli.Info("INTROSPECT USERS"))
-	fmt.Printf("    %s          List all tables with schemas\n", cli.Info("INTROSPECT TABLES"))
-	fmt.Printf("    %s <name>    Detailed info for a table\n", cli.Info("INTROSPECT TABLE"))
-	fmt.Printf("    %s         List all indexes\n", cli.Info("INTROSPECT INDEXES"))
-	fmt.Printf("    %s          Show server/daemon information\n", cli.Info("INTROSPECT SERVER"))
-	fmt.Printf("    %s          Show database status & statistics\n", cli.Info("INTROSPECT STATUS"))
+	fmt.Printf("    %s           List all database users\n", cli.Info("INSPECT USERS"))
+	fmt.Printf("    %s <name>     Detailed info for a user (roles, access)\n", cli.Info("INSPECT USER"))
+	fmt.Printf("    %s          List all tables with schemas\n", cli.Info("INSPECT TABLES"))
+	fmt.Printf("    %s <name>    Detailed info for a table\n", cli.Info("INSPECT TABLE"))
+	fmt.Printf("    %s         List all indexes\n", cli.Info("INSPECT INDEXES"))
+	fmt.Printf("    %s          Show server/daemon information\n", cli.Info("INSPECT SERVER"))
+	fmt.Printf("    %s          Show database status & statistics\n", cli.Info("INSPECT STATUS"))
+	fmt.Printf("    %s       List all databases\n", cli.Info("INSPECT DATABASES"))
+	fmt.Printf("    %s <name>  Detailed info for a database\n", cli.Info("INSPECT DATABASE"))
+	fmt.Printf("    %s           List all RBAC roles\n", cli.Info("INSPECT ROLES"))
+	fmt.Printf("    %s <name>     Detailed info for a role\n", cli.Info("INSPECT ROLE"))
+	fmt.Println()
+
+	// Database Management
+	fmt.Println("  " + cli.Highlight("Database Management"))
+	fmt.Println()
+	fmt.Printf("    %s <name>              Switch to a database\n", cli.Info("USE"))
+	fmt.Printf("    %s <name>  Create a new database\n", cli.Info("CREATE DATABASE"))
+	fmt.Printf("    %s <name>    Drop a database\n", cli.Info("DROP DATABASE"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("Note: The prompt always shows the current database (e.g., flydb:mydb>)"))
+	fmt.Println("    " + cli.Dimmed("      Use -d flag or FLYDB_DATABASE env var to set database on startup"))
 	fmt.Println()
 
 	// Quick Examples
 	fmt.Println("  " + cli.Highlight("Quick Examples"))
 	fmt.Println()
-	fmt.Println("    " + cli.Dimmed("# Create a table"))
+	fmt.Println("    " + cli.Dimmed("# Switch to a different database"))
+	fmt.Println("    " + cli.Success("USE mydb"))
+	fmt.Println("    " + cli.Dimmed("# Or use the shortcut:"))
+	fmt.Println("    " + cli.Success("\\c mydb"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("# Create a table (auto-detected)"))
 	fmt.Println("    " + cli.Success("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)"))
 	fmt.Println()
 	fmt.Println("    " + cli.Dimmed("# Insert data"))
@@ -1114,7 +1880,28 @@ func printHelp() {
 	fmt.Println("    " + cli.Success("SELECT * FROM users WHERE id = 1"))
 	fmt.Println()
 
-	fmt.Println("  " + cli.Dimmed("💡 Tip: SQL commands are auto-detected, no prefix needed."))
+	fmt.Println("  " + cli.Highlight("SQL Execution Modes"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("1. Auto-detection: Common SQL keywords are recognized automatically"))
+	fmt.Println("    " + cli.Dimmed("2. SQL prefix: Use 'SQL <query>' to execute any SQL explicitly"))
+	fmt.Println("    " + cli.Dimmed("3. SQL mode: Use '\\sql' to enter mode where all input is SQL"))
+	fmt.Println()
+
+	// Multi-line Editing
+	fmt.Println("  " + cli.Highlight("Multi-line Editing"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("SQL statements require a semicolon (;) to execute."))
+	fmt.Println("    " + cli.Dimmed("Without a semicolon, the prompt changes to '->' for continuation."))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("Example:"))
+	fmt.Println("    " + cli.Success("flydb:default> SELECT *"))
+	fmt.Println("    " + cli.Success("        -> FROM users"))
+	fmt.Println("    " + cli.Success("        -> WHERE id = 1;"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("Tips:"))
+	fmt.Println("    " + cli.Dimmed("  • Press Ctrl+C to cancel multi-line input"))
+	fmt.Println("    " + cli.Dimmed("  • Use \\ at end of line for explicit continuation"))
+	fmt.Println("    " + cli.Dimmed("  • Commands like PING, AUTH, USE don't need semicolons"))
 	fmt.Println()
 }
 
@@ -1141,13 +1928,19 @@ func printResponseWithFormat(response string, format cli.OutputFormat) {
 	}
 
 	// Default table format
+	// Detect DML results (INSERT/UPDATE/DELETE with affected row count)
+	if isDMLResult(response) {
+		formatDMLResult(response)
+		return
+	}
+
 	// Detect SELECT results (contain row count at the end).
 	if strings.HasSuffix(response, "rows)") || strings.HasSuffix(response, "row)") {
 		formatSelectResult(response)
 		return
 	}
 
-	// Detect key-value format (introspect results like "Key: Value")
+	// Detect key-value format (inspect results like "Key: Value")
 	if isKeyValueFormat(response) {
 		formatKeyValueResult(response)
 		return
@@ -1162,7 +1955,49 @@ func printResponseWithFormat(response string, format cli.OutputFormat) {
 	}
 }
 
-// isKeyValueFormat checks if the response is in key-value format (like introspect results).
+// isDMLResult checks if the response is a DML result (INSERT/UPDATE/DELETE with count).
+func isDMLResult(response string) bool {
+	// Match patterns like "INSERT 1", "UPDATE 5", "DELETE 3"
+	parts := strings.SplitN(response, " ", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	cmd := parts[0]
+	if cmd != "INSERT" && cmd != "UPDATE" && cmd != "DELETE" {
+		return false
+	}
+	// Check if the second part is a number
+	for _, c := range parts[1] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// formatDMLResult formats INSERT/UPDATE/DELETE results with proper "rows affected" message.
+func formatDMLResult(response string) {
+	parts := strings.SplitN(response, " ", 2)
+	if len(parts) != 2 {
+		cli.PrintSuccess("%s", response)
+		return
+	}
+
+	cmd := parts[0]
+	count := parts[1]
+
+	// Format the message based on the count
+	var msg string
+	if count == "1" {
+		msg = fmt.Sprintf("%s: 1 row affected", cmd)
+	} else {
+		msg = fmt.Sprintf("%s: %s rows affected", cmd, count)
+	}
+
+	cli.PrintSuccess("%s", msg)
+}
+
+// isKeyValueFormat checks if the response is in key-value format (like inspect results).
 func isKeyValueFormat(response string) bool {
 	lines := strings.Split(response, "\n")
 	if len(lines) < 2 {
@@ -1181,7 +2016,7 @@ func isKeyValueFormat(response string) bool {
 	return kvCount > len(lines)/2
 }
 
-// formatKeyValueResult formats key-value introspect results nicely.
+// formatKeyValueResult formats key-value inspect results nicely.
 func formatKeyValueResult(response string) {
 	lines := strings.Split(response, "\n")
 
@@ -1297,7 +2132,8 @@ func printResponseAsJSON(response string) {
 }
 
 // formatSelectResult formats SELECT query results as a professional grid table.
-// It parses the response which contains data rows followed by a row count.
+// It parses the response which contains a header row, data rows, and a row count.
+// Format from server: "header1, header2\ndata1, data2\n(N rows)"
 func formatSelectResult(response string) {
 	lines := strings.Split(response, "\n")
 	if len(lines) == 0 {
@@ -1308,7 +2144,7 @@ func formatSelectResult(response string) {
 	rowCountLine := lines[len(lines)-1]
 	dataLines := lines[:len(lines)-1]
 
-	// Handle empty result set
+	// Handle empty result set (only header, no data)
 	if len(dataLines) == 0 {
 		fmt.Println()
 		fmt.Println(cli.Dimmed("  (empty result set)"))
@@ -1317,17 +2153,17 @@ func formatSelectResult(response string) {
 		return
 	}
 
-	// Parse all rows to determine column widths
-	var rows [][]string
+	// Parse all rows (first row is header, rest are data)
+	var allRows [][]string
 	for _, line := range dataLines {
 		if line == "" {
 			continue
 		}
 		cols := strings.Split(line, ", ")
-		rows = append(rows, cols)
+		allRows = append(allRows, cols)
 	}
 
-	if len(rows) == 0 {
+	if len(allRows) == 0 {
 		fmt.Println()
 		fmt.Println(cli.Dimmed("  (empty result set)"))
 		fmt.Println(cli.Dimmed("  " + rowCountLine))
@@ -1335,10 +2171,13 @@ func formatSelectResult(response string) {
 		return
 	}
 
+	// First row is the header
+	headers := allRows[0]
+	dataRows := allRows[1:]
+
 	// Calculate the maximum number of columns across ALL rows
-	// This fixes the issue where later rows might have more columns than the first
-	numCols := 0
-	for _, row := range rows {
+	numCols := len(headers)
+	for _, row := range dataRows {
 		if len(row) > numCols {
 			numCols = len(row)
 		}
@@ -1349,7 +2188,14 @@ func formatSelectResult(response string) {
 	for i := range colWidths {
 		colWidths[i] = 3 // Minimum column width
 	}
-	for _, row := range rows {
+	// Consider header widths
+	for i, col := range headers {
+		if i < numCols && len(col) > colWidths[i] {
+			colWidths[i] = len(col)
+		}
+	}
+	// Consider data widths
+	for _, row := range dataRows {
 		for i, col := range row {
 			if i < numCols && len(col) > colWidths[i] {
 				colWidths[i] = len(col)
@@ -1379,7 +2225,7 @@ func formatSelectResult(response string) {
 	}
 	topBorder := topLeft + strings.Join(topParts, topT) + topRight
 
-	// Build the separator line (between header and data, or between rows)
+	// Build the separator line (between header and data)
 	var sepParts []string
 	for _, width := range colWidths {
 		sepParts = append(sepParts, strings.Repeat(horizontal, width+2))
@@ -1398,32 +2244,44 @@ func formatSelectResult(response string) {
 	// Print the table with professional grid
 	fmt.Println(cli.Dimmed(topBorder))
 
-	for rowIdx, row := range rows {
+	// Print header row with bold styling
+	var headerParts []string
+	for i := 0; i < numCols; i++ {
+		val := ""
+		if i < len(headers) {
+			val = headers[i]
+		}
+		padded := fmt.Sprintf(" %-*s ", colWidths[i], val)
+		headerParts = append(headerParts, cli.Highlight(padded))
+	}
+	fmt.Println(cli.Dimmed(vertical) + strings.Join(headerParts, cli.Dimmed(vertical)) + cli.Dimmed(vertical))
+
+	// Print separator after header if there are data rows
+	if len(dataRows) > 0 {
+		fmt.Println(cli.Dimmed(separator))
+	}
+
+	// Print data rows
+	for _, row := range dataRows {
 		var rowParts []string
-		// Process all columns up to numCols
 		for i := 0; i < numCols; i++ {
 			val := ""
 			if i < len(row) {
 				val = row[i]
 			}
-			// Pad the column value to the required width
 			padded := fmt.Sprintf(" %-*s ", colWidths[i], val)
 			rowParts = append(rowParts, padded)
 		}
 		fmt.Println(cli.Dimmed(vertical) + strings.Join(rowParts, cli.Dimmed(vertical)) + cli.Dimmed(vertical))
-
-		// Print separator after first row (header) if there are multiple rows
-		if rowIdx == 0 && len(rows) > 1 {
-			fmt.Println(cli.Dimmed(separator))
-		}
 	}
 
 	fmt.Println(cli.Dimmed(bottomBorder))
 
-	// Print the row count with formatting
-	rowCount := len(rows)
-	if rowCount == 1 {
-		// Check if this is a header-only result or actual data
+	// Print the row count with formatting (data rows only, not header)
+	rowCount := len(dataRows)
+	if rowCount == 0 {
+		fmt.Println(cli.Dimmed("  (0 rows)"))
+	} else if rowCount == 1 {
 		fmt.Println(cli.Success(fmt.Sprintf("  %d row returned", rowCount)))
 	} else {
 		fmt.Println(cli.Success(fmt.Sprintf("  %d rows returned", rowCount)))
@@ -1508,7 +2366,12 @@ func formatTable(data string) {
 				val = row[i]
 			}
 			padded := fmt.Sprintf(" %-*s ", colWidths[i], val)
-			rowParts = append(rowParts, padded)
+			// Apply bold styling to header row (first row)
+			if rowIdx == 0 {
+				rowParts = append(rowParts, cli.Highlight(padded))
+			} else {
+				rowParts = append(rowParts, padded)
+			}
 		}
 		fmt.Println(cli.Dimmed(vertical) + strings.Join(rowParts, cli.Dimmed(vertical)) + cli.Dimmed(vertical))
 
