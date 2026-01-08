@@ -4,28 +4,72 @@ This document provides technical details on the key algorithms, data structures,
 
 ## Table of Contents
 
-1. [Storage Engine](#storage-engine)
-2. [Write-Ahead Log (WAL)](#write-ahead-log-wal)
-3. [Multi-Database Architecture](#multi-database-architecture)
-4. [Collation System](#collation-system)
-5. [Encoding System](#encoding-system)
-6. [B-Tree Indexes](#b-tree-indexes)
-7. [SQL Processing Pipeline](#sql-processing-pipeline)
-8. [Prepared Statements](#prepared-statements)
-9. [Triggers](#triggers)
-10. [Transaction Support](#transaction-support)
-11. [Authentication & Authorization](#authentication--authorization)
-12. [Replication](#replication)
-13. [Clustering](#clustering)
-14. [Query Cache](#query-cache)
+1. [Storage Engine Architecture](#storage-engine-architecture)
+2. [Page-Based Disk Storage](#page-based-disk-storage)
+3. [Buffer Pool](#buffer-pool)
+4. [Write-Ahead Log (WAL)](#write-ahead-log-wal)
+5. [Multi-Database Architecture](#multi-database-architecture)
+6. [Collation System](#collation-system)
+7. [Encoding System](#encoding-system)
+8. [B-Tree Indexes](#b-tree-indexes)
+9. [SQL Processing Pipeline](#sql-processing-pipeline)
+10. [Prepared Statements](#prepared-statements)
+11. [Triggers](#triggers)
+12. [Transaction Support](#transaction-support)
+13. [Authentication & Authorization](#authentication--authorization)
+14. [Replication](#replication)
+15. [Clustering](#clustering)
+16. [Query Cache](#query-cache)
 
 ---
 
-## Storage Engine
+## Storage Engine Architecture
 
-### KVStore Architecture
+### Unified Disk-Based Storage
 
-The `KVStore` is FlyDB's primary storage engine, implementing the `Engine` interface:
+FlyDB uses a **unified disk-based storage engine** that combines page-based storage with intelligent buffer pool caching. This architecture provides optimal performance for both small datasets (that fit entirely in the buffer pool) and large datasets (that exceed available RAM).
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      SQL Executor                               │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   Engine Interface                              │
+│         (Put, Get, Delete, Scan, Close)                         │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  UnifiedStorageEngine                           │
+│                                                                 │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │              Buffer Pool (LRU-K Caching)                │   │
+│   │   - Auto-sized based on available memory                │   │
+│   │   - Intelligent page prefetching                        │   │
+│   │   - Optimized for sequential and random access          │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │              Page-Based Disk Storage                    │   │
+│   │   - Heap file organization                              │   │
+│   │   - Slotted page format (8KB pages)                     │   │
+│   │   - Efficient space management                          │   │
+│   └─────────────────────────────────────────────────────────┘   │
+│                              │                                  │
+│   ┌─────────────────────────────────────────────────────────┐   │
+│   │              Write-Ahead Log (WAL)                      │   │
+│   │   - Durability guarantees                               │   │
+│   │   - Crash recovery                                      │   │
+│   │   - Optional AES-256-GCM encryption                     │   │
+│   └─────────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Engine Interface
+
+The storage engine implements a simple key-value interface:
 
 ```go
 type Engine interface {
@@ -37,19 +81,19 @@ type Engine interface {
 }
 ```
 
-**Implementation Details:**
-
-- **In-Memory Storage**: Uses Go's native `map[string][]byte` for O(1) average-case lookups
-- **Thread Safety**: Protected by `sync.RWMutex` allowing concurrent reads
-- **Durability**: All writes are first persisted to WAL before updating memory
-- **Recovery**: On startup, WAL is replayed to rebuild in-memory state
+### Creating a Storage Engine
 
 ```go
-type KVStore struct {
-    data map[string][]byte  // In-memory key-value storage
-    wal  *WAL               // Write-ahead log for durability
-    mu   sync.RWMutex       // Protects concurrent access
+config := storage.StorageConfig{
+    DataDir:            "./data",
+    BufferPoolSize:     0,  // 0 = auto-size based on available memory
+    CheckpointInterval: 60 * time.Second,
+    Encryption: storage.EncryptionConfig{
+        Enabled:    true,
+        Passphrase: "your-secure-passphrase",
+    },
 }
+engine, err := storage.NewStorageEngine(config)
 ```
 
 ### Key Encoding Convention
@@ -68,11 +112,139 @@ This convention enables efficient prefix scans for operations like "get all rows
 
 ---
 
+## Page-Based Disk Storage
+
+FlyDB uses a PostgreSQL-style page-based storage architecture with 8KB slotted pages.
+
+### Slotted Page Layout
+
+Each 8KB page uses a "slotted page" design that efficiently handles variable-length records:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Page Header (24 bytes)                       │
+│  [PageID | Type | Flags | SlotCount | FreeStart | FreeEnd]      │
+├─────────────────────────────────────────────────────────────────┤
+│  Slot Array (grows →)                                           │
+│  [Slot 0: offset,len] [Slot 1: offset,len] [Slot 2: offset,len] │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│                    Free Space                                   │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Record Data (← grows)                                          │
+│  [Record 2 data] [Record 1 data] [Record 0 data]                │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key Design Decisions:**
+- **Slot Array** grows forward from the header
+- **Record Data** grows backward from the end of the page
+- **Free Space** is in the middle, allowing both to grow independently
+- Deleted records leave "holes" that can be reclaimed via compaction
+
+### Record Format
+
+Records are stored with a simple key-length prefix:
+
+```
+┌────────────────────────────────────────────────────────┐
+│ Key Length (4 bytes) │ Key (variable) │ Value (variable) │
+└────────────────────────────────────────────────────────┘
+```
+
+### Heap File Organization
+
+The heap file stores pages sequentially on disk:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Header Page (8KB)                                               │
+│ - Magic number, version, page count                             │
+├─────────────────────────────────────────────────────────────────┤
+│ Data Page 1 (8KB)                                               │
+├─────────────────────────────────────────────────────────────────┤
+│ Data Page 2 (8KB)                                               │
+├─────────────────────────────────────────────────────────────────┤
+│ ...                                                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Buffer Pool
+
+The buffer pool is a critical component that caches database pages in memory, reducing expensive disk I/O operations.
+
+### Why Buffer Pools Matter
+
+Disk I/O is orders of magnitude slower than memory access:
+- Memory access: ~100 nanoseconds
+- SSD random read: ~100 microseconds (1000x slower)
+- HDD random read: ~10 milliseconds (100,000x slower)
+
+A well-designed buffer pool can achieve 90%+ cache hit rates.
+
+### LRU-K Eviction Algorithm
+
+FlyDB uses **LRU-K (specifically LRU-2)** instead of simple LRU for page eviction. This algorithm was introduced by O'Neil, O'Neil, and Weikum in 1993.
+
+**Simple LRU Problem:**
+- A sequential scan can flush the entire buffer pool
+- Frequently accessed pages get evicted by one-time accesses
+
+**LRU-K Solution:**
+- Track the last K access times for each page
+- Evict the page with the oldest K-th access
+- Pages accessed only once are evicted before frequently accessed pages
+
+### Auto-Sizing
+
+The buffer pool automatically sizes itself based on available system memory:
+- Uses **25% of available RAM**
+- Minimum: 2MB (256 pages)
+- Maximum: 1GB (131,072 pages)
+
+This provides optimal out-of-box performance without manual tuning.
+
+### Buffer Pool Operations
+
+| Operation | Description |
+|-----------|-------------|
+| `FetchPage(pageID)` | Returns page from cache or loads from disk |
+| `NewPage()` | Allocates a new page |
+| `UnpinPage(pageID, dirty)` | Releases page, marks dirty if modified |
+| `FlushPage(pageID)` | Writes dirty page to disk |
+| `FlushAllPages()` | Writes all dirty pages (for checkpoint) |
+| `Prefetch(pageIDs...)` | Asynchronously loads pages for sequential scans |
+
+### Checkpoint Manager
+
+Checkpoints create consistent snapshots for recovery:
+
+1. Flush all dirty pages to disk
+2. Sync heap file
+3. Record checkpoint in metadata
+4. Continue normal operation
+
+Checkpoints run automatically at configurable intervals (default: 60 seconds).
+
+### Performance Characteristics
+
+| Operation | Cached (in buffer pool) | Uncached (disk I/O) |
+|-----------|-------------------------|---------------------|
+| Put       | O(1) + WAL              | O(1) + WAL          |
+| Get       | O(1)                    | O(disk)             |
+| Delete    | O(1) + WAL              | O(1) + WAL          |
+| Scan      | O(N) with prefetch      | O(N) + disk I/O     |
+
+---
+
 ## Write-Ahead Log (WAL)
 
 ### Purpose
 
-The WAL provides durability by persisting all operations to disk before they are applied to memory. This ensures committed data survives crashes.
+The WAL provides durability by persisting all operations to disk before they are applied to storage. This ensures committed data survives crashes and restarts.
 
 ### Record Format
 
@@ -141,25 +313,33 @@ err := wal.Replay(0, func(op byte, key string, value []byte) {
 
 ## Multi-Database Architecture
 
-### DatabaseManager
+FlyDB supports MySQL-like multi-database functionality, allowing users to create, drop, and switch between multiple isolated databases.
 
-The `DatabaseManager` handles multiple isolated databases:
+### Architecture
 
-```go
-type DatabaseManager struct {
-    dataDir   string               // Base directory for all databases
-    databases map[string]*Database // Lazy-loaded database instances
-    encConfig EncryptionConfig     // Shared encryption configuration
-    mu        sync.RWMutex
-}
-
-type Database struct {
-    Name     string
-    Path     string            // Full path to .fdb file
-    Store    *KVStore          // Dedicated KVStore instance
-    Metadata *DatabaseMetadata // Encoding, collation, locale settings
-}
 ```
+┌─────────────────────────────────────────────────────┐
+│                  DatabaseManager                    │
+├─────────────────────────────────────────────────────┤
+│  dataDir: /var/lib/flydb/                           │
+│  databases: map[string]*Database                    │
+│  encConfig: EncryptionConfig                        │
+└─────────────────────────────────────────────────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         ▼               ▼               ▼
+┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│  default/   │  │   mydb/     │  │  testdb/    │
+│  data.db    │  │   data.db   │  │  data.db    │
+│  wal.fdb    │  │   wal.fdb   │  │  wal.fdb    │
+└─────────────┘  └─────────────┘  └─────────────┘
+```
+
+Each database has its own:
+- Data directory with heap file (`data.db`)
+- Write-ahead log (`wal.fdb`)
+- Buffer pool instance
+- Metadata configuration
 
 ### Database Metadata
 
@@ -176,7 +356,7 @@ type DatabaseMetadata struct {
     UpdatedAt   time.Time
     Description string
     ReadOnly    bool
-    MaxSize     int64
+    MaxSize     int64             // Maximum size in bytes (0 = unlimited)
     Properties  map[string]string // Extensible properties
 }
 ```
@@ -186,78 +366,35 @@ type DatabaseMetadata struct {
 The server tracks which database each connection is using:
 
 ```go
-type Server struct {
-    connDatabases map[net.Conn]string  // Connection -> database name
-    connDbMu      sync.Mutex
-}
+// Each connection has an associated database
+connDatabases map[net.Conn]string  // Connection -> database name
 
-func (s *Server) SetConnectionDatabase(conn net.Conn, dbName string) {
-    s.connDbMu.Lock()
-    defer s.connDbMu.Unlock()
-    s.connDatabases[conn] = dbName
-}
+// Switch database for a connection
+func (s *Server) SetConnectionDatabase(conn net.Conn, dbName string)
 
-func (s *Server) GetConnectionDatabase(conn net.Conn) string {
-    s.connDbMu.Lock()
-    defer s.connDbMu.Unlock()
-    return s.connDatabases[conn]
-}
+// Get current database for a connection
+func (s *Server) GetConnectionDatabase(conn net.Conn) string
 ```
 
 ### Database Operations
 
-**Create Database:**
-```go
-func (dm *DatabaseManager) CreateDatabase(name string, meta *DatabaseMetadata) error {
-    dm.mu.Lock()
-    defer dm.mu.Unlock()
+| Operation | SQL Command | Description |
+|-----------|-------------|-------------|
+| Create | `CREATE DATABASE mydb` | Creates new database with default settings |
+| Create with options | `CREATE DATABASE mydb ENCODING UTF8 COLLATION nocase` | Creates with specific settings |
+| Drop | `DROP DATABASE mydb` | Removes database and all data |
+| Switch | `USE mydb` | Changes current database for connection |
+| List | `SHOW DATABASES` | Lists all available databases |
 
-    path := filepath.Join(dm.dataDir, name+".fdb")
-    store, err := NewKVStore(path, dm.encConfig)
-    if err != nil {
-        return err
-    }
+### Lazy Loading
 
-    db := &Database{Name: name, Path: path, Store: store, Metadata: meta}
-    dm.databases[name] = db
+Databases are loaded on-demand when first accessed:
 
-    // Persist metadata
-    metaJSON, _ := json.Marshal(meta)
-    return store.Put("_sys_db_meta", metaJSON)
-}
-```
-
-**Get Database (Lazy Loading):**
-```go
-func (dm *DatabaseManager) GetDatabase(name string) (*Database, error) {
-    dm.mu.RLock()
-    if db, ok := dm.databases[name]; ok {
-        dm.mu.RUnlock()
-        return db, nil
-    }
-    dm.mu.RUnlock()
-
-    // Load from disk
-    dm.mu.Lock()
-    defer dm.mu.Unlock()
-
-    path := filepath.Join(dm.dataDir, name+".fdb")
-    store, err := NewKVStore(path, dm.encConfig)
-    if err != nil {
-        return nil, err
-    }
-
-    // Load metadata
-    metaJSON, _ := store.Get("_sys_db_meta")
-    var meta DatabaseMetadata
-    json.Unmarshal(metaJSON, &meta)
-
-    db := &Database{Name: name, Path: path, Store: store, Metadata: &meta}
-    dm.databases[name] = db
-    return db, nil
-}
-```
-
+1. Check if database is already loaded in memory
+2. If not, verify database directory exists on disk
+3. Create storage engine for the database
+4. Load metadata from `_sys_db_meta` key
+5. Cache database instance for future access
 ---
 
 ## Collation System
@@ -791,92 +928,83 @@ func (e *Executor) executeTriggers(tableName string, timing TriggerTiming, event
 
 ### Transaction Model
 
-FlyDB supports transactions with Read Committed isolation and savepoint support:
+FlyDB uses an optimistic concurrency model with the following ACID properties:
+
+- **Atomicity**: All operations in a transaction are applied together or not at all
+- **Consistency**: Transactions maintain database invariants
+- **Isolation**: Read-committed isolation level (reads see committed data only)
+- **Durability**: Committed transactions are persisted to WAL
+
+### Transaction Lifecycle
+
+```
+┌─────────┐     ┌─────────────┐     ┌──────────┐
+│  BEGIN  │ ──▶ │  Operations │ ──▶ │  COMMIT  │
+└─────────┘     │  (buffered) │     └──────────┘
+                └─────────────┘           │
+                      │                   ▼
+                      │           ┌──────────────┐
+                      └─────────▶ │   ROLLBACK   │
+                                  └──────────────┘
+```
+
+1. **BEGIN**: Creates a new transaction with a write buffer
+2. **Operations**: Writes go to the buffer, reads check buffer then storage
+3. **COMMIT**: Applies all buffered writes to storage atomically
+4. **ROLLBACK**: Discards the write buffer
+
+### Transaction Structure
 
 ```go
 type Transaction struct {
-    store      *KVStore
-    buffer     []TxOperation      // Ordered list of pending operations
-    readCache  map[string][]byte  // Read-your-writes cache
-    deleteSet  map[string]bool    // Pending deletes
-    state      TxState            // Active, Committed, or RolledBack
-    savepoints []Savepoint        // Named savepoints
+    store      Engine              // Underlying storage engine
+    buffer     []TxOperation       // Ordered list of pending operations
+    readCache  map[string][]byte   // Read-your-writes cache
+    deleteSet  map[string]bool     // Pending deletes
+    state      TxState             // Active, Committed, or RolledBack
+    savepoints []Savepoint         // Named savepoints
     mu         sync.Mutex
 }
-
-type TxOperation struct {
-    Op    byte   // OpPut or OpDelete
-    Key   string
-    Value []byte
-}
-
-type Savepoint struct {
-    Name           string
-    BufferPosition int               // Position in buffer to rollback to
-    ReadCacheSnap  map[string][]byte // Snapshot of read cache
-    DeleteSetSnap  map[string]bool   // Snapshot of delete set
-}
 ```
 
-### Operations
+### Read Path (Read-Your-Writes)
 
-**Begin Transaction:**
-```go
-func (s *KVStore) BeginTransaction() *Transaction {
-    return &Transaction{
-        id:          atomic.AddUint64(&s.txCounter, 1),
-        store:       s,
-        writeBuffer: make(map[string][]byte),
-        deleteSet:   make(map[string]bool),
-    }
-}
-```
-
-**Read (with snapshot isolation):**
 ```go
 func (tx *Transaction) Get(key string) ([]byte, error) {
-    // Check local write buffer first
-    if val, ok := tx.writeBuffer[key]; ok {
+    // 1. Check if key was deleted in this transaction
+    if tx.deleteSet[key] {
+        return nil, ErrNotFound
+    }
+    // 2. Check local write buffer (read-your-writes)
+    if val, ok := tx.readCache[key]; ok {
         return val, nil
     }
-    if tx.deleteSet[key] {
-        return nil, errors.New("key not found")
-    }
-    // Fall back to underlying store
+    // 3. Fall back to underlying storage
     return tx.store.Get(key)
 }
 ```
 
-**Write (buffered):**
-```go
-func (tx *Transaction) Put(key string, value []byte) error {
-    tx.mu.Lock()
-    defer tx.mu.Unlock()
-    tx.writeBuffer[key] = value
-    delete(tx.deleteSet, key)
-    return nil
-}
-```
+### Commit Process
 
-**Commit:**
 ```go
 func (tx *Transaction) Commit() error {
     tx.mu.Lock()
     defer tx.mu.Unlock()
 
-    // Apply all buffered writes
-    for key, value := range tx.writeBuffer {
-        if err := tx.store.Put(key, value); err != nil {
-            return err
+    // Apply all buffered operations in order
+    for _, op := range tx.buffer {
+        switch op.Op {
+        case OpPut:
+            if err := tx.store.Put(op.Key, op.Value); err != nil {
+                return err
+            }
+        case OpDelete:
+            if err := tx.store.Delete(op.Key); err != nil {
+                return err
+            }
         }
     }
-    // Apply all deletes
-    for key := range tx.deleteSet {
-        if err := tx.store.Delete(key); err != nil {
-            return err
-        }
-    }
-    tx.committed = true
+    tx.state = TxStateCommitted
     return nil
 }
 ```
@@ -969,12 +1097,13 @@ func (tx *Transaction) ReleaseSavepoint(name string) error {
 
 ### User Management
 
-Users are stored in the KVStore with bcrypt-hashed passwords:
+Users are stored in the storage engine with bcrypt-hashed passwords:
 
 ```go
 type User struct {
     Username     string `json:"username"`
     PasswordHash string `json:"password_hash"`
+    Roles        []string `json:"roles"`
 }
 
 // Storage key: _sys_users:<username>

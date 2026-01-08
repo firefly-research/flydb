@@ -74,15 +74,33 @@ FlyDB is a lightweight SQL database written in Go, designed to demonstrate core 
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                       Storage Layer                             │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │   KVStore   │  │    WAL      │  │     Index Manager       │  │
-│  │ (in-memory) │  │ (durability)│  │     (B-Tree indexes)    │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Unified Disk Storage Engine                │    │
+│  │   (Page-Based Storage with Intelligent Caching)         │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                              │                                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                    Buffer Pool                          │    │
+│  │   - LRU-K page replacement    - Auto-sized by memory    │    │
+│  │   - Pin/unpin semantics       - Dirty page tracking     │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                              │                                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                    Heap File                            │    │
+│  │   - 8KB pages               - Slotted page layout       │    │
+│  │   - Free space management   - Record-level operations   │    │
+│  └─────────────────────────────────────────────────────────┘    │
 │                                                                 │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
 │  │ Transaction │  │  Encryptor  │  │   Database Instance     │  │
 │  │  Manager    │  │ (AES-256)   │  │   (per-db isolation)    │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              Write-Ahead Log (WAL)                      │    │
+│  │   - Durability guarantees   - Crash recovery            │    │
+│  │   - Replication support     - Optional encryption       │    │
+│  └─────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
                                 │
                                 ▼
@@ -90,9 +108,15 @@ FlyDB is a lightweight SQL database written in Go, designed to demonstrate core 
 │                       File System                               │
 │  ┌─────────────────────────────────────────────────────────┐    │
 │  │  data_dir/                                              │    │
-│  │  ├── default.fdb      (default database)                │    │
-│  │  ├── myapp.fdb        (user database)                   │    │
-│  │  └── analytics.fdb    (user database)                   │    │
+│  │  ├── default/                                           │    │
+│  │  │   ├── data.db      (heap file with pages)            │    │
+│  │  │   └── wal.fdb      (write-ahead log)                 │    │
+│  │  ├── myapp/                                             │    │
+│  │  │   ├── data.db      (heap file with pages)            │    │
+│  │  │   └── wal.fdb      (write-ahead log)                 │    │
+│  │  └── _system/                                           │    │
+│  │      ├── data.db      (system metadata)                 │    │
+│  │      └── wal.fdb      (system WAL)                      │    │
 │  └─────────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -133,12 +157,13 @@ The auth layer provides security features:
 
 ### Storage Layer (`internal/storage/`)
 
-The storage layer provides persistence and data management:
+The storage layer provides persistence and data management using a unified disk-based engine:
 
 | Component | File | Purpose |
 |-----------|------|---------|
 | Engine | `engine.go` | Storage interface definition |
-| KVStore | `kvstore.go` | In-memory key-value store |
+| StorageEngine | `storage_engine.go` | Extended interface with Sync/Stats |
+| Factory | `factory.go` | Engine creation with auto-sizing buffer pool |
 | WAL | `wal.go` | Write-Ahead Log for durability |
 | B-Tree | `btree.go` | Index data structure |
 | Index Manager | `index.go` | Index lifecycle management |
@@ -148,6 +173,24 @@ The storage layer provides persistence and data management:
 | DatabaseManager | `database.go` | Multi-database lifecycle management |
 | Collation | `collation.go` | String comparison rules |
 | Encoding | `encoding.go` | Character encoding validation |
+
+### Disk Storage Engine (`internal/storage/disk/`)
+
+The disk storage engine provides PostgreSQL-style page-based storage with intelligent caching:
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| Page | `page.go` | 8KB page with slotted layout |
+| HeapFile | `heap_file.go` | Page allocation and free list management |
+| BufferPool | `buffer_pool.go` | LRU-K page caching with auto-sizing |
+| DiskStorageEngine | `disk_engine.go` | Unified disk-based Engine implementation |
+| Checkpoint | `checkpoint.go` | Periodic full database snapshots |
+
+**Key Features:**
+- **Auto-sized Buffer Pool**: Automatically sizes based on available system memory (25% of RAM)
+- **LRU-K Replacement**: Intelligent page eviction based on access frequency
+- **Dirty Page Tracking**: Efficient write-back of modified pages
+- **Checkpoint Recovery**: Fast startup by loading from checkpoint + WAL replay
 
 ### CLI/Shell (`cmd/flydb-shell/`)
 
@@ -494,11 +537,90 @@ FlyDB uses a key prefix convention to organize data in the KVStore:
 | `proc:<name>` | Stored procedure | `proc:get_user` |
 | `view:<name>` | View definition | `view:active_users` |
 
+## Disk Storage Engine Architecture
+
+The disk storage engine provides PostgreSQL-style page-based storage for datasets larger than RAM:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Disk Storage Engine                          │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                   Buffer Pool (LRU)                     │    │
+│  │   ┌─────────┐ ┌─────────┐ ┌─────────┐     ┌─────────┐   │    │
+│  │   │ Frame 0 │ │ Frame 1 │ │ Frame 2 │ ... │ Frame N │   │    │
+│  │   │ [Page]  │ │ [Page]  │ │ [Page]  │     │ [Page]  │   │    │
+│  │   │ pin:2   │ │ pin:0   │ │ pin:1   │     │ pin:0   │   │    │
+│  │   └─────────┘ └─────────┘ └─────────┘     └─────────┘   │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │                    Heap File                            │    │
+│  │   ┌─────────┐ ┌─────────┐ ┌─────────┐     ┌─────────┐   │    │
+│  │   │ Header  │ │ Page 1  │ │ Page 2  │ ... │ Page N  │   │    │
+│  │   │ (8KB)   │ │ (8KB)   │ │ (8KB)   │     │ (8KB)   │   │    │
+│  │   └─────────┘ └─────────┘ └─────────┘     └─────────┘   │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Page Layout (Slotted Page)
+
+Each 8KB page uses a slotted page layout for variable-length records:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Page (8192 bytes)                        │
+├─────────────────────────────────────────────────────────────────┤
+│  Page Header (24 bytes)                                         │
+│  ┌─────────┬──────────┬───────┬───────────┬───────────┬───────┐ │
+│  │ PageID  │ PageType │ Flags │ SlotCount │ FreeSpace │  LSN  │ │
+│  │  (4B)   │   (1B)   │ (1B)  │   (2B)    │   (4B)    │ (4B)  │ │
+│  └─────────┴──────────┴───────┴───────────┴───────────┴───────┘ │
+├─────────────────────────────────────────────────────────────────┤
+│  Slot Array (grows down)                                        │
+│  ┌──────────────┬──────────────┬──────────────┐                 │
+│  │ Slot 0       │ Slot 1       │ Slot 2       │ ...             │
+│  │ offset:len   │ offset:len   │ offset:len   │                 │
+│  └──────────────┴──────────────┴──────────────┘                 │
+├─────────────────────────────────────────────────────────────────┤
+│                     Free Space                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  Records (grow up from bottom)                                  │
+│  ┌──────────────┬──────────────┬──────────────┐                 │
+│  │ Record 2     │ Record 1     │ Record 0     │                 │
+│  │ (variable)   │ (variable)   │ (variable)   │                 │
+│  └──────────────┴──────────────┴──────────────┘                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Configuration
+
+The storage engine is selected via configuration:
+
+```toml
+# Storage engine: "memory" (default) or "disk"
+storage_engine = "disk"
+
+# Buffer pool size in pages (8KB each)
+buffer_pool_size = 1024  # 8MB
+
+# Checkpoint interval in seconds (0 = disabled)
+checkpoint_secs = 60
+```
+
+Or via environment variables:
+- `FLYDB_STORAGE_ENGINE`: "memory" or "disk"
+- `FLYDB_BUFFER_POOL_SIZE`: Number of pages
+- `FLYDB_CHECKPOINT_SECS`: Checkpoint interval
+
 ## Thread Safety Model
 
 FlyDB uses Go's concurrency primitives for thread safety:
 
 - **KVStore**: `sync.RWMutex` for concurrent read access, exclusive writes
+- **BufferPool**: `sync.Mutex` for frame allocation and eviction
 - **WAL**: `sync.Mutex` for serialized append operations
 - **Server**: Per-connection goroutines with mutex-protected shared state
 - **Subscribers**: `sync.Mutex` protects the WATCH subscription map
