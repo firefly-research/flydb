@@ -170,6 +170,7 @@ func DecodeDeallocateMessage(data []byte) (*DeallocateMessage, error) {
 type AuthMessage struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
+	Database string `json:"database,omitempty"` // Optional: database to connect to (default: "default")
 }
 
 // Encode encodes the auth message to bytes.
@@ -188,8 +189,9 @@ func DecodeAuthMessage(data []byte) (*AuthMessage, error) {
 
 // AuthResultMessage represents an authentication response.
 type AuthResultMessage struct {
-	Success bool   `json:"success"`
-	Message string `json:"message,omitempty"`
+	Success  bool   `json:"success"`
+	Message  string `json:"message,omitempty"`
+	Database string `json:"database,omitempty"` // Current database after authentication
 }
 
 // Encode encodes the auth result message to bytes.

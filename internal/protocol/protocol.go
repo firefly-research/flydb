@@ -119,6 +119,11 @@ const (
 	MsgGetOption      MessageType = 0x41
 	MsgGetServerInfo  MessageType = 0x42
 	MsgSessionResult  MessageType = 0x43
+
+	// Database operations (0x50-0x5F)
+	MsgUseDatabase       MessageType = 0x50
+	MsgGetDatabases      MessageType = 0x51
+	MsgDatabaseResult    MessageType = 0x52
 )
 
 // MessageFlag represents message flags.

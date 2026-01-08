@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,15 @@ var log = logging.NewLogger("protocol")
 // QueryExecutor is the interface for executing SQL queries.
 type QueryExecutor interface {
 	Execute(query string) (string, error)
+}
+
+// DatabaseAwareQueryExecutor extends QueryExecutor with database context support.
+// This allows queries to be executed against a specific database.
+type DatabaseAwareQueryExecutor interface {
+	QueryExecutor
+	// ExecuteInDatabase executes a query in the context of a specific database.
+	// If database is empty, the default database is used.
+	ExecuteInDatabase(query, database string) (string, error)
 }
 
 // PreparedStatementManager is the interface for managing prepared statements.
@@ -81,6 +91,17 @@ type TransactionManager interface {
 	RollbackToSavepoint(txID, name string) error
 }
 
+// DatabaseManager manages database selection for ODBC/JDBC drivers.
+type DatabaseManager interface {
+	// UseDatabase switches the connection to a different database.
+	// Returns an error if the database doesn't exist.
+	UseDatabase(database string) error
+	// DatabaseExists checks if a database exists.
+	DatabaseExists(database string) bool
+	// ListDatabases returns a list of available database names.
+	ListDatabases() []string
+}
+
 // connectionState holds per-connection state.
 type connectionState struct {
 	authenticated    bool
@@ -90,6 +111,7 @@ type connectionState struct {
 	autoCommit       bool
 	isolationLevel   int
 	readOnly         bool
+	currentDatabase  string // Current database for this connection
 }
 
 // BinaryHandler handles binary protocol connections.
@@ -101,6 +123,7 @@ type BinaryHandler struct {
 	sessions    SessionManager
 	cursors     CursorManager
 	txMgr       TransactionManager
+	dbMgr       DatabaseManager
 	mu          sync.RWMutex
 	connections map[net.Conn]*connectionState
 }
@@ -133,6 +156,11 @@ func (h *BinaryHandler) SetCursorManager(cm CursorManager) {
 // SetTransactionManager sets the transaction manager.
 func (h *BinaryHandler) SetTransactionManager(tm TransactionManager) {
 	h.txMgr = tm
+}
+
+// SetDatabaseManager sets the database manager for multi-database support.
+func (h *BinaryHandler) SetDatabaseManager(dm DatabaseManager) {
+	h.dbMgr = dm
 }
 
 // HandleConnection handles a single binary protocol connection.
@@ -210,7 +238,7 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 			success = authenticated
 
 		case MsgQuery:
-			success = h.handleQuery(writer, msg.Payload, remoteAddr)
+			success = h.handleQuery(writer, msg.Payload, remoteAddr, connState)
 
 		case MsgPrepare:
 			success = h.handlePrepare(writer, msg.Payload, remoteAddr)
@@ -264,6 +292,13 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 
 		case MsgGetServerInfo:
 			success = h.handleGetServerInfo(writer, remoteAddr)
+
+		// Database operations for ODBC/JDBC driver support
+		case MsgUseDatabase:
+			success = h.handleUseDatabase(writer, msg.Payload, remoteAddr, connState)
+
+		case MsgGetDatabases:
+			success = h.handleGetDatabases(writer, msg.Payload, remoteAddr)
 
 		default:
 			reqCtx.LogError(log, "unknown message type")
@@ -329,6 +364,12 @@ func msgTypeToString(t MessageType) string {
 		return "GET_OPTION"
 	case MsgGetServerInfo:
 		return "GET_SERVER_INFO"
+	case MsgUseDatabase:
+		return "USE_DATABASE"
+	case MsgGetDatabases:
+		return "GET_DATABASES"
+	case MsgDatabaseResult:
+		return "DATABASE_RESULT"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", t)
 	}
@@ -354,7 +395,35 @@ func (h *BinaryHandler) handleAuth(w *bufio.Writer, payload []byte, remoteAddr s
 		result.Message = "authenticated"
 		state.authenticated = true
 		state.username = authMsg.Username
-		log.Info("Binary auth success", "remote_addr", remoteAddr, "user", authMsg.Username)
+
+		// Handle database selection during authentication
+		requestedDB := authMsg.Database
+		if requestedDB == "" {
+			requestedDB = "default"
+		}
+
+		// Validate and set the database if database manager is available
+		if h.dbMgr != nil && requestedDB != "default" {
+			if !h.dbMgr.DatabaseExists(requestedDB) {
+				result.Success = false
+				result.Message = "database '" + requestedDB + "' does not exist"
+				log.Warn("Binary auth failed - database not found",
+					"remote_addr", remoteAddr,
+					"user", authMsg.Username,
+					"database", requestedDB)
+				data, _ := result.Encode()
+				WriteMessage(w, MsgAuthResult, data)
+				w.Flush()
+				return false
+			}
+		}
+
+		state.currentDatabase = requestedDB
+		result.Database = requestedDB
+		log.Info("Binary auth success",
+			"remote_addr", remoteAddr,
+			"user", authMsg.Username,
+			"database", requestedDB)
 	}
 
 	data, _ := result.Encode()
@@ -364,7 +433,7 @@ func (h *BinaryHandler) handleAuth(w *bufio.Writer, payload []byte, remoteAddr s
 }
 
 // handleQuery handles query messages.
-func (h *BinaryHandler) handleQuery(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+func (h *BinaryHandler) handleQuery(w *bufio.Writer, payload []byte, remoteAddr string, state *connectionState) bool {
 	queryMsg, err := DecodeQueryMessage(payload)
 	if err != nil {
 		log.Debug("Invalid query message", "remote_addr", remoteAddr, "error", err)
@@ -372,12 +441,28 @@ func (h *BinaryHandler) handleQuery(w *bufio.Writer, payload []byte, remoteAddr 
 		return false
 	}
 
-	log.Debug("Executing binary query", "remote_addr", remoteAddr)
-	result, err := h.executor.Execute(queryMsg.Query)
+	log.Debug("Executing binary query", "remote_addr", remoteAddr, "database", state.currentDatabase)
+
+	// Use database-aware executor if available, otherwise fall back to default
+	var result string
+	if dbExec, ok := h.executor.(DatabaseAwareQueryExecutor); ok {
+		result, err = dbExec.ExecuteInDatabase(queryMsg.Query, state.currentDatabase)
+	} else {
+		result, err = h.executor.Execute(queryMsg.Query)
+	}
+
 	if err != nil {
 		log.Debug("Binary query error", "remote_addr", remoteAddr, "error", err)
 		h.sendError(w, 500, err.Error())
 		return false
+	}
+
+	// Check if this was a USE statement and update connection state
+	// Result format: "USE <database> OK"
+	if strings.HasPrefix(result, "USE ") && strings.HasSuffix(result, " OK") {
+		dbName := strings.TrimSuffix(strings.TrimPrefix(result, "USE "), " OK")
+		state.currentDatabase = dbName
+		log.Debug("Database changed via USE statement", "remote_addr", remoteAddr, "database", dbName)
 	}
 
 	log.Debug("Binary query success", "remote_addr", remoteAddr)
@@ -923,3 +1008,119 @@ func (h *BinaryHandler) handleGetServerInfo(w *bufio.Writer, remoteAddr string) 
 	return true
 }
 
+// handleUseDatabase handles database selection requests from ODBC/JDBC drivers.
+func (h *BinaryHandler) handleUseDatabase(w *bufio.Writer, payload []byte, remoteAddr string, state *connectionState) bool {
+	msg, err := DecodeUseDatabaseMessage(payload)
+	if err != nil {
+		log.Debug("Invalid use database message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid use database message")
+		return false
+	}
+
+	result := &DatabaseResultMessage{
+		Success: true,
+	}
+
+	database := msg.Database
+	if database == "" {
+		database = "default"
+	}
+
+	// Validate database exists if database manager is available
+	if h.dbMgr != nil && database != "default" {
+		if !h.dbMgr.DatabaseExists(database) {
+			result.Success = false
+			result.Message = "database '" + database + "' does not exist"
+			log.Debug("Use database failed - not found",
+				"remote_addr", remoteAddr,
+				"database", database)
+			data, _ := result.Encode()
+			WriteMessage(w, MsgDatabaseResult, data)
+			w.Flush()
+			return false
+		}
+	}
+
+	// Update connection state
+	state.currentDatabase = database
+	result.Database = database
+	result.Message = "database changed"
+
+	log.Debug("Database changed",
+		"remote_addr", remoteAddr,
+		"database", database)
+
+	data, _ := result.Encode()
+	WriteMessage(w, MsgDatabaseResult, data)
+	w.Flush()
+	return true
+}
+
+// handleGetDatabases handles requests to list available databases.
+func (h *BinaryHandler) handleGetDatabases(w *bufio.Writer, payload []byte, remoteAddr string) bool {
+	msg, err := DecodeGetDatabasesMessage(payload)
+	if err != nil {
+		log.Debug("Invalid get databases message", "remote_addr", remoteAddr, "error", err)
+		h.sendError(w, 400, "invalid get databases message")
+		return false
+	}
+
+	result := &DatabaseResultMessage{
+		Success:   true,
+		Databases: []string{"default"},
+	}
+
+	// Get database list from database manager if available
+	if h.dbMgr != nil {
+		databases := h.dbMgr.ListDatabases()
+		if len(databases) > 0 {
+			// Filter by pattern if provided
+			if msg.Pattern != "" {
+				filtered := make([]string, 0)
+				for _, db := range databases {
+					if matchPattern(db, msg.Pattern) {
+						filtered = append(filtered, db)
+					}
+				}
+				result.Databases = filtered
+			} else {
+				result.Databases = databases
+			}
+		}
+	}
+
+	log.Debug("Get databases",
+		"remote_addr", remoteAddr,
+		"count", len(result.Databases))
+
+	data, _ := result.Encode()
+	WriteMessage(w, MsgDatabaseResult, data)
+	w.Flush()
+	return true
+}
+
+// matchPattern matches a string against a SQL-like pattern with % wildcards.
+func matchPattern(s, pattern string) bool {
+	if pattern == "" || pattern == "%" {
+		return true
+	}
+
+	// Simple pattern matching - convert SQL pattern to basic matching
+	// This handles common cases like "prefix%", "%suffix", and "%contains%"
+	if pattern[0] == '%' && pattern[len(pattern)-1] == '%' {
+		// Contains match
+		substr := pattern[1 : len(pattern)-1]
+		return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+	} else if pattern[0] == '%' {
+		// Suffix match
+		suffix := pattern[1:]
+		return strings.HasSuffix(strings.ToLower(s), strings.ToLower(suffix))
+	} else if pattern[len(pattern)-1] == '%' {
+		// Prefix match
+		prefix := pattern[:len(pattern)-1]
+		return strings.HasPrefix(strings.ToLower(s), strings.ToLower(prefix))
+	}
+
+	// Exact match (case-insensitive)
+	return strings.EqualFold(s, pattern)
+}

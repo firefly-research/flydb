@@ -403,3 +403,68 @@ func DecodeEnhancedQueryResultMessage(data []byte) (*EnhancedQueryResultMessage,
 	return &m, nil
 }
 
+// ============================================================================
+// Database Selection Messages (ODBC/JDBC SDK Support)
+// ============================================================================
+
+// UseDatabaseMessage requests switching to a different database.
+// This is the protocol-level equivalent of the SQL "USE <database>" command.
+type UseDatabaseMessage struct {
+	Database string `json:"database"` // Name of the database to switch to
+}
+
+// Encode encodes the message to bytes.
+func (m *UseDatabaseMessage) Encode() ([]byte, error) {
+	return json.Marshal(m)
+}
+
+// DecodeUseDatabaseMessage decodes a use database message.
+func DecodeUseDatabaseMessage(data []byte) (*UseDatabaseMessage, error) {
+	var m UseDatabaseMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// GetDatabasesMessage requests a list of available databases.
+// This is used by ODBC/JDBC drivers for catalog enumeration.
+type GetDatabasesMessage struct {
+	Pattern string `json:"pattern,omitempty"` // Optional pattern for filtering (supports % wildcards)
+}
+
+// Encode encodes the message to bytes.
+func (m *GetDatabasesMessage) Encode() ([]byte, error) {
+	return json.Marshal(m)
+}
+
+// DecodeGetDatabasesMessage decodes a get databases message.
+func DecodeGetDatabasesMessage(data []byte) (*GetDatabasesMessage, error) {
+	var m GetDatabasesMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}
+
+// DatabaseResultMessage is the response for database operations.
+type DatabaseResultMessage struct {
+	Success   bool     `json:"success"`
+	Database  string   `json:"database,omitempty"`  // Current database (for USE)
+	Databases []string `json:"databases,omitempty"` // List of databases (for GET_DATABASES)
+	Message   string   `json:"message,omitempty"`
+}
+
+// Encode encodes the message to bytes.
+func (m *DatabaseResultMessage) Encode() ([]byte, error) {
+	return json.Marshal(m)
+}
+
+// DecodeDatabaseResultMessage decodes a database result message.
+func DecodeDatabaseResultMessage(data []byte) (*DatabaseResultMessage, error) {
+	var m DatabaseResultMessage
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
+}

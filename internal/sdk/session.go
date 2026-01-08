@@ -334,3 +334,263 @@ type SessionInfo struct {
 	IsolationLevel  IsolationLevel
 }
 
+// SetDatabase changes the current database for the session.
+// This is used by ODBC/JDBC drivers to switch databases.
+func (s *Session) SetDatabase(database string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Database = database
+	s.LastActivityAt = time.Now()
+}
+
+// GetDatabase returns the current database for the session.
+func (s *Session) GetDatabase() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Database
+}
+
+// ConnectionConfig represents connection configuration for ODBC/JDBC drivers.
+type ConnectionConfig struct {
+	// Host is the server hostname or IP address.
+	Host string
+	// Port is the server port number.
+	Port int
+	// Username is the authentication username.
+	Username string
+	// Password is the authentication password.
+	Password string
+	// Database is the initial database to connect to (default: "default").
+	Database string
+	// ConnectTimeout is the connection timeout in seconds.
+	ConnectTimeout int
+	// ReadTimeout is the read timeout in seconds.
+	ReadTimeout int
+	// WriteTimeout is the write timeout in seconds.
+	WriteTimeout int
+	// AutoCommit sets the initial auto-commit mode.
+	AutoCommit bool
+	// IsolationLevel sets the initial transaction isolation level.
+	IsolationLevel IsolationLevel
+	// ReadOnly sets the initial read-only mode.
+	ReadOnly bool
+	// ApplicationName identifies the client application.
+	ApplicationName string
+	// ClientInfo provides additional client information.
+	ClientInfo map[string]string
+}
+
+// NewConnectionConfig creates a new connection configuration with defaults.
+func NewConnectionConfig() *ConnectionConfig {
+	return &ConnectionConfig{
+		Host:           "localhost",
+		Port:           5433,
+		Database:       "default",
+		ConnectTimeout: 30,
+		ReadTimeout:    0, // No timeout
+		WriteTimeout:   0, // No timeout
+		AutoCommit:     true,
+		IsolationLevel: IsolationReadCommitted,
+		ReadOnly:       false,
+		ClientInfo:     make(map[string]string),
+	}
+}
+
+// ParseConnectionString parses an ODBC/JDBC connection string into a ConnectionConfig.
+// Supported formats:
+//   - ODBC: "Driver={FlyDB};Server=host;Port=5433;Database=mydb;Uid=user;Pwd=pass"
+//   - JDBC: "jdbc:flydb://host:5433/mydb?user=user&password=pass"
+func ParseConnectionString(connStr string) (*ConnectionConfig, error) {
+	config := NewConnectionConfig()
+
+	// Check for JDBC URL format
+	if len(connStr) > 5 && connStr[:5] == "jdbc:" {
+		return parseJDBCConnectionString(connStr, config)
+	}
+
+	// Parse ODBC-style connection string
+	return parseODBCConnectionString(connStr, config)
+}
+
+// parseODBCConnectionString parses an ODBC-style connection string.
+func parseODBCConnectionString(connStr string, config *ConnectionConfig) (*ConnectionConfig, error) {
+	// Split by semicolon
+	parts := splitConnectionString(connStr, ';')
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		kv := splitConnectionString(part, '=')
+		if len(kv) != 2 {
+			continue
+		}
+		key := toLower(trim(kv[0]))
+		value := trim(kv[1])
+
+		switch key {
+		case "server", "host", "data source":
+			config.Host = value
+		case "port":
+			config.Port = parseInt(value, 5433)
+		case "database", "initial catalog":
+			config.Database = value
+		case "uid", "user id", "user":
+			config.Username = value
+		case "pwd", "password":
+			config.Password = value
+		case "connect timeout", "connection timeout":
+			config.ConnectTimeout = parseInt(value, 30)
+		case "application name", "app":
+			config.ApplicationName = value
+		case "readonly", "read only":
+			config.ReadOnly = parseBool(value)
+		case "autocommit", "auto commit":
+			config.AutoCommit = parseBool(value)
+		}
+	}
+	return config, nil
+}
+
+// parseJDBCConnectionString parses a JDBC-style connection string.
+func parseJDBCConnectionString(connStr string, config *ConnectionConfig) (*ConnectionConfig, error) {
+	// Format: jdbc:flydb://host:port/database?params
+	// Remove "jdbc:flydb://" prefix
+	if len(connStr) < 13 {
+		return config, nil
+	}
+	rest := connStr[13:] // Skip "jdbc:flydb://"
+
+	// Split host:port/database from params
+	queryIdx := indexOf(rest, '?')
+	var hostPart, paramPart string
+	if queryIdx >= 0 {
+		hostPart = rest[:queryIdx]
+		paramPart = rest[queryIdx+1:]
+	} else {
+		hostPart = rest
+	}
+
+	// Parse host:port/database
+	slashIdx := indexOf(hostPart, '/')
+	var hostPort, database string
+	if slashIdx >= 0 {
+		hostPort = hostPart[:slashIdx]
+		database = hostPart[slashIdx+1:]
+	} else {
+		hostPort = hostPart
+	}
+
+	// Parse host:port
+	colonIdx := indexOf(hostPort, ':')
+	if colonIdx >= 0 {
+		config.Host = hostPort[:colonIdx]
+		config.Port = parseInt(hostPort[colonIdx+1:], 5433)
+	} else {
+		config.Host = hostPort
+	}
+
+	if database != "" {
+		config.Database = database
+	}
+
+	// Parse query parameters
+	if paramPart != "" {
+		params := splitConnectionString(paramPart, '&')
+		for _, param := range params {
+			kv := splitConnectionString(param, '=')
+			if len(kv) != 2 {
+				continue
+			}
+			key := toLower(kv[0])
+			value := kv[1]
+
+			switch key {
+			case "user":
+				config.Username = value
+			case "password":
+				config.Password = value
+			case "database":
+				config.Database = value
+			case "connecttimeout":
+				config.ConnectTimeout = parseInt(value, 30)
+			case "applicationname":
+				config.ApplicationName = value
+			case "readonly":
+				config.ReadOnly = parseBool(value)
+			case "autocommit":
+				config.AutoCommit = parseBool(value)
+			}
+		}
+	}
+
+	return config, nil
+}
+
+// Helper functions for connection string parsing
+
+func splitConnectionString(s string, sep byte) []string {
+	var result []string
+	start := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == sep {
+			result = append(result, s[start:i])
+			start = i + 1
+		}
+	}
+	result = append(result, s[start:])
+	return result
+}
+
+func indexOf(s string, c byte) int {
+	for i := 0; i < len(s); i++ {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
+}
+
+func trim(s string) string {
+	start := 0
+	end := len(s)
+	for start < end && (s[start] == ' ' || s[start] == '\t') {
+		start++
+	}
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t') {
+		end--
+	}
+	return s[start:end]
+}
+
+func toLower(s string) string {
+	b := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b[i] = c
+	}
+	return string(b)
+}
+
+func parseInt(s string, defaultVal int) int {
+	result := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' {
+			result = result*10 + int(c-'0')
+		} else {
+			return defaultVal
+		}
+	}
+	if result == 0 && s != "0" {
+		return defaultVal
+	}
+	return result
+}
+
+func parseBool(s string) bool {
+	s = toLower(s)
+	return s == "true" || s == "1" || s == "yes" || s == "on"
+}

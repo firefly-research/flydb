@@ -88,22 +88,74 @@ func TestErrorMessageEncodeDecode(t *testing.T) {
 
 func TestAuthMessageEncodeDecode(t *testing.T) {
 	original := &AuthMessage{Username: "admin", Password: "secret"}
-	
+
 	encoded, err := original.Encode()
 	if err != nil {
 		t.Fatalf("Encode failed: %v", err)
 	}
-	
+
 	decoded, err := DecodeAuthMessage(encoded)
 	if err != nil {
 		t.Fatalf("Decode failed: %v", err)
 	}
-	
+
 	if decoded.Username != original.Username {
 		t.Errorf("Username mismatch")
 	}
 	if decoded.Password != original.Password {
 		t.Errorf("Password mismatch")
+	}
+}
+
+func TestAuthMessageWithDatabaseEncodeDecode(t *testing.T) {
+	original := &AuthMessage{Username: "admin", Password: "secret", Database: "mydb"}
+
+	encoded, err := original.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := DecodeAuthMessage(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Username != original.Username {
+		t.Errorf("Username mismatch: expected '%s', got '%s'", original.Username, decoded.Username)
+	}
+	if decoded.Password != original.Password {
+		t.Errorf("Password mismatch")
+	}
+	if decoded.Database != original.Database {
+		t.Errorf("Database mismatch: expected '%s', got '%s'", original.Database, decoded.Database)
+	}
+}
+
+func TestAuthResultMessageEncodeDecode(t *testing.T) {
+	original := &AuthResultMessage{
+		Success:  true,
+		Message:  "Authentication successful",
+		Database: "testdb",
+	}
+
+	encoded, err := original.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := DecodeAuthResultMessage(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Success != original.Success {
+		t.Errorf("Success mismatch")
+	}
+	if decoded.Message != original.Message {
+		t.Errorf("Message mismatch: expected '%s', got '%s'", original.Message, decoded.Message)
+	}
+	if decoded.Database != original.Database {
+		t.Errorf("Database mismatch: expected '%s', got '%s'", original.Database, decoded.Database)
 	}
 }
 
@@ -379,3 +431,109 @@ func TestEnhancedQueryResultMessageEncodeDecode(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// Database Selection Message Tests for ODBC/JDBC driver support
+// ============================================================================
+
+func TestUseDatabaseMessageEncodeDecode(t *testing.T) {
+	original := &UseDatabaseMessage{
+		Database: "production_db",
+	}
+
+	encoded, err := original.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := DecodeUseDatabaseMessage(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Database != original.Database {
+		t.Errorf("Database mismatch: expected '%s', got '%s'", original.Database, decoded.Database)
+	}
+}
+
+func TestGetDatabasesMessageEncodeDecode(t *testing.T) {
+	original := &GetDatabasesMessage{
+		Pattern: "test%",
+	}
+
+	encoded, err := original.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := DecodeGetDatabasesMessage(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Pattern != original.Pattern {
+		t.Errorf("Pattern mismatch: expected '%s', got '%s'", original.Pattern, decoded.Pattern)
+	}
+}
+
+func TestDatabaseResultMessageEncodeDecode(t *testing.T) {
+	original := &DatabaseResultMessage{
+		Success:   true,
+		Database:  "mydb",
+		Databases: []string{"default", "mydb", "testdb"},
+		Message:   "Database changed successfully",
+	}
+
+	encoded, err := original.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := DecodeDatabaseResultMessage(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Success != original.Success {
+		t.Errorf("Success mismatch")
+	}
+	if decoded.Database != original.Database {
+		t.Errorf("Database mismatch: expected '%s', got '%s'", original.Database, decoded.Database)
+	}
+	if len(decoded.Databases) != len(original.Databases) {
+		t.Errorf("Databases length mismatch: expected %d, got %d", len(original.Databases), len(decoded.Databases))
+	}
+	for i, db := range original.Databases {
+		if decoded.Databases[i] != db {
+			t.Errorf("Database[%d] mismatch: expected '%s', got '%s'", i, db, decoded.Databases[i])
+		}
+	}
+	if decoded.Message != original.Message {
+		t.Errorf("Message mismatch: expected '%s', got '%s'", original.Message, decoded.Message)
+	}
+}
+
+func TestDatabaseResultMessageEmptyDatabases(t *testing.T) {
+	original := &DatabaseResultMessage{
+		Success:   true,
+		Database:  "default",
+		Databases: []string{},
+		Message:   "",
+	}
+
+	encoded, err := original.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := DecodeDatabaseResultMessage(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Success != original.Success {
+		t.Errorf("Success mismatch")
+	}
+	if len(decoded.Databases) != 0 {
+		t.Errorf("Expected empty Databases, got %d items", len(decoded.Databases))
+	}
+}
