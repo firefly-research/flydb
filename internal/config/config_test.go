@@ -37,8 +37,12 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Role != "standalone" {
 		t.Errorf("Expected default role 'standalone', got '%s'", cfg.Role)
 	}
-	if cfg.DBPath != "flydb.wal" {
-		t.Errorf("Expected default db_path 'flydb.wal', got '%s'", cfg.DBPath)
+	if cfg.DBPath != "flydb.fdb" {
+		t.Errorf("Expected default db_path 'flydb.fdb', got '%s'", cfg.DBPath)
+	}
+	// Encryption is enabled by default for security
+	if cfg.EncryptionEnabled != true {
+		t.Errorf("Expected default encryption_enabled true (security default), got %v", cfg.EncryptionEnabled)
 	}
 	if cfg.LogLevel != "info" {
 		t.Errorf("Expected default log_level 'info', got '%s'", cfg.LogLevel)
@@ -66,7 +70,7 @@ func TestConfigValidation(t *testing.T) {
 				BinaryPort: 8889,
 				ReplPort:   9999,
 				Role:       "master",
-				DBPath:     "test.wal",
+				DBPath:     "test.fdb",
 				LogLevel:   "info",
 			},
 			wantErr: false,
@@ -79,7 +83,7 @@ func TestConfigValidation(t *testing.T) {
 				ReplPort:   9999,
 				Role:       "slave",
 				MasterAddr: "localhost:9999",
-				DBPath:     "test.wal",
+				DBPath:     "test.fdb",
 				LogLevel:   "info",
 			},
 			wantErr: false,
@@ -91,7 +95,7 @@ func TestConfigValidation(t *testing.T) {
 				BinaryPort: 8889,
 				ReplPort:   9999,
 				Role:       "standalone",
-				DBPath:     "test.wal",
+				DBPath:     "test.fdb",
 				LogLevel:   "info",
 			},
 			wantErr: true,
@@ -103,7 +107,7 @@ func TestConfigValidation(t *testing.T) {
 				BinaryPort: 8889,
 				ReplPort:   9999,
 				Role:       "standalone",
-				DBPath:     "test.wal",
+				DBPath:     "test.fdb",
 				LogLevel:   "info",
 			},
 			wantErr: true,
@@ -115,7 +119,7 @@ func TestConfigValidation(t *testing.T) {
 				BinaryPort: 8888,
 				ReplPort:   9999,
 				Role:       "standalone",
-				DBPath:     "test.wal",
+				DBPath:     "test.fdb",
 				LogLevel:   "info",
 			},
 			wantErr: true,
@@ -127,7 +131,7 @@ func TestConfigValidation(t *testing.T) {
 				BinaryPort: 8889,
 				ReplPort:   9999,
 				Role:       "invalid",
-				DBPath:     "test.wal",
+				DBPath:     "test.fdb",
 				LogLevel:   "info",
 			},
 			wantErr: true,
@@ -140,7 +144,7 @@ func TestConfigValidation(t *testing.T) {
 				ReplPort:   9999,
 				Role:       "slave",
 				MasterAddr: "",
-				DBPath:     "test.wal",
+				DBPath:     "test.fdb",
 				LogLevel:   "info",
 			},
 			wantErr: true,
@@ -152,7 +156,7 @@ func TestConfigValidation(t *testing.T) {
 				BinaryPort: 8889,
 				ReplPort:   9999,
 				Role:       "standalone",
-				DBPath:     "test.wal",
+				DBPath:     "test.fdb",
 				LogLevel:   "invalid",
 			},
 			wantErr: true,
@@ -194,7 +198,7 @@ role = "master"
 port = 9000
 binary_port = 9001
 replication_port = 9002
-db_path = "/tmp/test.wal"
+db_path = "/tmp/test.fdb"
 log_level = "debug"
 log_json = true
 master_addr = "localhost:9999"
@@ -224,8 +228,8 @@ master_addr = "localhost:9999"
 	if cfg.ReplPort != 9002 {
 		t.Errorf("Expected replication_port 9002, got %d", cfg.ReplPort)
 	}
-	if cfg.DBPath != "/tmp/test.wal" {
-		t.Errorf("Expected db_path '/tmp/test.wal', got '%s'", cfg.DBPath)
+	if cfg.DBPath != "/tmp/test.fdb" {
+		t.Errorf("Expected db_path '/tmp/test.fdb', got '%s'", cfg.DBPath)
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("Expected log_level 'debug', got '%s'", cfg.LogLevel)
@@ -295,7 +299,7 @@ func TestConfigPrecedence(t *testing.T) {
 	// Config file sets port to 9000
 	configContent := `port = 9000
 role = "standalone"
-db_path = "test.wal"
+db_path = "test.fdb"
 log_level = "info"
 `
 	configPath := filepath.Join(tmpDir, "flydb.conf")
@@ -329,7 +333,7 @@ func TestToTOML(t *testing.T) {
 		ReplPort:   9999,
 		Role:       "master",
 		MasterAddr: "localhost:9999",
-		DBPath:     "/var/lib/flydb/data.wal",
+		DBPath:     "/var/lib/flydb/data.fdb",
 		LogLevel:   "info",
 		LogJSON:    false,
 	}
@@ -346,7 +350,7 @@ func TestToTOML(t *testing.T) {
 	if !contains(toml, "binary_port = 8889") {
 		t.Error("TOML output missing binary_port")
 	}
-	if !contains(toml, "db_path = \"/var/lib/flydb/data.wal\"") {
+	if !contains(toml, "db_path = \"/var/lib/flydb/data.fdb\"") {
 		t.Error("TOML output missing db_path")
 	}
 }
@@ -397,7 +401,7 @@ func TestReload(t *testing.T) {
 	// Initial config
 	configContent := `port = 9000
 role = "standalone"
-db_path = "test.wal"
+db_path = "test.fdb"
 log_level = "info"
 `
 	configPath := filepath.Join(tmpDir, "flydb.conf")
@@ -424,7 +428,7 @@ log_level = "info"
 	// Update config file
 	newContent := `port = 8000
 role = "standalone"
-db_path = "test.wal"
+db_path = "test.fdb"
 log_level = "debug"
 `
 	if err := os.WriteFile(configPath, []byte(newContent), 0644); err != nil {
@@ -490,3 +494,93 @@ func containsHelper(s, substr string) bool {
 	return false
 }
 
+func TestEncryptionConfigFromFile(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "flydb_config_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	configContent := `role = "standalone"
+port = 8888
+binary_port = 8889
+replication_port = 9999
+db_path = "test.fdb"
+encryption_enabled = true
+log_level = "info"
+`
+	configPath := filepath.Join(tmpDir, "flydb.conf")
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		t.Fatalf("Failed to write config file: %v", err)
+	}
+
+	mgr := NewManager()
+	if err := mgr.LoadFromFile(configPath); err != nil {
+		t.Fatalf("LoadFromFile failed: %v", err)
+	}
+
+	cfg := mgr.Get()
+	if !cfg.EncryptionEnabled {
+		t.Error("Expected encryption_enabled true from file, got false")
+	}
+}
+
+func TestEncryptionConfigFromEnv(t *testing.T) {
+	// Save original env vars
+	origEnabled := os.Getenv(EnvEncryptionEnabled)
+	origPassphrase := os.Getenv(EnvEncryptionPassphrase)
+
+	// Restore env vars after test
+	defer func() {
+		os.Setenv(EnvEncryptionEnabled, origEnabled)
+		os.Setenv(EnvEncryptionPassphrase, origPassphrase)
+	}()
+
+	// Set test env vars
+	os.Setenv(EnvEncryptionEnabled, "true")
+	os.Setenv(EnvEncryptionPassphrase, "test-passphrase")
+
+	mgr := NewManager()
+	mgr.LoadFromEnv()
+
+	cfg := mgr.Get()
+
+	if !cfg.EncryptionEnabled {
+		t.Error("Expected encryption_enabled true from env, got false")
+	}
+	if cfg.EncryptionPassphrase != "test-passphrase" {
+		t.Errorf("Expected encryption_passphrase 'test-passphrase' from env, got '%s'", cfg.EncryptionPassphrase)
+	}
+}
+
+func TestEncryptionConfigToTOML(t *testing.T) {
+	cfg := &Config{
+		Port:              8888,
+		BinaryPort:        8889,
+		ReplPort:          9999,
+		Role:              "standalone",
+		DBPath:            "test.fdb",
+		EncryptionEnabled: true,
+		LogLevel:          "info",
+		LogJSON:           false,
+	}
+
+	toml := cfg.ToTOML()
+
+	if !contains(toml, "encryption_enabled = true") {
+		t.Error("TOML output missing encryption_enabled")
+	}
+}
+
+func TestIsEncryptionEnabled(t *testing.T) {
+	cfg := DefaultConfig()
+	// Encryption is now enabled by default
+	if !cfg.IsEncryptionEnabled() {
+		t.Error("Expected IsEncryptionEnabled() to return true for default config (encryption enabled by default)")
+	}
+
+	cfg.EncryptionEnabled = false
+	if cfg.IsEncryptionEnabled() {
+		t.Error("Expected IsEncryptionEnabled() to return false when disabled")
+	}
+}

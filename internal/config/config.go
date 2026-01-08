@@ -33,9 +33,24 @@ Example configuration file:
 	port = 8888
 	binary_port = 8889
 	replication_port = 9999
-	db_path = "/var/lib/flydb/data.wal"
+	db_path = "/var/lib/flydb/data.fdb"
+	data_dir = "/var/lib/flydb"
+	encryption_enabled = true
 	log_level = "info"
 	log_json = false
+
+IMPORTANT - Data-at-Rest Encryption:
+Encryption is ENABLED by default for security. When encryption is enabled, you MUST
+provide a passphrase. There are two ways to set the passphrase:
+ 1. Environment variable: Set FLYDB_ENCRYPTION_PASSPHRASE before starting FlyDB
+ 2. Interactive wizard: Run FlyDB without arguments and enter passphrase when prompted
+To disable encryption, set encryption_enabled = false in your config file.
+
+Migration Note for Existing Users:
+If you are upgrading from a version where encryption was disabled by default,
+you have two options:
+ 1. Enable encryption: Set FLYDB_ENCRYPTION_PASSPHRASE and let FlyDB encrypt new data
+ 2. Disable encryption: Set encryption_enabled = false in your config file
 
 Environment Variables:
   - FLYDB_PORT: Server port for text protocol
@@ -44,6 +59,8 @@ Environment Variables:
   - FLYDB_ROLE: Server role (standalone, master, slave)
   - FLYDB_MASTER_ADDR: Master address for slave mode
   - FLYDB_DB_PATH: Path to database file
+  - FLYDB_ENCRYPTION_ENABLED: Enable data-at-rest encryption (true/false, default: true)
+  - FLYDB_ENCRYPTION_PASSPHRASE: Passphrase for encryption key derivation (REQUIRED when encryption enabled)
   - FLYDB_LOG_LEVEL: Log level (debug, info, warn, error)
   - FLYDB_LOG_JSON: Enable JSON logging (true/false)
   - FLYDB_ADMIN_PASSWORD: Initial admin password (first-time setup only)
@@ -62,17 +79,40 @@ import (
 
 // Environment variable names for configuration.
 const (
-	EnvPort          = "FLYDB_PORT"
-	EnvBinaryPort    = "FLYDB_BINARY_PORT"
-	EnvReplPort      = "FLYDB_REPL_PORT"
-	EnvRole          = "FLYDB_ROLE"
-	EnvMasterAddr    = "FLYDB_MASTER_ADDR"
-	EnvDBPath        = "FLYDB_DB_PATH"
-	EnvLogLevel      = "FLYDB_LOG_LEVEL"
-	EnvLogJSON       = "FLYDB_LOG_JSON"
-	EnvAdminPassword = "FLYDB_ADMIN_PASSWORD"
-	EnvConfigFile    = "FLYDB_CONFIG_FILE"
+	EnvPort                 = "FLYDB_PORT"
+	EnvBinaryPort           = "FLYDB_BINARY_PORT"
+	EnvReplPort             = "FLYDB_REPL_PORT"
+	EnvRole                 = "FLYDB_ROLE"
+	EnvMasterAddr           = "FLYDB_MASTER_ADDR"
+	EnvDBPath               = "FLYDB_DB_PATH"
+	EnvDataDir              = "FLYDB_DATA_DIR"
+	EnvLogLevel             = "FLYDB_LOG_LEVEL"
+	EnvLogJSON              = "FLYDB_LOG_JSON"
+	EnvAdminPassword        = "FLYDB_ADMIN_PASSWORD"
+	EnvConfigFile           = "FLYDB_CONFIG_FILE"
+	EnvEncryptionEnabled    = "FLYDB_ENCRYPTION_ENABLED"
+	EnvEncryptionPassphrase = "FLYDB_ENCRYPTION_PASSPHRASE"
 )
+
+// GetDefaultDataDir returns the default directory for database storage.
+// For root users, it uses /var/lib/flydb (Filesystem Hierarchy Standard).
+// For non-root users, it uses ~/.local/share/flydb (XDG Base Directory).
+func GetDefaultDataDir() string {
+	// Check if running as root
+	if os.Getuid() == 0 {
+		return "/var/lib/flydb"
+	}
+	// Use XDG data directory for non-root users
+	if xdgData := os.Getenv("XDG_DATA_HOME"); xdgData != "" {
+		return filepath.Join(xdgData, "flydb")
+	}
+	// Fall back to ~/.local/share/flydb
+	if home := os.Getenv("HOME"); home != "" {
+		return filepath.Join(home, ".local", "share", "flydb")
+	}
+	// Last resort: current directory
+	return "./data"
+}
 
 // Default configuration file paths (searched in order).
 var DefaultConfigPaths = []string{
@@ -91,7 +131,18 @@ type Config struct {
 	MasterAddr string `toml:"master_addr" json:"master_addr"`
 
 	// Storage configuration
-	DBPath string `toml:"db_path" json:"db_path"`
+	DBPath  string `toml:"db_path" json:"db_path"`
+	DataDir string `toml:"data_dir" json:"data_dir"` // Directory for multi-database storage
+
+	// Multi-database configuration
+	DefaultDatabase  string `toml:"default_database" json:"default_database"`   // Default database for new connections
+	DefaultEncoding  string `toml:"default_encoding" json:"default_encoding"`   // Default encoding for new databases
+	DefaultLocale    string `toml:"default_locale" json:"default_locale"`       // Default locale for new databases
+	DefaultCollation string `toml:"default_collation" json:"default_collation"` // Default collation for new databases
+
+	// Encryption configuration for data at rest
+	EncryptionEnabled    bool   `toml:"encryption_enabled" json:"encryption_enabled"`
+	EncryptionPassphrase string `toml:"-" json:"-"` // Not persisted to file for security
 
 	// Logging configuration
 	LogLevel string `toml:"log_level" json:"log_level"`
@@ -105,16 +156,26 @@ type Config struct {
 }
 
 // DefaultConfig returns a Config with sensible default values.
+// Note: Encryption is enabled by default for security. Users must provide a passphrase
+// via the FLYDB_ENCRYPTION_PASSPHRASE environment variable, or explicitly disable
+// encryption by setting encryption_enabled = false in the config file.
 func DefaultConfig() *Config {
 	return &Config{
-		Port:       8888,
-		BinaryPort: 8889,
-		ReplPort:   9999,
-		Role:       "standalone",
-		MasterAddr: "",
-		DBPath:     "flydb.wal",
-		LogLevel:   "info",
-		LogJSON:    false,
+		Port:                 8888,
+		BinaryPort:           8889,
+		ReplPort:             9999,
+		Role:                 "standalone",
+		MasterAddr:           "",
+		DBPath:               "flydb.fdb",
+		DataDir:              GetDefaultDataDir(),
+		DefaultDatabase:      "default",
+		DefaultEncoding:      "UTF8",
+		DefaultLocale:        "en_US",
+		DefaultCollation:     "default",
+		EncryptionEnabled:    true, // Encryption enabled by default for security
+		EncryptionPassphrase: "",
+		LogLevel:             "info",
+		LogJSON:              false,
 	}
 }
 
@@ -228,6 +289,12 @@ func (c *Config) Validate() error {
 		errs = append(errs, "db_path cannot be empty")
 	}
 
+	// Note: Encryption passphrase validation is intentionally NOT done here.
+	// The passphrase check is done at startup in main.go to provide a more
+	// user-friendly error message with guidance on how to fix the issue.
+	// This allows the config to be valid for display/save purposes even
+	// without a passphrase set.
+
 	if len(errs) > 0 {
 		return fmt.Errorf("configuration validation failed:\n  - %s", strings.Join(errs, "\n  - "))
 	}
@@ -284,6 +351,9 @@ func (m *Manager) LoadFromEnv() {
 	if v := os.Getenv(EnvDBPath); v != "" {
 		cfg.DBPath = v
 	}
+	if v := os.Getenv(EnvDataDir); v != "" {
+		cfg.DataDir = v
+	}
 	if v := os.Getenv(EnvLogLevel); v != "" {
 		cfg.LogLevel = v
 	}
@@ -292,6 +362,12 @@ func (m *Manager) LoadFromEnv() {
 	}
 	if v := os.Getenv(EnvAdminPassword); v != "" {
 		cfg.AdminPassword = v
+	}
+	if v := os.Getenv(EnvEncryptionEnabled); v != "" {
+		cfg.EncryptionEnabled = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvEncryptionPassphrase); v != "" {
+		cfg.EncryptionPassphrase = v
 	}
 
 	m.Set(cfg)
@@ -438,6 +514,8 @@ func applyConfigValue(cfg *Config, key, value string) error {
 		cfg.LogLevel = value
 	case "log_json":
 		cfg.LogJSON = strings.ToLower(value) == "true" || value == "1"
+	case "encryption_enabled":
+		cfg.EncryptionEnabled = strings.ToLower(value) == "true" || value == "1"
 	default:
 		// Ignore unknown keys for forward compatibility
 	}
@@ -457,12 +535,18 @@ func (c *Config) String() string {
 		sb.WriteString(fmt.Sprintf("  Master Address:   %s\n", c.MasterAddr))
 	}
 	sb.WriteString(fmt.Sprintf("  DB Path:          %s\n", c.DBPath))
+	sb.WriteString(fmt.Sprintf("  Encryption:       %v\n", c.EncryptionEnabled))
 	sb.WriteString(fmt.Sprintf("  Log Level:        %s\n", c.LogLevel))
 	sb.WriteString(fmt.Sprintf("  Log JSON:         %v\n", c.LogJSON))
 	if c.ConfigFile != "" {
 		sb.WriteString(fmt.Sprintf("  Config File:      %s\n", c.ConfigFile))
 	}
 	return sb.String()
+}
+
+// IsEncryptionEnabled returns true if data-at-rest encryption is enabled.
+func (c *Config) IsEncryptionEnabled() bool {
+	return c.EncryptionEnabled
 }
 
 // ToTOML returns the configuration as a TOML string.
@@ -482,6 +566,11 @@ func (c *Config) ToTOML() string {
 	}
 	sb.WriteString(fmt.Sprintf("# Storage\n"))
 	sb.WriteString(fmt.Sprintf("db_path = \"%s\"\n\n", c.DBPath))
+	sb.WriteString(fmt.Sprintf("# Data-at-rest encryption (ENABLED BY DEFAULT for security)\n"))
+	sb.WriteString(fmt.Sprintf("# When enabled, you MUST set FLYDB_ENCRYPTION_PASSPHRASE environment variable\n"))
+	sb.WriteString(fmt.Sprintf("# To disable encryption, set encryption_enabled = false\n"))
+	sb.WriteString(fmt.Sprintf("# WARNING: Keep your passphrase safe - data cannot be recovered without it!\n"))
+	sb.WriteString(fmt.Sprintf("encryption_enabled = %v\n\n", c.EncryptionEnabled))
 	sb.WriteString(fmt.Sprintf("# Logging\n"))
 	sb.WriteString(fmt.Sprintf("log_level = \"%s\"\n", c.LogLevel))
 	sb.WriteString(fmt.Sprintf("log_json = %v\n", c.LogJSON))

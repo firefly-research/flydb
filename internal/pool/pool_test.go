@@ -36,6 +36,9 @@ func TestDefaultConfig(t *testing.T) {
 	if config.IdleTimeout != 5*time.Minute {
 		t.Errorf("Expected IdleTimeout 5m, got %v", config.IdleTimeout)
 	}
+	if config.Database != "default" {
+		t.Errorf("Expected Database 'default', got '%s'", config.Database)
+	}
 }
 
 func TestPoolConfigValidation(t *testing.T) {
@@ -86,6 +89,33 @@ func TestPoolStats(t *testing.T) {
 	}
 }
 
+func TestConfigWithDatabase(t *testing.T) {
+	config := Config{
+		Address:  "localhost:8888",
+		MinConns: 1,
+		MaxConns: 5,
+		Database: "mydb",
+	}
+
+	if config.Database != "mydb" {
+		t.Errorf("Expected Database 'mydb', got '%s'", config.Database)
+	}
+}
+
+func TestConfigDatabaseDefault(t *testing.T) {
+	// Test that empty database defaults to "default" in DefaultConfig
+	config := DefaultConfig("localhost:8888")
+
+	if config.Database != "default" {
+		t.Errorf("Expected default Database 'default', got '%s'", config.Database)
+	}
+
+	// Test custom database
+	config.Database = "production"
+	if config.Database != "production" {
+		t.Errorf("Expected Database 'production', got '%s'", config.Database)
+	}
+}
+
 // Note: Full integration tests for the pool would require a running server.
 // These unit tests verify the configuration and struct behavior.
-

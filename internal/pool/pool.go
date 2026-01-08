@@ -97,6 +97,10 @@ type Config struct {
 	Username string
 	Password string
 
+	// Database is the initial database to connect to.
+	// If empty, defaults to "default".
+	Database string
+
 	// TLSConfig is the TLS configuration for encrypted connections.
 	// If nil, connections are unencrypted.
 	TLSConfig *tls.Config
@@ -110,6 +114,7 @@ func DefaultConfig(address string) Config {
 		MaxConns:       10,
 		IdleTimeout:    5 * time.Minute,
 		ConnectTimeout: 10 * time.Second,
+		Database:       "default",
 	}
 }
 
@@ -121,6 +126,7 @@ type PooledConn struct {
 	pool       *Pool
 	inUse      bool
 	createdAt  time.Time
+	database   string // Current database for this connection
 }
 
 // Send sends a command to the server and returns the response.
@@ -164,6 +170,36 @@ func (pc *PooledConn) Ping() error {
 // Use this instead of closing the underlying connection directly.
 func (pc *PooledConn) Close() {
 	pc.pool.Put(pc)
+}
+
+// UseDatabase switches the connection to a different database.
+// This sends the USE <database> command to the server.
+func (pc *PooledConn) UseDatabase(database string) error {
+	if database == "" {
+		database = "default"
+	}
+
+	response, err := pc.Send("USE " + database)
+	if err != nil {
+		return err
+	}
+
+	// Check for success response
+	if len(response) >= 2 && response[:2] == "OK" {
+		pc.database = database
+		log.Debug("Database changed", "database", database)
+		return nil
+	}
+
+	return errors.New("failed to change database: " + response)
+}
+
+// GetDatabase returns the current database for this connection.
+func (pc *PooledConn) GetDatabase() string {
+	if pc.database == "" {
+		return "default"
+	}
+	return pc.database
 }
 
 // Pool manages a pool of connections to a FlyDB server.
@@ -289,6 +325,7 @@ func (p *Pool) createConn() (*PooledConn, error) {
 		lastUsed:  time.Now(),
 		pool:      p,
 		createdAt: time.Now(),
+		database:  "default",
 	}
 
 	// Authenticate if credentials are provided
@@ -314,10 +351,25 @@ func (p *Pool) createConn() (*PooledConn, error) {
 		log.Debug("Connection authenticated successfully", "username", p.config.Username)
 	}
 
+	// Switch to configured database if not default
+	if p.config.Database != "" && p.config.Database != "default" {
+		log.Debug("Switching to configured database", "database", p.config.Database)
+		if err := pc.UseDatabase(p.config.Database); err != nil {
+			log.Warn("Failed to switch to configured database",
+				"database", p.config.Database,
+				"error", err,
+			)
+			conn.Close()
+			return nil, fmt.Errorf("failed to switch to database %s: %w", p.config.Database, err)
+		}
+		log.Debug("Switched to configured database", "database", p.config.Database)
+	}
+
 	p.numOpen++
 	log.Info("New connection added to pool",
 		"total_open", p.numOpen,
 		"max_conns", p.config.MaxConns,
+		"database", pc.database,
 	)
 	return pc, nil
 }
