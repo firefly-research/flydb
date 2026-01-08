@@ -89,6 +89,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flydb/internal/auth"
+	"flydb/internal/banner"
 	"flydb/internal/storage"
 	"fmt"
 	"sort"
@@ -137,6 +138,12 @@ type Executor struct {
 
 	// triggerMgr manages database triggers.
 	triggerMgr *TriggerManager
+
+	// collator provides string comparison based on database collation settings.
+	collator storage.Collator
+
+	// encoder provides encoding validation based on database encoding settings.
+	encoder storage.Encoder
 }
 
 // aggState holds the accumulator state for aggregate function computation.
@@ -166,10 +173,12 @@ func NewExecutor(store storage.Engine, auth *auth.AuthManager) *Executor {
 	kvStore, _ := store.(*storage.KVStore)
 
 	exec := &Executor{
-		store:   store,
-		kvStore: kvStore,
-		catalog: NewCatalog(store),
-		auth:    auth,
+		store:    store,
+		kvStore:  kvStore,
+		catalog:  NewCatalog(store),
+		auth:     auth,
+		collator: storage.GetCollator(storage.CollationDefault, "en_US"),
+		encoder:  storage.GetEncoder(storage.EncodingDefault),
 	}
 
 	// Initialize index manager
@@ -182,6 +191,16 @@ func NewExecutor(store storage.Engine, auth *auth.AuthManager) *Executor {
 	exec.triggerMgr = NewTriggerManager(store)
 
 	return exec
+}
+
+// SetCollation sets the collation for string comparisons.
+func (e *Executor) SetCollation(collation storage.Collation, locale string) {
+	e.collator = storage.GetCollator(collation, locale)
+}
+
+// SetEncoding sets the encoding for data validation.
+func (e *Executor) SetEncoding(encoding storage.CharacterEncoding) {
+	e.encoder = storage.GetEncoder(encoding)
 }
 
 // SetUser sets the current execution context user.
@@ -256,6 +275,41 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 			return "", errors.New("permission denied")
 		}
 		return e.executeRevoke(s)
+
+	case *CreateRoleStmt:
+		// CREATE ROLE requires admin privileges.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeCreateRole(s)
+
+	case *DropRoleStmt:
+		// DROP ROLE requires admin privileges.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeDropRole(s)
+
+	case *GrantRoleStmt:
+		// GRANT role requires admin privileges.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeGrantRole(s)
+
+	case *RevokeRoleStmt:
+		// REVOKE role requires admin privileges.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeRevokeRole(s)
+
+	case *DropUserStmt:
+		// DROP USER requires admin privileges.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeDropUser(s)
 
 	case *AlterUserStmt:
 		// ALTER USER requires admin privileges.
@@ -339,13 +393,13 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 	case *DeallocateStmt:
 		return e.executeDeallocate(s)
 
-	case *IntrospectStmt:
-		// INTROSPECT requires admin privileges for security.
+	case *InspectStmt:
+		// INSPECT requires admin privileges for security.
 		// Only admins can view database metadata.
 		if e.currentUser != "" && e.currentUser != "admin" {
 			return "", errors.New("permission denied")
 		}
-		return e.executeIntrospect(s)
+		return e.executeInspect(s)
 
 	case *UnionStmt:
 		return e.executeUnion(s)
@@ -421,6 +475,26 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 			return "", errors.New("permission denied")
 		}
 		return e.executeTruncateTable(s)
+
+	case *CreateDatabaseStmt:
+		// CREATE DATABASE requires admin privileges.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeCreateDatabase(s)
+
+	case *DropDatabaseStmt:
+		// DROP DATABASE requires admin privileges.
+		if e.currentUser != "" && e.currentUser != "admin" {
+			return "", errors.New("permission denied")
+		}
+		return e.executeDropDatabase(s)
+
+	case *UseDatabaseStmt:
+		// USE DATABASE is handled at the server level, not executor level.
+		// This case returns an error because USE should be intercepted by the server
+		// before reaching the executor.
+		return "", errors.New("USE statement must be handled by the server")
 	}
 
 	return "", errors.New("unknown statement")
@@ -428,22 +502,40 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 
 // checkAccess verifies if the current user has access to the specified table.
 // Admin users and anonymous users (empty username) have full access.
-// Regular users need an explicit GRANT for the table.
+// Regular users need an explicit GRANT or appropriate role for the table.
+//
+// This method uses the RBAC system to check:
+// 1. Direct user privileges (legacy)
+// 2. Role-based privileges
+// 3. Role inheritance
 //
 // Parameters:
 //   - table: The table name to check access for
 //
 // Returns an error if access is denied, nil otherwise.
 func (e *Executor) checkAccess(table string) error {
+	return e.checkAccessWithPrivilege(table, auth.PrivilegeSelect)
+}
+
+// checkAccessWithPrivilege verifies if the current user has a specific privilege on a table.
+// This is the main authorization check that integrates with the RBAC system.
+//
+// Parameters:
+//   - table: The table name to check access for
+//   - privilege: The specific privilege required (SELECT, INSERT, UPDATE, DELETE, etc.)
+//
+// Returns an error if access is denied, nil otherwise.
+func (e *Executor) checkAccessWithPrivilege(table string, privilege auth.PrivilegeType) error {
 	// Admin and anonymous users have full access.
 	if e.currentUser == "" || e.currentUser == "admin" {
 		return nil
 	}
 
-	// Check if the user has been granted access to this table.
-	allowed, _ := e.auth.CheckPermission(e.currentUser, table)
-	if !allowed {
-		return errors.New("permission denied for table " + table)
+	// Use RBAC to check privilege
+	// Note: Database context is managed at the server level, so we use "*" for database-agnostic checks
+	check := e.auth.CheckPrivilege(e.currentUser, privilege, "*", table)
+	if !check.Allowed {
+		return fmt.Errorf("permission denied: %s on table %s", privilege, table)
 	}
 	return nil
 }
@@ -502,6 +594,87 @@ func (e *Executor) executeRevoke(stmt *RevokeStmt) (string, error) {
 		return "", err
 	}
 	return "REVOKE OK", nil
+}
+
+// executeCreateRole handles CREATE ROLE statements.
+// It delegates to the AuthManager to create the role.
+//
+// Parameters:
+//   - stmt: The parsed CREATE ROLE statement
+//
+// Returns "CREATE ROLE OK" on success, or an error.
+func (e *Executor) executeCreateRole(stmt *CreateRoleStmt) (string, error) {
+	err := e.auth.CreateRole(stmt.RoleName, stmt.Description, e.currentUser)
+	if err != nil {
+		return "", err
+	}
+	return "CREATE ROLE OK", nil
+}
+
+// executeDropRole handles DROP ROLE statements.
+// It delegates to the AuthManager to delete the role.
+//
+// Parameters:
+//   - stmt: The parsed DROP ROLE statement
+//
+// Returns "DROP ROLE OK" on success, or an error.
+func (e *Executor) executeDropRole(stmt *DropRoleStmt) (string, error) {
+	err := e.auth.DropRole(stmt.RoleName)
+	if err != nil {
+		if stmt.IfExists {
+			return "DROP ROLE OK", nil
+		}
+		return "", err
+	}
+	return "DROP ROLE OK", nil
+}
+
+// executeGrantRole handles GRANT role TO user statements.
+// It delegates to the AuthManager to assign the role.
+//
+// Parameters:
+//   - stmt: The parsed GRANT role statement
+//
+// Returns "GRANT ROLE OK" on success, or an error.
+func (e *Executor) executeGrantRole(stmt *GrantRoleStmt) (string, error) {
+	err := e.auth.GrantRoleToUser(stmt.Username, stmt.RoleName, stmt.Database, e.currentUser)
+	if err != nil {
+		return "", err
+	}
+	return "GRANT ROLE OK", nil
+}
+
+// executeRevokeRole handles REVOKE role FROM user statements.
+// It delegates to the AuthManager to remove the role assignment.
+//
+// Parameters:
+//   - stmt: The parsed REVOKE role statement
+//
+// Returns "REVOKE ROLE OK" on success, or an error.
+func (e *Executor) executeRevokeRole(stmt *RevokeRoleStmt) (string, error) {
+	err := e.auth.RevokeRoleFromUser(stmt.Username, stmt.RoleName, stmt.Database)
+	if err != nil {
+		return "", err
+	}
+	return "REVOKE ROLE OK", nil
+}
+
+// executeDropUser handles DROP USER statements.
+// It delegates to the AuthManager to delete the user.
+//
+// Parameters:
+//   - stmt: The parsed DROP USER statement
+//
+// Returns "DROP USER OK" on success, or an error.
+func (e *Executor) executeDropUser(stmt *DropUserStmt) (string, error) {
+	err := e.auth.DropUser(stmt.Username)
+	if err != nil {
+		if stmt.IfExists {
+			return "DROP USER OK", nil
+		}
+		return "", err
+	}
+	return "DROP USER OK", nil
 }
 
 // executeAlterUser handles ALTER USER statements.
@@ -744,6 +917,14 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 			if err := ValidateValue(col.Type, value); err != nil {
 				return nil, "", fmt.Errorf("column %s: %v", col.Name, err)
 			}
+
+			// Validate encoding for TEXT/VARCHAR columns
+			if e.encoder != nil && isTextType(col.Type) {
+				if err := e.encoder.Validate(value); err != nil {
+					return nil, "", fmt.Errorf("column %s: encoding error: %v", col.Name, err)
+				}
+			}
+
 			normalized, err := NormalizeValue(col.Type, value)
 			if err != nil {
 				return nil, "", fmt.Errorf("column %s: %v", col.Name, err)
@@ -854,6 +1035,9 @@ func (e *Executor) checkUniqueConstraintsWithConflict(table TableSchema, values 
 
 				if existingVal, ok := row[col.Name]; ok {
 					if fmt.Sprintf("%v", existingVal) == newValue {
+						if col.IsPrimaryKey() {
+							return rowKey, fmt.Errorf("duplicate primary key value for column %s: %s", col.Name, newValue)
+						}
 						return rowKey, fmt.Errorf("duplicate value for unique column %s: %s", col.Name, newValue)
 					}
 				}
@@ -1153,6 +1337,14 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 		if err := ValidateValue(colType, val); err != nil {
 			return "", fmt.Errorf("column %s: %v", col, err)
 		}
+
+		// Validate encoding for TEXT/VARCHAR columns
+		if e.encoder != nil && isTextType(colType) {
+			if err := e.encoder.Validate(val); err != nil {
+				return "", fmt.Errorf("column %s: encoding error: %v", col, err)
+			}
+		}
+
 		normalized, err := NormalizeValue(colType, val)
 		if err != nil {
 			return "", fmt.Errorf("column %s: %v", col, err)
@@ -2458,15 +2650,18 @@ func (e *Executor) evaluateWhereClause(where *WhereClause, row map[string]interf
 
 	switch where.Operator {
 	case "=":
-		return colStr == where.Value
+		// Use collator for string equality comparison
+		return e.stringsEqual(colStr, where.Value)
+	case "<>", "!=":
+		return !e.stringsEqual(colStr, where.Value)
 	case "<":
-		return compareValues(colStr, where.Value) < 0
+		return compareValuesWithCollator(colStr, where.Value, e.collator) < 0
 	case ">":
-		return compareValues(colStr, where.Value) > 0
+		return compareValuesWithCollator(colStr, where.Value, e.collator) > 0
 	case "<=":
-		return compareValues(colStr, where.Value) <= 0
+		return compareValuesWithCollator(colStr, where.Value, e.collator) <= 0
 	case ">=":
-		return compareValues(colStr, where.Value) >= 0
+		return compareValuesWithCollator(colStr, where.Value, e.collator) >= 0
 	case "LIKE", "NOT LIKE":
 		matched := matchLikePattern(colStr, where.Value)
 		if where.Operator == "LIKE" {
@@ -2475,7 +2670,8 @@ func (e *Executor) evaluateWhereClause(where *WhereClause, row map[string]interf
 		return !matched
 	case "BETWEEN":
 		// BETWEEN is inclusive on both ends
-		return compareValues(colStr, where.BetweenLow) >= 0 && compareValues(colStr, where.BetweenHigh) <= 0
+		return compareValuesWithCollator(colStr, where.BetweenLow, e.collator) >= 0 &&
+			compareValuesWithCollator(colStr, where.BetweenHigh, e.collator) <= 0
 	case "IN", "NOT IN":
 		var valuesToCheck []string
 
@@ -2491,10 +2687,10 @@ func (e *Executor) evaluateWhereClause(where *WhereClause, row map[string]interf
 			valuesToCheck = where.Values
 		}
 
-		// Check if the column value is in the list
+		// Check if the column value is in the list using collator
 		found := false
 		for _, v := range valuesToCheck {
-			if colStr == v {
+			if e.stringsEqual(colStr, v) {
 				found = true
 				break
 			}
@@ -2553,7 +2749,13 @@ func matchLikeHelper(str, pattern string, si, pi int) bool {
 }
 
 // compareValues compares two values, trying numeric comparison first.
+// This is a standalone function that uses default string comparison.
 func compareValues(a, b string) int {
+	return compareValuesWithCollator(a, b, nil)
+}
+
+// compareValuesWithCollator compares two values using the provided collator for strings.
+func compareValuesWithCollator(a, b string, collator storage.Collator) int {
 	// Try to compare as integers
 	var ai, bi int
 	_, err1 := fmt.Sscanf(a, "%d", &ai)
@@ -2580,13 +2782,39 @@ func compareValues(a, b string) int {
 		return 0
 	}
 
-	// Fall back to string comparison
+	// Fall back to string comparison using collator
+	if collator != nil {
+		return collator.Compare(a, b)
+	}
+
+	// Default string comparison
 	if a < b {
 		return -1
 	} else if a > b {
 		return 1
 	}
 	return 0
+}
+
+// compareStrings compares two strings using the executor's collator.
+func (e *Executor) compareStrings(a, b string) int {
+	if e.collator != nil {
+		return e.collator.Compare(a, b)
+	}
+	if a < b {
+		return -1
+	} else if a > b {
+		return 1
+	}
+	return 0
+}
+
+// stringsEqual checks if two strings are equal using the executor's collator.
+func (e *Executor) stringsEqual(a, b string) bool {
+	if e.collator != nil {
+		return e.collator.Equal(a, b)
+	}
+	return a == b
 }
 
 // extractSubqueryValues extracts values from a SELECT result.
@@ -3318,7 +3546,7 @@ func (e *Executor) evaluateHaving(having *HavingClause, states map[int]*aggState
 	return false
 }
 
-// executeIntrospect handles INTROSPECT statements for database metadata inspection.
+// executeInspect handles INSPECT statements for database metadata inspection.
 // It returns information about database objects based on the target specified.
 //
 // Supported targets:
@@ -3330,71 +3558,155 @@ func (e *Executor) evaluateHaving(having *HavingClause, states map[int]*aggState
 //   - STATUS: Show overall database status and statistics
 //
 // Parameters:
-//   - stmt: The parsed INTROSPECT statement
+//   - stmt: The parsed INSPECT statement
 //
 // Returns formatted metadata information.
-func (e *Executor) executeIntrospect(stmt *IntrospectStmt) (string, error) {
+func (e *Executor) executeInspect(stmt *InspectStmt) (string, error) {
 	switch stmt.Target {
 	case "USERS":
-		return e.introspectUsers()
+		return e.inspectUsers()
 	case "TABLES":
-		return e.introspectTables()
+		return e.inspectTables()
 	case "TABLE":
-		return e.introspectTable(stmt.ObjectName)
+		return e.inspectTable(stmt.ObjectName)
 	case "INDEXES":
-		return e.introspectIndexes()
+		return e.inspectIndexes()
 	case "SERVER":
-		return e.introspectServer()
+		return e.inspectServer()
 	case "STATUS":
-		return e.introspectStatus()
+		return e.inspectStatus()
+	case "DATABASES":
+		return e.inspectDatabases()
+	case "DATABASE":
+		return e.inspectDatabase(stmt.ObjectName)
+	case "ROLES":
+		return e.inspectRoles()
+	case "ROLE":
+		return e.inspectRole(stmt.ObjectName)
+	case "USER":
+		return e.inspectUser(stmt.ObjectName)
+	case "USER_ROLES":
+		return e.inspectUserRoles(stmt.ObjectName)
+	case "USER_PRIVILEGES":
+		return e.inspectUserPrivileges(stmt.ObjectName)
+	case "PRIVILEGES":
+		return e.inspectPrivileges()
 	default:
-		return "", fmt.Errorf("unknown introspect target: %s", stmt.Target)
+		return "", fmt.Errorf("unknown inspect target: %s", stmt.Target)
 	}
 }
 
-// introspectUsers returns information about all database users.
-func (e *Executor) introspectUsers() (string, error) {
+// inspectUsers returns information about all database users.
+func (e *Executor) inspectUsers() (string, error) {
 	// Scan for all user keys with the _sys_users: prefix
 	users, err := e.store.Scan("_sys_users:")
 	if err != nil {
 		return "", err
 	}
 
-	header := "username"
+	header := "username, role, created_at, last_login"
 	if len(users) == 0 {
 		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
 
-	var results []string
-	for key := range users {
-		// Extract username from key format: _sys_users:<username>
+	// Parse user data to get metadata
+	type userInfo struct {
+		username  string
+		role      string
+		createdAt string
+		lastLogin string
+	}
+	var userInfos []userInfo
+
+	for key, data := range users {
 		username := strings.TrimPrefix(key, "_sys_users:")
-		results = append(results, username)
+		role := "user"
+
+		// Parse user JSON to get metadata
+		var userData struct {
+			IsAdmin   bool   `json:"is_admin"`
+			CreatedAt string `json:"created_at"`
+			LastLogin string `json:"last_login"`
+		}
+		createdAt := "-"
+		lastLogin := "-"
+		if err := json.Unmarshal(data, &userData); err == nil {
+			if userData.IsAdmin {
+				role = "admin"
+			}
+			if userData.CreatedAt != "" {
+				// Parse and format the timestamp
+				if t, err := time.Parse(time.RFC3339, userData.CreatedAt); err == nil {
+					createdAt = t.Format("2006-01-02 15:04:05")
+				} else {
+					createdAt = userData.CreatedAt
+				}
+			}
+			if userData.LastLogin != "" {
+				if t, err := time.Parse(time.RFC3339, userData.LastLogin); err == nil {
+					lastLogin = t.Format("2006-01-02 15:04:05")
+				} else {
+					lastLogin = userData.LastLogin
+				}
+			}
+		} else if username == "admin" {
+			role = "admin"
+		}
+
+		userInfos = append(userInfos, userInfo{
+			username:  username,
+			role:      role,
+			createdAt: createdAt,
+			lastLogin: lastLogin,
+		})
 	}
 
-	// Sort for consistent output
-	sort.Strings(results)
+	// Sort by username for consistent output
+	sort.Slice(userInfos, func(i, j int) bool {
+		return userInfos[i].username < userInfos[j].username
+	})
+
+	var results []string
+	for _, u := range userInfos {
+		results = append(results, fmt.Sprintf("%s, %s, %s, %s", u.username, u.role, u.createdAt, u.lastLogin))
+	}
 
 	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
 }
 
-// introspectServer returns information about the FlyDB server/daemon.
+// inspectServer returns information about the FlyDB server/daemon.
 // Returns plain key-value pairs that the CLI can format.
-func (e *Executor) introspectServer() (string, error) {
+func (e *Executor) inspectServer() (string, error) {
 	var results []string
 
 	results = append(results, "Server: FlyDB Daemon")
-	results = append(results, "Version: 01.26.1")
+	results = append(results, fmt.Sprintf("Version: %s", banner.Version))
 	results = append(results, "Status: Running")
 	results = append(results, "Storage: WAL-backed")
 	results = append(results, "Protocol: Binary + Text")
+	results = append(results, fmt.Sprintf("Tables: %d", len(e.catalog.Tables)))
+
+	// Count indexes
+	indexCount := 0
+	if e.indexMgr != nil {
+		indexCount = len(e.indexMgr.ListIndexes())
+	}
+	results = append(results, fmt.Sprintf("Indexes: %d", indexCount))
+
+	// Count users
+	users, err := e.store.Scan("_sys_users:")
+	userCount := 0
+	if err == nil {
+		userCount = len(users)
+	}
+	results = append(results, fmt.Sprintf("Users: %d", userCount))
 
 	return strings.Join(results, "\n"), nil
 }
 
-// introspectTables returns information about all tables and their schemas.
-func (e *Executor) introspectTables() (string, error) {
-	header := "table_name, schema"
+// inspectTables returns information about all tables and their schemas.
+func (e *Executor) inspectTables() (string, error) {
+	header := "table_name, type, columns, rows, indexes, size, created_at, modified_at"
 	if len(e.catalog.Tables) == 0 {
 		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
@@ -3409,22 +3721,68 @@ func (e *Executor) introspectTables() (string, error) {
 
 	for _, tableName := range tableNames {
 		table := e.catalog.Tables[tableName]
-		// Build column info
-		var colInfos []string
-		for _, col := range table.Columns {
-			colInfos = append(colInfos, fmt.Sprintf("%s %s", col.Name, col.Type))
+		colCount := len(table.Columns)
+
+		// Count rows and calculate size
+		rowPrefix := "row:" + tableName + ":"
+		rows, _ := e.store.Scan(rowPrefix)
+		rowCount := len(rows)
+
+		// Calculate approximate data size
+		var dataSize int64
+		for _, data := range rows {
+			dataSize += int64(len(data))
 		}
-		// Format: table_name, (col1 TYPE, col2 TYPE, ...)
-		result := fmt.Sprintf("%s, (%s)", tableName, strings.Join(colInfos, ", "))
+
+		// Count indexes
+		indexCount := 0
+		if e.indexMgr != nil {
+			indexes := e.indexMgr.GetIndexedColumns(tableName)
+			indexCount = len(indexes)
+		}
+
+		// Format size
+		sizeStr := formatBytes(dataSize)
+
+		// Format timestamps
+		createdAt := "-"
+		modifiedAt := "-"
+		if !table.CreatedAt.IsZero() {
+			createdAt = table.CreatedAt.Format("2006-01-02 15:04:05")
+		}
+		if !table.ModifiedAt.IsZero() {
+			modifiedAt = table.ModifiedAt.Format("2006-01-02 15:04:05")
+		}
+
+		result := fmt.Sprintf("%s, BASE TABLE, %d, %d, %d, %s, %s, %s", tableName, colCount, rowCount, indexCount, sizeStr, createdAt, modifiedAt)
 		results = append(results, result)
 	}
 
 	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
 }
 
-// introspectIndexes returns information about all indexes.
-func (e *Executor) introspectIndexes() (string, error) {
-	header := "index_name"
+// formatBytes formats a byte count into a human-readable string.
+func formatBytes(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+	)
+	switch {
+	case bytes >= GB:
+		return fmt.Sprintf("%.2f GB", float64(bytes)/float64(GB))
+	case bytes >= MB:
+		return fmt.Sprintf("%.2f MB", float64(bytes)/float64(MB))
+	case bytes >= KB:
+		return fmt.Sprintf("%.2f KB", float64(bytes)/float64(KB))
+	default:
+		return fmt.Sprintf("%d B", bytes)
+	}
+}
+
+// inspectIndexes returns information about all indexes.
+func (e *Executor) inspectIndexes() (string, error) {
+	header := "index_name, table_name, column_name, type"
 	if e.indexMgr == nil {
 		return fmt.Sprintf("%s\n(0 rows)", header), nil
 	}
@@ -3436,7 +3794,14 @@ func (e *Executor) introspectIndexes() (string, error) {
 
 	var results []string
 	for _, idx := range indexes {
-		results = append(results, idx)
+		// Index format is "table:column"
+		parts := strings.SplitN(idx, ":", 2)
+		if len(parts) == 2 {
+			tableName := parts[0]
+			columnName := parts[1]
+			indexName := fmt.Sprintf("idx_%s_%s", tableName, columnName)
+			results = append(results, fmt.Sprintf("%s, %s, %s, btree", indexName, tableName, columnName))
+		}
 	}
 
 	// Sort for consistent output
@@ -3445,8 +3810,295 @@ func (e *Executor) introspectIndexes() (string, error) {
 	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
 }
 
-// introspectTable returns detailed information about a specific table.
-func (e *Executor) introspectTable(tableName string) (string, error) {
+// inspectRoles returns information about all roles in the system.
+func (e *Executor) inspectRoles() (string, error) {
+	roles, err := e.auth.ListRoles()
+	if err != nil {
+		return "", err
+	}
+
+	header := "role_name, description, is_built_in, created_at, created_by"
+	if len(roles) == 0 {
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
+	}
+
+	var results []string
+	for _, role := range roles {
+		createdAt := "-"
+		if role.CreatedAt != "" {
+			if t, err := time.Parse(time.RFC3339, role.CreatedAt); err == nil {
+				createdAt = t.Format("2006-01-02 15:04:05")
+			} else {
+				createdAt = role.CreatedAt
+			}
+		}
+		builtIn := "no"
+		if role.IsBuiltIn {
+			builtIn = "yes"
+		}
+		results = append(results, fmt.Sprintf("%s, %s, %s, %s, %s",
+			role.Name, role.Description, builtIn, createdAt, role.CreatedBy))
+	}
+
+	sort.Strings(results)
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
+}
+
+// inspectRole returns detailed information about a specific role.
+func (e *Executor) inspectRole(roleName string) (string, error) {
+	role, err := e.auth.GetRole(roleName)
+	if err != nil {
+		return "", err
+	}
+
+	// Get role privileges
+	privs, err := e.auth.GetRolePrivileges(roleName)
+	if err != nil {
+		return "", err
+	}
+
+	// Get users with this role
+	users, err := e.auth.GetUsersWithRole(roleName)
+	if err != nil {
+		return "", err
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Role: %s\n", role.Name))
+	sb.WriteString(fmt.Sprintf("Description: %s\n", role.Description))
+	sb.WriteString(fmt.Sprintf("Built-in: %v\n", role.IsBuiltIn))
+	sb.WriteString(fmt.Sprintf("Created: %s by %s\n", role.CreatedAt, role.CreatedBy))
+	sb.WriteString("\nPrivileges:\n")
+
+	if len(privs) == 0 {
+		sb.WriteString("  (none)\n")
+	} else {
+		for _, p := range privs {
+			privList := make([]string, len(p.Privileges))
+			for i, priv := range p.Privileges {
+				privList[i] = string(priv)
+			}
+			sb.WriteString(fmt.Sprintf("  %s on %s.%s.%s\n",
+				strings.Join(privList, ", "), p.Database, p.TableName, p.ColumnName))
+		}
+	}
+
+	sb.WriteString("\nAssigned to users:\n")
+	if len(users) == 0 {
+		sb.WriteString("  (none)\n")
+	} else {
+		for _, u := range users {
+			scope := "global"
+			if u.Database != "" && u.Database != "*" {
+				scope = "database: " + u.Database
+			}
+			sb.WriteString(fmt.Sprintf("  %s (%s)\n", u.Username, scope))
+		}
+	}
+
+	return sb.String(), nil
+}
+
+// inspectUser returns detailed information about a specific user.
+func (e *Executor) inspectUser(username string) (string, error) {
+	// Get user data
+	userData, err := e.store.Get("_sys_users:" + username)
+	if err != nil {
+		return "", fmt.Errorf("user not found: %s", username)
+	}
+
+	var user struct {
+		Username  string   `json:"username"`
+		IsAdmin   bool     `json:"is_admin"`
+		DefaultDB string   `json:"default_db"`
+		Databases []string `json:"databases"`
+		Roles     []string `json:"roles"`
+		CreatedAt string   `json:"created_at"`
+		LastLogin string   `json:"last_login"`
+		Status    string   `json:"status"`
+	}
+	if err := json.Unmarshal(userData, &user); err != nil {
+		return "", err
+	}
+
+	// Get user roles from RBAC
+	userRoles, _ := e.auth.GetUserRoles(username)
+
+	// Check if user has admin role (grants access to all databases)
+	hasAdminRole := false
+	for _, r := range userRoles {
+		if r.RoleName == "admin" {
+			hasAdminRole = true
+			break
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Username: %s\n", username))
+	sb.WriteString(fmt.Sprintf("Admin: %v\n", user.IsAdmin))
+	sb.WriteString(fmt.Sprintf("Status: %s\n", user.Status))
+	sb.WriteString(fmt.Sprintf("Default Database: %s\n", user.DefaultDB))
+	sb.WriteString(fmt.Sprintf("Created: %s\n", user.CreatedAt))
+	sb.WriteString(fmt.Sprintf("Last Login: %s\n", user.LastLogin))
+
+	sb.WriteString("\nAssigned Roles:\n")
+	if len(userRoles) == 0 {
+		sb.WriteString("  (none)\n")
+	} else {
+		for _, r := range userRoles {
+			scope := "global"
+			if r.Database != "" && r.Database != "*" {
+				scope = "database: " + r.Database
+			}
+			sb.WriteString(fmt.Sprintf("  %s (%s)\n", r.RoleName, scope))
+		}
+	}
+
+	sb.WriteString("\nEffective Database Access:\n")
+	if hasAdminRole || user.IsAdmin {
+		// Admin users have access to ALL databases through the admin role
+		sb.WriteString("  * (all databases via admin role)\n")
+	} else if len(user.Databases) == 0 {
+		// Check for database-scoped roles
+		dbAccess := make(map[string][]string) // database -> roles
+		for _, r := range userRoles {
+			if r.Database != "" && r.Database != "*" {
+				dbAccess[r.Database] = append(dbAccess[r.Database], r.RoleName)
+			}
+		}
+		if len(dbAccess) == 0 {
+			sb.WriteString("  (none)\n")
+		} else {
+			for db, roles := range dbAccess {
+				sb.WriteString(fmt.Sprintf("  %s (via %s)\n", db, strings.Join(roles, ", ")))
+			}
+		}
+	} else {
+		for _, db := range user.Databases {
+			sb.WriteString(fmt.Sprintf("  %s (direct grant)\n", db))
+		}
+	}
+
+	return sb.String(), nil
+}
+
+// inspectUserRoles returns the roles assigned to a specific user.
+func (e *Executor) inspectUserRoles(username string) (string, error) {
+	// Verify user exists
+	if _, err := e.store.Get("_sys_users:" + username); err != nil {
+		return "", fmt.Errorf("user not found: %s", username)
+	}
+
+	userRoles, err := e.auth.GetUserRoles(username)
+	if err != nil {
+		return "", err
+	}
+
+	header := "role_name, database, granted_at, granted_by"
+	if len(userRoles) == 0 {
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
+	}
+
+	var results []string
+	for _, r := range userRoles {
+		db := r.Database
+		if db == "" || db == "*" {
+			db = "(global)"
+		}
+		grantedAt := "-"
+		if r.GrantedAt != "" {
+			if t, err := time.Parse(time.RFC3339, r.GrantedAt); err == nil {
+				grantedAt = t.Format("2006-01-02 15:04:05")
+			} else {
+				grantedAt = r.GrantedAt
+			}
+		}
+		results = append(results, fmt.Sprintf("%s, %s, %s, %s",
+			r.RoleName, db, grantedAt, r.GrantedBy))
+	}
+
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
+}
+
+// inspectUserPrivileges returns all effective privileges for a user.
+func (e *Executor) inspectUserPrivileges(username string) (string, error) {
+	// Verify user exists
+	if _, err := e.store.Get("_sys_users:" + username); err != nil {
+		return "", fmt.Errorf("user not found: %s", username)
+	}
+
+	// Get user roles
+	userRoles, err := e.auth.GetUserRoles(username)
+	if err != nil {
+		return "", err
+	}
+
+	header := "privilege, object_type, database, table, source"
+	var results []string
+
+	// Collect privileges from all roles
+	for _, ur := range userRoles {
+		privs, err := e.auth.GetRolePrivileges(ur.RoleName)
+		if err != nil {
+			continue
+		}
+		for _, p := range privs {
+			for _, priv := range p.Privileges {
+				results = append(results, fmt.Sprintf("%s, %s, %s, %s, role:%s",
+					priv, p.ObjectType, p.Database, p.TableName, ur.RoleName))
+			}
+		}
+	}
+
+	// Get direct permissions (legacy)
+	directPrivs, _ := e.store.Scan("_sys_privs:" + username + ":")
+	for key := range directPrivs {
+		parts := strings.Split(key, ":")
+		if len(parts) >= 3 {
+			tableName := parts[2]
+			results = append(results, fmt.Sprintf("SELECT, TABLE, *, %s, direct", tableName))
+		}
+	}
+
+	if len(results) == 0 {
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
+	}
+
+	sort.Strings(results)
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
+}
+
+// inspectPrivileges returns all privileges in the system.
+func (e *Executor) inspectPrivileges() (string, error) {
+	// Scan all role privileges
+	privData, err := e.store.Scan("_sys_role_privs:")
+	if err != nil {
+		return "", err
+	}
+
+	header := "role, privilege, object_type, database, table"
+	if len(privData) == 0 {
+		return fmt.Sprintf("%s\n(0 rows)", header), nil
+	}
+
+	var results []string
+	for _, data := range privData {
+		var priv auth.RolePrivilege
+		if err := json.Unmarshal(data, &priv); err != nil {
+			continue
+		}
+		for _, p := range priv.Privileges {
+			results = append(results, fmt.Sprintf("%s, %s, %s, %s, %s",
+				priv.RoleName, p, priv.ObjectType, priv.Database, priv.TableName))
+		}
+	}
+
+	sort.Strings(results)
+	return fmt.Sprintf("%s\n%s\n(%d rows)", header, strings.Join(results, "\n"), len(results)), nil
+}
+
+// inspectTable returns detailed information about a specific table.
+func (e *Executor) inspectTable(tableName string) (string, error) {
 	table, ok := e.catalog.GetTable(tableName)
 	if !ok {
 		return "", fmt.Errorf("table not found: %s", tableName)
@@ -3574,12 +4226,23 @@ func (e *Executor) introspectTable(tableName string) (string, error) {
 	}
 	results = append(results, fmt.Sprintf("Storage size: %d bytes", storageSize))
 
+	// Timestamps
+	if !table.CreatedAt.IsZero() {
+		results = append(results, fmt.Sprintf("Created: %s", table.CreatedAt.Format("2006-01-02 15:04:05")))
+	}
+	if !table.ModifiedAt.IsZero() {
+		results = append(results, fmt.Sprintf("Last modified: %s", table.ModifiedAt.Format("2006-01-02 15:04:05")))
+	}
+	if table.Owner != "" {
+		results = append(results, fmt.Sprintf("Owner: %s", table.Owner))
+	}
+
 	return strings.Join(results, "\n"), nil
 }
 
-// introspectStatus returns comprehensive database status and statistics.
+// inspectStatus returns comprehensive database status and statistics.
 // Returns plain key-value pairs that the CLI can format.
-func (e *Executor) introspectStatus() (string, error) {
+func (e *Executor) inspectStatus() (string, error) {
 	var results []string
 
 	// Table count
@@ -4380,4 +5043,50 @@ func parseDateTime(s string) (time.Time, error) {
 	}
 
 	return time.Time{}, fmt.Errorf("unable to parse date/time: %s", s)
+}
+
+
+// =============================================================================
+// Database Management Execution
+// =============================================================================
+
+// executeCreateDatabase creates a new database.
+// Note: This is a stub that returns an error because database operations
+// must be handled at the server level where the DatabaseManager is available.
+func (e *Executor) executeCreateDatabase(stmt *CreateDatabaseStmt) (string, error) {
+	// Database operations are handled at the server level
+	return "", errors.New("CREATE DATABASE must be handled by the server")
+}
+
+// executeDropDatabase drops a database.
+// Note: This is a stub that returns an error because database operations
+// must be handled at the server level where the DatabaseManager is available.
+func (e *Executor) executeDropDatabase(stmt *DropDatabaseStmt) (string, error) {
+	// Database operations are handled at the server level
+	return "", errors.New("DROP DATABASE must be handled by the server")
+}
+
+// inspectDatabases returns information about all databases.
+// Note: This is a stub that returns an error because database operations
+// must be handled at the server level where the DatabaseManager is available.
+func (e *Executor) inspectDatabases() (string, error) {
+	// Database operations are handled at the server level
+	return "", errors.New("INSPECT DATABASES must be handled by the server")
+}
+
+// inspectDatabase returns information about a specific database.
+// Note: This is a stub that returns an error because database operations
+// must be handled at the server level where the DatabaseManager is available.
+func (e *Executor) inspectDatabase(dbName string) (string, error) {
+	// Database operations are handled at the server level
+	return "", errors.New("INSPECT DATABASE must be handled by the server")
+}
+
+// isTextType returns true if the column type is a text/string type.
+func isTextType(colType string) bool {
+	upper := strings.ToUpper(colType)
+	return strings.HasPrefix(upper, "TEXT") ||
+		strings.HasPrefix(upper, "VARCHAR") ||
+		strings.HasPrefix(upper, "CHAR") ||
+		upper == "STRING"
 }

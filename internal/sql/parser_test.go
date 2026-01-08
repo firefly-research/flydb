@@ -1232,3 +1232,178 @@ func TestParseRevoke(t *testing.T) {
 		}
 	}
 }
+
+func TestParseCreateRole(t *testing.T) {
+	tests := []struct {
+		input       string
+		roleName    string
+		description string
+	}{
+		{"CREATE ROLE analyst", "analyst", ""},
+		{"CREATE ROLE developer WITH DESCRIPTION 'Software developer'", "developer", "Software developer"},
+		{"CREATE ROLE admin_role WITH DESCRIPTION 'Administrator role'", "admin_role", "Administrator role"},
+	}
+
+	for _, tt := range tests {
+		lexer := NewLexer(tt.input)
+		parser := NewParser(lexer)
+		stmt, err := parser.Parse()
+		if err != nil {
+			t.Fatalf("Parse failed for '%s': %v", tt.input, err)
+		}
+
+		createRoleStmt, ok := stmt.(*CreateRoleStmt)
+		if !ok {
+			t.Fatalf("Expected CreateRoleStmt, got %T", stmt)
+		}
+
+		if createRoleStmt.RoleName != tt.roleName {
+			t.Errorf("Expected role name '%s', got '%s'", tt.roleName, createRoleStmt.RoleName)
+		}
+
+		if createRoleStmt.Description != tt.description {
+			t.Errorf("Expected description '%s', got '%s'", tt.description, createRoleStmt.Description)
+		}
+	}
+}
+
+func TestParseDropRole(t *testing.T) {
+	tests := []struct {
+		input    string
+		roleName string
+	}{
+		{"DROP ROLE analyst", "analyst"},
+		{"DROP ROLE developer", "developer"},
+	}
+
+	for _, tt := range tests {
+		lexer := NewLexer(tt.input)
+		parser := NewParser(lexer)
+		stmt, err := parser.Parse()
+		if err != nil {
+			t.Fatalf("Parse failed for '%s': %v", tt.input, err)
+		}
+
+		dropRoleStmt, ok := stmt.(*DropRoleStmt)
+		if !ok {
+			t.Fatalf("Expected DropRoleStmt, got %T", stmt)
+		}
+
+		if dropRoleStmt.RoleName != tt.roleName {
+			t.Errorf("Expected role name '%s', got '%s'", tt.roleName, dropRoleStmt.RoleName)
+		}
+	}
+}
+
+func TestParseGrantRoleToUser(t *testing.T) {
+	tests := []struct {
+		input    string
+		roleName string
+		username string
+		database string
+	}{
+		{"GRANT ROLE developer TO alice", "developer", "alice", ""},
+		{"GRANT ROLE admin TO bob ON DATABASE sales", "admin", "bob", "sales"},
+	}
+
+	for _, tt := range tests {
+		lexer := NewLexer(tt.input)
+		parser := NewParser(lexer)
+		stmt, err := parser.Parse()
+		if err != nil {
+			t.Fatalf("Parse failed for '%s': %v", tt.input, err)
+		}
+
+		grantRoleStmt, ok := stmt.(*GrantRoleStmt)
+		if !ok {
+			t.Fatalf("Expected GrantRoleStmt, got %T", stmt)
+		}
+
+		if grantRoleStmt.RoleName != tt.roleName {
+			t.Errorf("Expected role name '%s', got '%s'", tt.roleName, grantRoleStmt.RoleName)
+		}
+
+		if grantRoleStmt.Username != tt.username {
+			t.Errorf("Expected username '%s', got '%s'", tt.username, grantRoleStmt.Username)
+		}
+
+		if grantRoleStmt.Database != tt.database {
+			t.Errorf("Expected database '%s', got '%s'", tt.database, grantRoleStmt.Database)
+		}
+	}
+}
+
+func TestParseRevokeRoleFromUser(t *testing.T) {
+	tests := []struct {
+		input    string
+		roleName string
+		username string
+		database string
+	}{
+		{"REVOKE ROLE developer FROM alice", "developer", "alice", ""},
+		{"REVOKE ROLE admin FROM bob ON DATABASE sales", "admin", "bob", "sales"},
+	}
+
+	for _, tt := range tests {
+		lexer := NewLexer(tt.input)
+		parser := NewParser(lexer)
+		stmt, err := parser.Parse()
+		if err != nil {
+			t.Fatalf("Parse failed for '%s': %v", tt.input, err)
+		}
+
+		revokeRoleStmt, ok := stmt.(*RevokeRoleStmt)
+		if !ok {
+			t.Fatalf("Expected RevokeRoleStmt, got %T", stmt)
+		}
+
+		if revokeRoleStmt.RoleName != tt.roleName {
+			t.Errorf("Expected role name '%s', got '%s'", tt.roleName, revokeRoleStmt.RoleName)
+		}
+
+		if revokeRoleStmt.Username != tt.username {
+			t.Errorf("Expected username '%s', got '%s'", tt.username, revokeRoleStmt.Username)
+		}
+
+		if revokeRoleStmt.Database != tt.database {
+			t.Errorf("Expected database '%s', got '%s'", tt.database, revokeRoleStmt.Database)
+		}
+	}
+}
+
+func TestParseIntrospectRoles(t *testing.T) {
+	tests := []struct {
+		input      string
+		target     string
+		objectName string
+	}{
+		{"INSPECT ROLES", "ROLES", ""},
+		{"INSPECT ROLE developer", "ROLE", "developer"},
+		{"INSPECT USER alice", "USER", "alice"},
+		{"INSPECT USER alice ROLES", "USER_ROLES", "alice"},
+		{"INSPECT USER alice PRIVILEGES", "USER_PRIVILEGES", "alice"},
+		{"INSPECT PRIVILEGES", "PRIVILEGES", ""},
+	}
+
+	for _, tt := range tests {
+		lexer := NewLexer(tt.input)
+		parser := NewParser(lexer)
+		stmt, err := parser.Parse()
+		if err != nil {
+			t.Fatalf("Parse failed for '%s': %v", tt.input, err)
+		}
+
+		introspectStmt, ok := stmt.(*InspectStmt)
+		if !ok {
+			t.Fatalf("Expected InspectStmt, got %T", stmt)
+		}
+
+		if introspectStmt.Target != tt.target {
+			t.Errorf("Expected target '%s', got '%s'", tt.target, introspectStmt.Target)
+		}
+
+		if introspectStmt.ObjectName != tt.objectName {
+			t.Errorf("Expected object name '%s', got '%s'", tt.objectName, introspectStmt.ObjectName)
+		}
+	}
+}

@@ -158,7 +158,7 @@ func (p *Parser) Parse() (Statement, error) {
 	if p.cur.Type == TokenKeyword {
 		switch p.cur.Value {
 		case "CREATE":
-			// Distinguish between CREATE TABLE, CREATE USER, CREATE INDEX, CREATE PROCEDURE, CREATE VIEW, and CREATE TRIGGER
+			// Distinguish between CREATE TABLE, CREATE USER, CREATE INDEX, CREATE PROCEDURE, CREATE VIEW, CREATE TRIGGER, CREATE DATABASE, and CREATE ROLE
 			// by looking at the next token.
 			if p.peek.Value == "TABLE" {
 				return p.parseCreate()
@@ -172,8 +172,12 @@ func (p *Parser) Parse() (Statement, error) {
 				return p.parseCreateView()
 			} else if p.peek.Value == "TRIGGER" {
 				return p.parseCreateTrigger()
+			} else if p.peek.Value == "DATABASE" {
+				return p.parseCreateDatabase()
+			} else if p.peek.Value == "ROLE" {
+				return p.parseCreateRole()
 			}
-			return nil, errors.New("expected TABLE, USER, INDEX, PROCEDURE, VIEW, or TRIGGER after CREATE")
+			return nil, errors.New("expected TABLE, USER, INDEX, PROCEDURE, VIEW, TRIGGER, DATABASE, or ROLE after CREATE")
 		case "CALL":
 			return p.parseCall()
 		case "DROP":
@@ -206,12 +210,14 @@ func (p *Parser) Parse() (Statement, error) {
 			return p.parseExecute()
 		case "DEALLOCATE":
 			return p.parseDeallocate()
-		case "INTROSPECT":
-			return p.parseIntrospect()
+		case "INSPECT":
+			return p.parseInspect()
 		case "ALTER":
 			return p.parseAlter()
 		case "TRUNCATE":
 			return p.parseTruncate()
+		case "USE":
+			return p.parseUse()
 		}
 	}
 	return nil, errors.New("unexpected token: " + p.cur.Value)
@@ -252,22 +258,83 @@ func (p *Parser) parseCreateUser() (*CreateUserStmt, error) {
 	return &CreateUserStmt{Username: username, Password: password}, nil
 }
 
+// parseCreateRole parses a CREATE ROLE statement.
+// Syntax: CREATE ROLE <role_name> [WITH DESCRIPTION '<description>']
+//
+// Examples:
+//   - CREATE ROLE analyst
+//   - CREATE ROLE data_scientist WITH DESCRIPTION 'Data science team role'
+//
+// Returns a CreateRoleStmt AST node.
+func (p *Parser) parseCreateRole() (*CreateRoleStmt, error) {
+	// Skip CREATE and ROLE keywords
+	p.nextToken() // Skip CREATE
+	p.nextToken() // Skip ROLE
+
+	// Parse the role name
+	if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
+		return nil, errors.New("expected role name")
+	}
+	roleName := p.cur.Value
+
+	// Parse optional WITH DESCRIPTION clause
+	var description string
+	if p.peek.Type == TokenKeyword && p.peek.Value == "WITH" {
+		p.nextToken() // Skip WITH
+		if !p.expectPeek(TokenKeyword) || p.cur.Value != "DESCRIPTION" {
+			return nil, errors.New("expected DESCRIPTION after WITH")
+		}
+		if !p.expectPeek(TokenString) {
+			return nil, errors.New("expected description string")
+		}
+		description = p.cur.Value
+	}
+
+	return &CreateRoleStmt{RoleName: roleName, Description: description}, nil
+}
+
 // parseGrant parses a GRANT statement.
-// Syntax: GRANT [SELECT] ON <table> [WHERE <col>=<val>] TO <user>
+// Supports two syntaxes:
+//
+// 1. Privilege grant: GRANT [SELECT|INSERT|UPDATE|DELETE|ALL] ON <table> [WHERE <col>=<val>] TO <user>
+// 2. Role grant: GRANT <role> TO <user> [ON DATABASE <database>]
 //
 // Examples:
 //   - GRANT SELECT ON products TO alice
 //   - GRANT ON orders WHERE user_id = 'alice' TO alice
+//   - GRANT reader TO alice
+//   - GRANT writer TO bob ON DATABASE sales
 //
-// The optional WHERE clause enables Row-Level Security (RLS).
-//
-// Returns a GrantStmt AST node.
-func (p *Parser) parseGrant() (*GrantStmt, error) {
-	// SELECT is optional after GRANT.
-	if p.peek.Type == TokenKeyword && p.peek.Value == "SELECT" {
-		p.nextToken() // Skip SELECT
+// Returns a GrantStmt or GrantRoleStmt AST node.
+func (p *Parser) parseGrant() (Statement, error) {
+	// Look ahead to determine if this is a privilege grant or role grant
+	// If next token is ON, it's a privilege grant
+	// If next token is ROLE, it's a role grant
+	// If next token is a role name followed by TO, it's a role grant
+
+	// Check for privilege keywords
+	if p.peek.Type == TokenKeyword {
+		switch p.peek.Value {
+		case "SELECT", "INSERT", "UPDATE", "DELETE", "ALL":
+			p.nextToken() // Skip the privilege keyword
+			// Fall through to privilege grant parsing
+		case "ON":
+			// Privilege grant without explicit privilege (legacy syntax)
+			// Fall through to privilege grant parsing
+		case "ROLE":
+			// Explicit ROLE keyword - skip it and parse role grant
+			p.nextToken() // Skip ROLE keyword
+			return p.parseGrantRole()
+		default:
+			// Could be a role name - check if followed by TO
+			return p.parseGrantRole()
+		}
+	} else if p.peek.Type == TokenIdent {
+		// Could be a role name - check if followed by TO
+		return p.parseGrantRole()
 	}
 
+	// Parse privilege grant
 	// Expect ON keyword.
 	if !p.expectPeek(TokenKeyword) || p.cur.Value != "ON" {
 		return nil, errors.New("expected ON")
@@ -307,38 +374,127 @@ func (p *Parser) parseGrant() (*GrantStmt, error) {
 	return &GrantStmt{TableName: tableName, Username: username, Where: where}, nil
 }
 
+// parseGrantRole parses a GRANT role TO user statement.
+// Syntax: GRANT [ROLE] <role> TO <user> [ON DATABASE <database>]
+// Note: The ROLE keyword is optional and may have been consumed by parseGrant.
+func (p *Parser) parseGrantRole() (*GrantRoleStmt, error) {
+	// Parse role name - it should be in peek position
+	if p.peek.Type != TokenIdent && p.peek.Type != TokenKeyword {
+		return nil, errors.New("expected role name")
+	}
+	p.nextToken() // Move to role name
+	roleName := p.cur.Value
+
+	// Expect TO keyword
+	if !p.expectPeek(TokenKeyword) || p.cur.Value != "TO" {
+		return nil, errors.New("expected TO after role name")
+	}
+
+	// Parse username
+	if !p.expectPeek(TokenIdent) {
+		return nil, errors.New("expected username after TO")
+	}
+	username := p.cur.Value
+
+	// Parse optional ON DATABASE clause
+	var database string
+	if p.peek.Type == TokenKeyword && p.peek.Value == "ON" {
+		p.nextToken() // Skip ON
+		if !p.expectPeek(TokenKeyword) || p.cur.Value != "DATABASE" {
+			return nil, errors.New("expected DATABASE after ON")
+		}
+		if !p.expectPeek(TokenIdent) {
+			return nil, errors.New("expected database name")
+		}
+		database = p.cur.Value
+	}
+
+	return &GrantRoleStmt{RoleName: roleName, Username: username, Database: database}, nil
+}
+
 // parseRevoke parses a REVOKE statement.
-// Syntax: REVOKE ON <table> FROM <user>
+// Supports two syntaxes:
+//
+// 1. Privilege revoke: REVOKE ON <table> FROM <user>
+// 2. Role revoke: REVOKE <role> FROM <user> [ON DATABASE <database>]
 //
 // Examples:
 //   - REVOKE ON products FROM alice
-//   - REVOKE ON orders FROM bob
+//   - REVOKE reader FROM alice
+//   - REVOKE writer FROM bob ON DATABASE sales
 //
-// This removes all access rights for the user on the specified table.
-//
-// Returns a RevokeStmt AST node.
-func (p *Parser) parseRevoke() (*RevokeStmt, error) {
-	// Expect ON keyword
-	if !p.expectPeek(TokenKeyword) || p.cur.Value != "ON" {
-		return nil, errors.New("expected ON after REVOKE")
+// Returns a RevokeStmt or RevokeRoleStmt AST node.
+func (p *Parser) parseRevoke() (Statement, error) {
+	// Check if next token is ON (privilege revoke), ROLE (role revoke), or a role name
+	if p.peek.Type == TokenKeyword {
+		switch p.peek.Value {
+		case "ON":
+			// Privilege revoke
+			p.nextToken() // Skip ON
+
+			// Parse the table name
+			if !p.expectPeek(TokenIdent) {
+				return nil, errors.New("expected table name after ON")
+			}
+			tableName := p.cur.Value
+
+			// Expect FROM keyword and username
+			if !p.expectPeek(TokenKeyword) || p.cur.Value != "FROM" {
+				return nil, errors.New("expected FROM after table name")
+			}
+			if !p.expectPeek(TokenIdent) {
+				return nil, errors.New("expected username after FROM")
+			}
+			username := p.cur.Value
+
+			return &RevokeStmt{TableName: tableName, Username: username}, nil
+		case "ROLE":
+			// Explicit ROLE keyword - skip it and parse role revoke
+			p.nextToken() // Skip ROLE keyword
+			return p.parseRevokeRole()
+		}
 	}
 
-	// Parse the table name
-	if !p.expectPeek(TokenIdent) {
-		return nil, errors.New("expected table name after ON")
-	}
-	tableName := p.cur.Value
+	// Role revoke (without explicit ROLE keyword)
+	return p.parseRevokeRole()
+}
 
-	// Expect FROM keyword and username
+// parseRevokeRole parses a REVOKE role FROM user statement.
+// Syntax: REVOKE [ROLE] <role> FROM <user> [ON DATABASE <database>]
+// Note: The ROLE keyword is optional and may have been consumed by parseRevoke.
+func (p *Parser) parseRevokeRole() (*RevokeRoleStmt, error) {
+	// Parse role name - it should be in peek position
+	if p.peek.Type != TokenIdent && p.peek.Type != TokenKeyword {
+		return nil, errors.New("expected role name")
+	}
+	p.nextToken() // Move to role name
+	roleName := p.cur.Value
+
+	// Expect FROM keyword
 	if !p.expectPeek(TokenKeyword) || p.cur.Value != "FROM" {
-		return nil, errors.New("expected FROM after table name")
+		return nil, errors.New("expected FROM after role name")
 	}
+
+	// Parse username
 	if !p.expectPeek(TokenIdent) {
 		return nil, errors.New("expected username after FROM")
 	}
 	username := p.cur.Value
 
-	return &RevokeStmt{TableName: tableName, Username: username}, nil
+	// Parse optional ON DATABASE clause
+	var database string
+	if p.peek.Type == TokenKeyword && p.peek.Value == "ON" {
+		p.nextToken() // Skip ON
+		if !p.expectPeek(TokenKeyword) || p.cur.Value != "DATABASE" {
+			return nil, errors.New("expected DATABASE after ON")
+		}
+		if !p.expectPeek(TokenIdent) {
+			return nil, errors.New("expected database name")
+		}
+		database = p.cur.Value
+	}
+
+	return &RevokeRoleStmt{RoleName: roleName, Username: username, Database: database}, nil
 }
 
 // parseCreate parses a CREATE TABLE statement.
@@ -1981,8 +2137,8 @@ func (p *Parser) parseScalarFunction() (*FunctionExpr, error) {
 	}, nil
 }
 
-// parseIntrospect parses an INTROSPECT statement.
-// Syntax: INTROSPECT <target> [<object_name>]
+// parseInspect parses an INSPECT statement.
+// Syntax: INSPECT <target> [<object_name>]
 //
 // Supported targets:
 //   - USERS: List all database users
@@ -1994,44 +2150,72 @@ func (p *Parser) parseScalarFunction() (*FunctionExpr, error) {
 //
 // Examples:
 //
-//	INTROSPECT USERS
-//	INTROSPECT TABLES
-//	INTROSPECT TABLE employees
-//	INTROSPECT SERVER
-//	INTROSPECT STATUS
+//	INSPECT USERS
+//	INSPECT TABLES
+//	INSPECT TABLE employees
+//	INSPECT SERVER
+//	INSPECT STATUS
 //
-// Returns an IntrospectStmt AST node.
-func (p *Parser) parseIntrospect() (*IntrospectStmt, error) {
+// Returns an InspectStmt AST node.
+func (p *Parser) parseInspect() (*InspectStmt, error) {
 	// Expect the target
 	// These are parsed as identifiers to avoid conflicts with table names
 	p.nextToken()
 	if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
-		return nil, errors.New("expected USERS, TABLES, TABLE, INDEXES, SERVER, or STATUS after INTROSPECT")
+		return nil, errors.New("expected USERS, TABLES, TABLE, INDEXES, SERVER, STATUS, ROLES, or ROLE after INSPECT")
 	}
 
 	// Normalize to uppercase for case-insensitive matching
 	target := strings.ToUpper(p.cur.Value)
 	switch target {
-	case "USERS", "TABLES", "INDEXES", "SERVER", "STATUS":
+	case "USERS", "TABLES", "INDEXES", "SERVER", "STATUS", "DATABASES", "ROLES", "PRIVILEGES":
 		// These targets don't take an object name
-		return &IntrospectStmt{Target: target}, nil
+		return &InspectStmt{Target: target}, nil
 	case "TABLE":
 		// This target requires an object name
 		p.nextToken()
 		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
-			return nil, fmt.Errorf("expected table name after INTROSPECT TABLE")
+			return nil, fmt.Errorf("expected table name after INSPECT TABLE")
 		}
 		objectName := p.cur.Value
-		return &IntrospectStmt{Target: target, ObjectName: objectName}, nil
-	// Keep DATABASES and DATABASE for backward compatibility but they now redirect to STATUS
-	case "DATABASES", "DATABASE":
-		if target == "DATABASE" {
-			// Skip the database name argument since it's ignored
-			p.nextToken()
+		return &InspectStmt{Target: target, ObjectName: objectName}, nil
+	case "DATABASE":
+		// INSPECT DATABASE <name> - inspect a specific database
+		p.nextToken()
+		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
+			return nil, fmt.Errorf("expected database name after INSPECT DATABASE")
 		}
-		return &IntrospectStmt{Target: "STATUS"}, nil
+		objectName := p.cur.Value
+		return &InspectStmt{Target: target, ObjectName: objectName}, nil
+	case "ROLE":
+		// INSPECT ROLE <name> - inspect a specific role
+		p.nextToken()
+		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
+			return nil, fmt.Errorf("expected role name after INSPECT ROLE")
+		}
+		objectName := p.cur.Value
+		return &InspectStmt{Target: target, ObjectName: objectName}, nil
+	case "USER":
+		// INSPECT USER <name> [ROLES|PRIVILEGES] - inspect a specific user
+		p.nextToken()
+		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
+			return nil, fmt.Errorf("expected username after INSPECT USER")
+		}
+		objectName := p.cur.Value
+		// Check for optional ROLES or PRIVILEGES suffix
+		if p.peek.Type == TokenIdent || p.peek.Type == TokenKeyword {
+			suffix := strings.ToUpper(p.peek.Value)
+			if suffix == "ROLES" {
+				p.nextToken()
+				return &InspectStmt{Target: "USER_ROLES", ObjectName: objectName}, nil
+			} else if suffix == "PRIVILEGES" {
+				p.nextToken()
+				return &InspectStmt{Target: "USER_PRIVILEGES", ObjectName: objectName}, nil
+			}
+		}
+		return &InspectStmt{Target: target, ObjectName: objectName}, nil
 	default:
-		return nil, fmt.Errorf("unknown INTROSPECT target: %s (expected USERS, TABLES, TABLE, INDEXES, SERVER, or STATUS)", target)
+		return nil, fmt.Errorf("unknown INSPECT target: %s (expected USERS, TABLES, TABLE, INDEXES, SERVER, STATUS, DATABASES, ROLES, ROLE, or USER)", target)
 	}
 }
 
@@ -2387,12 +2571,12 @@ func (p *Parser) parseCall() (*CallStmt, error) {
 }
 
 // parseDrop parses a DROP statement.
-// Syntax: DROP TABLE|INDEX|PROCEDURE|VIEW|TRIGGER [IF EXISTS] <name> ...
+// Syntax: DROP TABLE|INDEX|PROCEDURE|VIEW|TRIGGER|DATABASE [IF EXISTS] <name> ...
 func (p *Parser) parseDrop() (Statement, error) {
 	p.nextToken() // Skip DROP
 
 	if p.cur.Type != TokenKeyword {
-		return nil, errors.New("expected TABLE, INDEX, PROCEDURE, VIEW, or TRIGGER after DROP")
+		return nil, errors.New("expected TABLE, INDEX, PROCEDURE, VIEW, TRIGGER, DATABASE, ROLE, or USER after DROP")
 	}
 
 	switch p.cur.Value {
@@ -2502,8 +2686,56 @@ func (p *Parser) parseDrop() (Statement, error) {
 		tableName := p.cur.Value
 
 		return &DropTriggerStmt{TriggerName: triggerName, TableName: tableName, IfExists: ifExists}, nil
+	case "DATABASE":
+		// Parse optional IF EXISTS
+		ifExists := false
+		p.nextToken()
+		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
+			p.nextToken()
+			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+				return nil, errors.New("expected EXISTS after IF")
+			}
+			ifExists = true
+			p.nextToken()
+		}
+		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
+			return nil, errors.New("expected database name")
+		}
+		return &DropDatabaseStmt{DatabaseName: p.cur.Value, IfExists: ifExists}, nil
+	case "ROLE":
+		// Parse optional IF EXISTS
+		ifExists := false
+		p.nextToken()
+		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
+			p.nextToken()
+			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+				return nil, errors.New("expected EXISTS after IF")
+			}
+			ifExists = true
+			p.nextToken()
+		}
+		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
+			return nil, errors.New("expected role name")
+		}
+		return &DropRoleStmt{RoleName: p.cur.Value, IfExists: ifExists}, nil
+	case "USER":
+		// Parse optional IF EXISTS
+		ifExists := false
+		p.nextToken()
+		if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
+			p.nextToken()
+			if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+				return nil, errors.New("expected EXISTS after IF")
+			}
+			ifExists = true
+			p.nextToken()
+		}
+		if p.cur.Type != TokenIdent {
+			return nil, errors.New("expected username")
+		}
+		return &DropUserStmt{Username: p.cur.Value, IfExists: ifExists}, nil
 	default:
-		return nil, errors.New("expected TABLE, INDEX, PROCEDURE, VIEW, or TRIGGER after DROP")
+		return nil, errors.New("expected TABLE, INDEX, PROCEDURE, VIEW, TRIGGER, DATABASE, ROLE, or USER after DROP")
 	}
 }
 
@@ -2945,5 +3177,128 @@ func (p *Parser) parseCreateTrigger() (*CreateTriggerStmt, error) {
 		Event:       event,
 		TableName:   tableName,
 		ActionSQL:   actionSQL,
+	}, nil
+}
+
+
+// =============================================================================
+// Database Management Parsing
+// =============================================================================
+
+// parseCreateDatabase parses a CREATE DATABASE statement.
+// Syntax: CREATE DATABASE [IF NOT EXISTS] <database_name>
+//
+// Examples:
+//   - CREATE DATABASE myapp
+//   - CREATE DATABASE IF NOT EXISTS test_db
+//   - CREATE DATABASE myapp WITH ENCODING 'UTF8' LOCALE 'en_US'
+//
+// Returns a CreateDatabaseStmt AST node.
+func (p *Parser) parseCreateDatabase() (*CreateDatabaseStmt, error) {
+	// Skip CREATE and DATABASE keywords (already validated)
+	p.nextToken() // Skip CREATE
+	p.nextToken() // Skip DATABASE
+
+	// Parse optional IF NOT EXISTS
+	ifNotExists := false
+	if p.cur.Type == TokenKeyword && p.cur.Value == "IF" {
+		p.nextToken()
+		if p.cur.Type != TokenKeyword || p.cur.Value != "NOT" {
+			return nil, errors.New("expected NOT after IF")
+		}
+		p.nextToken()
+		if p.cur.Type != TokenKeyword || p.cur.Value != "EXISTS" {
+			return nil, errors.New("expected EXISTS after NOT")
+		}
+		ifNotExists = true
+		p.nextToken()
+	}
+
+	// Parse the database name (can be identifier or keyword like 'default')
+	if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
+		return nil, errors.New("expected database name")
+	}
+	databaseName := p.cur.Value
+
+	stmt := &CreateDatabaseStmt{
+		DatabaseName: databaseName,
+		IfNotExists:  ifNotExists,
+	}
+
+	// Check for optional WITH clause
+	p.nextToken()
+	if p.cur.Type == TokenKeyword && p.cur.Value == "WITH" {
+		p.nextToken()
+
+		// Parse options
+		for {
+			if p.cur.Type == TokenEOF {
+				break
+			}
+
+			if p.cur.Type != TokenKeyword && p.cur.Type != TokenIdent {
+				break
+			}
+
+			optionName := strings.ToUpper(p.cur.Value)
+			p.nextToken()
+
+			// Expect '=' or value directly
+			if p.cur.Type == TokenEqual {
+				p.nextToken()
+			}
+
+			// Get the value
+			var optionValue string
+			if p.cur.Type == TokenString {
+				optionValue = p.cur.Value
+			} else if p.cur.Type == TokenIdent || p.cur.Type == TokenKeyword {
+				optionValue = p.cur.Value
+			} else {
+				return nil, fmt.Errorf("expected value for option %s", optionName)
+			}
+
+			switch optionName {
+			case "ENCODING":
+				stmt.Encoding = optionValue
+			case "LOCALE", "LC_COLLATE", "LC_CTYPE":
+				stmt.Locale = optionValue
+			case "COLLATION", "COLLATE":
+				stmt.Collation = optionValue
+			case "OWNER":
+				stmt.Owner = optionValue
+			case "DESCRIPTION", "COMMENT":
+				stmt.Description = optionValue
+			default:
+				return nil, fmt.Errorf("unknown database option: %s", optionName)
+			}
+
+			p.nextToken()
+		}
+	}
+
+	return stmt, nil
+}
+
+// parseUse parses a USE statement.
+// Syntax: USE <database_name>
+//
+// Examples:
+//   - USE myapp
+//   - USE production
+//
+// Returns a UseDatabaseStmt AST node.
+func (p *Parser) parseUse() (*UseDatabaseStmt, error) {
+	// Skip USE keyword
+	p.nextToken()
+
+	// Parse the database name (can be identifier or keyword like 'default')
+	if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
+		return nil, errors.New("expected database name after USE")
+	}
+	databaseName := p.cur.Value
+
+	return &UseDatabaseStmt{
+		DatabaseName: databaseName,
 	}, nil
 }

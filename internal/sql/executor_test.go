@@ -731,8 +731,8 @@ func TestPrimaryKeyConstraint(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for duplicate primary key, got none")
 	}
-	if err != nil && !strings.Contains(err.Error(), "duplicate primary key") {
-		t.Errorf("Expected 'duplicate primary key' error, got: %v", err)
+	if err != nil && !strings.Contains(err.Error(), "duplicate primary key value") {
+		t.Errorf("Expected 'duplicate primary key value' error, got: %v", err)
 	}
 
 	// Insert with different primary key - should succeed
@@ -1127,12 +1127,12 @@ func TestIntrospectTableWithConstraints(t *testing.T) {
 	}
 
 	// Introspect the table
-	result, err := exec.Execute(&IntrospectStmt{
+	result, err := exec.Execute(&InspectStmt{
 		Target:     "TABLE",
 		ObjectName: "products",
 	})
 	if err != nil {
-		t.Fatalf("INTROSPECT TABLE failed: %v", err)
+		t.Fatalf("INSPECT TABLE failed: %v", err)
 	}
 
 	// Verify constraint information is shown

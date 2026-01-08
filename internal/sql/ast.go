@@ -161,6 +161,121 @@ type RevokeStmt struct {
 // statementNode implements the Statement interface.
 func (s RevokeStmt) statementNode() {}
 
+// CreateRoleStmt represents a CREATE ROLE statement.
+// It creates a new database role for RBAC.
+//
+// SQL Syntax:
+//
+//	CREATE ROLE <role_name> [WITH DESCRIPTION '<description>']
+//
+// Examples:
+//
+//	CREATE ROLE analyst
+//	CREATE ROLE data_scientist WITH DESCRIPTION 'Data science team role'
+type CreateRoleStmt struct {
+	RoleName    string // The unique role name
+	Description string // Optional description
+}
+
+// statementNode implements the Statement interface.
+func (s CreateRoleStmt) statementNode() {}
+
+// DropRoleStmt represents a DROP ROLE statement.
+// It removes a role and all its associated privileges.
+//
+// SQL Syntax:
+//
+//	DROP ROLE [IF EXISTS] <role_name>
+//
+// Examples:
+//
+//	DROP ROLE analyst
+//	DROP ROLE IF EXISTS old_role
+type DropRoleStmt struct {
+	RoleName string // The role to drop
+	IfExists bool   // Whether to suppress error if role doesn't exist
+}
+
+// statementNode implements the Statement interface.
+func (s DropRoleStmt) statementNode() {}
+
+// AlterRoleStmt represents an ALTER ROLE statement.
+// It modifies an existing role's properties.
+//
+// SQL Syntax:
+//
+//	ALTER ROLE <role_name> SET DESCRIPTION '<description>'
+//
+// Examples:
+//
+//	ALTER ROLE analyst SET DESCRIPTION 'Updated description'
+type AlterRoleStmt struct {
+	RoleName       string // The role to modify
+	NewDescription string // New description for the role
+}
+
+// statementNode implements the Statement interface.
+func (s AlterRoleStmt) statementNode() {}
+
+// GrantRoleStmt represents a GRANT role TO user statement.
+// It assigns a role to a user.
+//
+// SQL Syntax:
+//
+//	GRANT <role_name> TO <username> [ON DATABASE <database>]
+//
+// Examples:
+//
+//	GRANT reader TO alice
+//	GRANT writer TO bob ON DATABASE sales
+type GrantRoleStmt struct {
+	RoleName string // The role to grant
+	Username string // The user receiving the role
+	Database string // Optional database scope
+}
+
+// statementNode implements the Statement interface.
+func (s GrantRoleStmt) statementNode() {}
+
+// RevokeRoleStmt represents a REVOKE role FROM user statement.
+// It removes a role assignment from a user.
+//
+// SQL Syntax:
+//
+//	REVOKE <role_name> FROM <username> [ON DATABASE <database>]
+//
+// Examples:
+//
+//	REVOKE reader FROM alice
+//	REVOKE writer FROM bob ON DATABASE sales
+type RevokeRoleStmt struct {
+	RoleName string // The role to revoke
+	Username string // The user losing the role
+	Database string // Optional database scope
+}
+
+// statementNode implements the Statement interface.
+func (s RevokeRoleStmt) statementNode() {}
+
+// DropUserStmt represents a DROP USER statement.
+// It removes a user account from the database.
+//
+// SQL Syntax:
+//
+//	DROP USER [IF EXISTS] <username>
+//
+// Examples:
+//
+//	DROP USER alice
+//	DROP USER IF EXISTS old_user
+type DropUserStmt struct {
+	Username string // The user to drop
+	IfExists bool   // Whether to suppress error if user doesn't exist
+}
+
+// statementNode implements the Statement interface.
+func (s DropUserStmt) statementNode() {}
+
 // AlterUserStmt represents an ALTER USER statement.
 // It modifies an existing user's properties, such as their password.
 //
@@ -839,31 +954,31 @@ type DeallocateStmt struct {
 // statementNode implements the Statement interface.
 func (s DeallocateStmt) statementNode() {}
 
-// IntrospectStmt represents an INTROSPECT statement for database metadata inspection.
+// InspectStmt represents an INSPECT statement for database metadata inspection.
 // It allows users to query information about database objects.
 //
 // SQL Syntax:
 //
-//	INTROSPECT USERS              - List all database users
-//	INTROSPECT DATABASES          - List database information
-//	INTROSPECT DATABASE <name>    - Detailed info for a specific database
-//	INTROSPECT TABLES             - List all tables with their schemas
-//	INTROSPECT TABLE <name>       - Detailed info for a specific table
-//	INTROSPECT INDEXES            - List all indexes
+//	INSPECT USERS              - List all database users
+//	INSPECT DATABASES          - List database information
+//	INSPECT DATABASE <name>    - Detailed info for a specific database
+//	INSPECT TABLES             - List all tables with their schemas
+//	INSPECT TABLE <name>       - Detailed info for a specific table
+//	INSPECT INDEXES            - List all indexes
 //
 // Examples:
 //
-//	INTROSPECT USERS
-//	INTROSPECT TABLES
-//	INTROSPECT TABLE employees
-//	INTROSPECT DATABASE flydb
-type IntrospectStmt struct {
-	Target     string // The target to introspect: USERS, DATABASES, DATABASE, TABLES, TABLE, INDEXES
+//	INSPECT USERS
+//	INSPECT TABLES
+//	INSPECT TABLE employees
+//	INSPECT DATABASE flydb
+type InspectStmt struct {
+	Target     string // The target to inspect: USERS, DATABASES, DATABASE, TABLES, TABLE, INDEXES
 	ObjectName string // Optional: specific object name for TABLE or DATABASE targets
 }
 
 // statementNode implements the Statement interface.
-func (s IntrospectStmt) statementNode() {}
+func (s InspectStmt) statementNode() {}
 
 // AggregateExpr represents an aggregate function call in a SELECT statement.
 // Aggregate functions compute a single result from a set of input values.
@@ -1227,3 +1342,78 @@ type TruncateTableStmt struct {
 
 // statementNode implements the Statement interface.
 func (s TruncateTableStmt) statementNode() {}
+
+
+// =============================================================================
+// Database Management Statements
+// =============================================================================
+
+// CreateDatabaseStmt represents a CREATE DATABASE statement.
+// It creates a new database with the specified name.
+//
+// SQL Syntax:
+//
+//	CREATE DATABASE <database_name>
+//	CREATE DATABASE IF NOT EXISTS <database_name>
+//	CREATE DATABASE <database_name> WITH ENCODING 'UTF8' LOCALE 'en_US' COLLATION 'default'
+//
+// Example:
+//
+//	CREATE DATABASE myapp
+//	CREATE DATABASE IF NOT EXISTS test_db
+//	CREATE DATABASE myapp WITH ENCODING 'UTF8' LOCALE 'de_DE'
+type CreateDatabaseStmt struct {
+	DatabaseName string // The name of the new database
+	IfNotExists  bool   // If true, don't error if database already exists
+	Owner        string // Owner of the database (optional)
+	Encoding     string // Character encoding (UTF8, LATIN1, etc.)
+	Locale       string // Locale for sorting (e.g., "en_US", "de_DE")
+	Collation    string // Default collation for string comparison
+	Description  string // Optional description
+}
+
+// statementNode implements the Statement interface.
+func (s CreateDatabaseStmt) statementNode() {}
+
+// DropDatabaseStmt represents a DROP DATABASE statement.
+// It removes a database and all its contents.
+//
+// SQL Syntax:
+//
+//	DROP DATABASE <database_name>
+//	DROP DATABASE IF EXISTS <database_name>
+//
+// Example:
+//
+//	DROP DATABASE myapp
+//	DROP DATABASE IF EXISTS test_db
+//
+// Warning: This operation is destructive and cannot be undone.
+type DropDatabaseStmt struct {
+	DatabaseName string // The name of the database to drop
+	IfExists     bool   // If true, don't error if database doesn't exist
+}
+
+// statementNode implements the Statement interface.
+func (s DropDatabaseStmt) statementNode() {}
+
+// UseDatabaseStmt represents a USE statement.
+// It switches the current database context for the connection.
+//
+// SQL Syntax:
+//
+//	USE <database_name>
+//
+// Example:
+//
+//	USE myapp
+//	USE production
+//
+// After executing USE, all subsequent SQL statements will operate
+// on the specified database until another USE statement is executed.
+type UseDatabaseStmt struct {
+	DatabaseName string // The name of the database to switch to
+}
+
+// statementNode implements the Statement interface.
+func (s UseDatabaseStmt) statementNode() {}
