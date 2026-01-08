@@ -1,0 +1,155 @@
+/*
+ * Copyright (c) 2026 Firefly Software Solutions Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package sdk
+
+import (
+	"testing"
+)
+
+func TestNewSession(t *testing.T) {
+	session := NewSession("testuser", "testdb")
+
+	if session.Username != "testuser" {
+		t.Errorf("Expected username 'testuser', got '%s'", session.Username)
+	}
+	if session.Database != "testdb" {
+		t.Errorf("Expected database 'testdb', got '%s'", session.Database)
+	}
+	if session.State != SessionStateActive {
+		t.Errorf("Expected state Active, got %v", session.State)
+	}
+	if !session.AutoCommit {
+		t.Error("Expected AutoCommit to be true by default")
+	}
+	if session.IsolationLevel != IsolationReadCommitted {
+		t.Errorf("Expected IsolationLevel ReadCommitted, got %v", session.IsolationLevel)
+	}
+}
+
+func TestSessionSetGetDatabase(t *testing.T) {
+	session := NewSession("user", "default")
+
+	if session.GetDatabase() != "default" {
+		t.Errorf("Expected initial database 'default', got '%s'", session.GetDatabase())
+	}
+
+	session.SetDatabase("newdb")
+
+	if session.GetDatabase() != "newdb" {
+		t.Errorf("Expected database 'newdb', got '%s'", session.GetDatabase())
+	}
+}
+
+func TestNewConnectionConfig(t *testing.T) {
+	config := NewConnectionConfig()
+
+	if config.Host != "localhost" {
+		t.Errorf("Expected host 'localhost', got '%s'", config.Host)
+	}
+	if config.Port != 5433 {
+		t.Errorf("Expected port 5433, got %d", config.Port)
+	}
+	if config.Database != "default" {
+		t.Errorf("Expected database 'default', got '%s'", config.Database)
+	}
+	if config.ConnectTimeout != 30 {
+		t.Errorf("Expected connect timeout 30, got %d", config.ConnectTimeout)
+	}
+	if !config.AutoCommit {
+		t.Error("Expected AutoCommit to be true by default")
+	}
+}
+
+func TestParseODBCConnectionString(t *testing.T) {
+	tests := []struct {
+		name     string
+		connStr  string
+		expected *ConnectionConfig
+	}{
+		{
+			name:    "basic ODBC",
+			connStr: "Server=myhost;Port=5433;Database=mydb;Uid=user;Pwd=pass",
+			expected: &ConnectionConfig{
+				Host:     "myhost",
+				Port:     5433,
+				Database: "mydb",
+				Username: "user",
+				Password: "pass",
+			},
+		},
+		{
+			name:    "ODBC with driver",
+			connStr: "Driver={FlyDB};Server=localhost;Port=8888;Database=testdb;Uid=admin;Pwd=secret",
+			expected: &ConnectionConfig{
+				Host:     "localhost",
+				Port:     8888,
+				Database: "testdb",
+				Username: "admin",
+				Password: "secret",
+			},
+		},
+		{
+			name:    "ODBC with Data Source",
+			connStr: "Data Source=192.168.1.1;Initial Catalog=production;User Id=app;Password=apppass",
+			expected: &ConnectionConfig{
+				Host:     "192.168.1.1",
+				Port:     5433, // default
+				Database: "production",
+				Username: "app",
+				Password: "apppass",
+			},
+		},
+		{
+			name:    "ODBC with options",
+			connStr: "Server=host;Database=db;Uid=u;Pwd=p;ReadOnly=true;AutoCommit=false",
+			expected: &ConnectionConfig{
+				Host:       "host",
+				Database:   "db",
+				Username:   "u",
+				Password:   "p",
+				ReadOnly:   true,
+				AutoCommit: false,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config, err := ParseConnectionString(tt.connStr)
+			if err != nil {
+				t.Fatalf("ParseConnectionString failed: %v", err)
+			}
+
+			if config.Host != tt.expected.Host {
+				t.Errorf("Host mismatch: expected '%s', got '%s'", tt.expected.Host, config.Host)
+			}
+			if tt.expected.Port != 0 && config.Port != tt.expected.Port {
+				t.Errorf("Port mismatch: expected %d, got %d", tt.expected.Port, config.Port)
+			}
+			if config.Database != tt.expected.Database {
+				t.Errorf("Database mismatch: expected '%s', got '%s'", tt.expected.Database, config.Database)
+			}
+			if config.Username != tt.expected.Username {
+				t.Errorf("Username mismatch: expected '%s', got '%s'", tt.expected.Username, config.Username)
+			}
+			if config.Password != tt.expected.Password {
+				t.Errorf("Password mismatch: expected '%s', got '%s'", tt.expected.Password, config.Password)
+			}
+		})
+	}
+}
+

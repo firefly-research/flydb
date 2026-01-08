@@ -73,8 +73,11 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"flydb/internal/storage"
+	"fmt"
 	"math/big"
+	"time"
+
+	"flydb/internal/storage"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -118,9 +121,17 @@ const DefaultBcryptCost = 10
 // Key prefixes for system data in the storage engine.
 // These prefixes ensure user/permission data doesn't conflict with application data.
 const (
-	userKeyPrefix = "_sys_users:" // Prefix for user records
-	privKeyPrefix = "_sys_privs:" // Prefix for permission records
+	userKeyPrefix   = "_sys_users:"    // Prefix for user records
+	privKeyPrefix   = "_sys_privs:"    // Prefix for permission records (legacy)
+	dbPrivKeyPrefix = "_sys_db_privs:" // Prefix for database-scoped permissions
+	dbAccessPrefix  = "_sys_db_access:" // Prefix for database access permissions
 )
+
+// WildcardDatabase represents access to all databases.
+const WildcardDatabase = "*"
+
+// WildcardTable represents access to all tables in a database.
+const WildcardTable = "*"
 
 // RLS (Row-Level Security) defines a condition for restricting row access.
 // When applied, queries are automatically filtered to only return rows
@@ -133,13 +144,35 @@ type RLS struct {
 	Value  string // The required value for access
 }
 
+// PrivilegeType represents the type of database privilege.
+type PrivilegeType string
+
+const (
+	PrivilegeSelect PrivilegeType = "SELECT"
+	PrivilegeInsert PrivilegeType = "INSERT"
+	PrivilegeUpdate PrivilegeType = "UPDATE"
+	PrivilegeDelete PrivilegeType = "DELETE"
+	PrivilegeCreate PrivilegeType = "CREATE"
+	PrivilegeDrop   PrivilegeType = "DROP"
+	PrivilegeAlter  PrivilegeType = "ALTER"
+	PrivilegeAll    PrivilegeType = "ALL"
+)
+
 // User represents a database user account.
 // Users are stored in the KVStore with the key prefix "_sys_users:".
 //
 // Passwords are securely hashed using bcrypt before storage.
+// Authorization is handled through RBAC roles, not the legacy IsAdmin flag.
 type User struct {
-	Username     string // Unique identifier for the user
-	PasswordHash string // User's password hash (bcrypt)
+	Username     string   `json:"username"`      // Unique identifier for the user
+	PasswordHash string   `json:"password_hash"` // User's password hash (bcrypt)
+	IsAdmin      bool     `json:"is_admin"`      // DEPRECATED: Use RBAC roles instead. Kept for backward compatibility.
+	DefaultDB    string   `json:"default_db"`    // Default database for this user
+	Databases    []string `json:"databases"`     // DEPRECATED: Use RBAC roles instead.
+	Roles        []string `json:"roles"`         // DEPRECATED: Use _sys_user_roles: storage instead.
+	CreatedAt    string   `json:"created_at"`    // When the user was created
+	LastLogin    string   `json:"last_login"`    // Last successful login time
+	Status       string   `json:"status"`        // Account status: active, locked, expired
 }
 
 // Permission defines access rights for a user on a specific table.
@@ -148,8 +181,19 @@ type User struct {
 // The optional RLS field enables row-level security, restricting which
 // rows the user can access within the table.
 type Permission struct {
-	TableName string // The table this permission applies to
-	RLS       *RLS   // Optional row-level security condition (nil = full access)
+	TableName string `json:"table_name"` // The table this permission applies to
+	RLS       *RLS   `json:"rls"`        // Optional row-level security condition (nil = full access)
+}
+
+// DatabasePermission defines access rights for a user on a specific database.
+// This extends the Permission model to support multi-database environments.
+type DatabasePermission struct {
+	Database   string          `json:"database"`   // The database this permission applies to
+	TableName  string          `json:"table_name"` // The table (or "*" for all tables)
+	Privileges []PrivilegeType `json:"privileges"` // List of granted privileges
+	RLS        *RLS            `json:"rls"`        // Optional row-level security condition
+	GrantedBy  string          `json:"granted_by"` // User who granted this permission
+	GrantedAt  string          `json:"granted_at"` // When the permission was granted
 }
 
 // AuthManager handles user authentication and authorization.
@@ -197,7 +241,11 @@ func (m *AuthManager) CreateUser(username, password string) error {
 	}
 
 	// Create the user record with hashed password and serialize to JSON.
-	user := User{Username: username, PasswordHash: string(hashedPassword)}
+	user := User{
+		Username:     username,
+		PasswordHash: string(hashedPassword),
+		CreatedAt:    time.Now().Format(time.RFC3339),
+	}
 	data, err := json.Marshal(user)
 	if err != nil {
 		return err
@@ -239,7 +287,15 @@ func (m *AuthManager) Authenticate(username, password string) bool {
 	// Compare the provided password with the stored hash using bcrypt.
 	// bcrypt.CompareHashAndPassword is constant-time, preventing timing attacks.
 	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password))
-	return err == nil
+	if err == nil {
+		// Update last login time
+		user.LastLogin = time.Now().Format(time.RFC3339)
+		if data, err := json.Marshal(user); err == nil {
+			m.store.Put(key, data)
+		}
+		return true
+	}
+	return false
 }
 
 // Grant grants a permission to a user on a specific table.
@@ -358,6 +414,21 @@ func (m *AuthManager) AlterUser(username, newPassword string) error {
 	return m.store.Put(key, data)
 }
 
+// DropUser removes a user account from the database.
+// Returns an error if the user doesn't exist.
+func (m *AuthManager) DropUser(username string) error {
+	key := "_sys_users:" + username
+
+	// Check if user exists
+	_, err := m.store.Get(key)
+	if err != nil {
+		return fmt.Errorf("user not found: %s", username)
+	}
+
+	// Delete the user
+	return m.store.Delete(key)
+}
+
 // CheckPermission checks if a user has access to a specific table.
 // Returns two values:
 //   - allowed: true if the user has permission, false otherwise
@@ -416,7 +487,55 @@ func (m *AuthManager) AdminExists() bool {
 //
 //	err := authMgr.InitializeAdmin("secure-password-123")
 func (m *AuthManager) InitializeAdmin(password string) error {
-	return m.CreateUser(AdminUsername, password)
+	return m.CreateAdminUser(AdminUsername, password)
+}
+
+// CreateAdminUser creates a new admin user account with the given credentials.
+// The user is created and assigned the 'admin' RBAC role for full privileges.
+// The legacy IsAdmin flag is also set for backward compatibility.
+func (m *AuthManager) CreateAdminUser(username, password string) error {
+	// Construct the storage key for this user.
+	key := userKeyPrefix + username
+
+	// Check if the user already exists.
+	_, err := m.store.Get(key)
+	if err == nil {
+		return errors.New("user already exists")
+	}
+
+	// Hash the password using bcrypt for secure storage.
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), DefaultBcryptCost)
+	if err != nil {
+		return errors.New("failed to hash password: " + err.Error())
+	}
+
+	// Create the admin user record with hashed password and serialize to JSON.
+	user := User{
+		Username:     username,
+		PasswordHash: string(hashedPassword),
+		IsAdmin:      true, // Legacy flag for backward compatibility
+		CreatedAt:    time.Now().Format(time.RFC3339),
+		Status:       "active",
+	}
+	data, err := json.Marshal(user)
+	if err != nil {
+		return err
+	}
+
+	// Store the user in the database.
+	if err := m.store.Put(key, data); err != nil {
+		return err
+	}
+
+	// Assign the admin RBAC role to this user (global scope)
+	// This is the primary authorization mechanism - the IsAdmin flag is deprecated.
+	if err := m.GrantRoleToUser(username, RoleAdmin, "", "system"); err != nil {
+		// Log but don't fail - the user is created, role assignment is secondary
+		// The legacy IsAdmin flag will still work as a fallback
+		_ = err
+	}
+
+	return nil
 }
 
 // InitializeAdminWithGeneratedPassword creates the admin user with a
@@ -448,4 +567,193 @@ func (m *AuthManager) InitializeAdminWithGeneratedPassword() (string, error) {
 // IsAdmin checks if the given username is the admin user.
 func IsAdmin(username string) bool {
 	return username == AdminUsername
+}
+
+// EnsureAdminHasRole ensures the admin user has the admin RBAC role.
+// This is used to fix existing admin users that were created before RBAC was initialized.
+// It's idempotent - if the admin already has the role, it does nothing.
+func (m *AuthManager) EnsureAdminHasRole() error {
+	// Check if admin user exists
+	if !m.AdminExists() {
+		return nil // No admin user, nothing to do
+	}
+
+	// Check if admin role exists
+	if !m.RoleExists(RoleAdmin) {
+		return nil // Role doesn't exist yet, will be created later
+	}
+
+	// Check if admin already has the role
+	if m.HasRole(AdminUsername, RoleAdmin, "") {
+		return nil // Already has the role
+	}
+
+	// Grant the admin role to the admin user
+	return m.GrantRoleToUser(AdminUsername, RoleAdmin, "", "system")
+}
+
+// =============================================================================
+// Database-Scoped Permission Methods
+// =============================================================================
+
+// GrantDatabaseAccess grants a user access to a specific database.
+// This is required before the user can access any tables in the database.
+func (m *AuthManager) GrantDatabaseAccess(username, database string) error {
+	// Verify that the user exists
+	if _, err := m.store.Get(userKeyPrefix + username); err != nil {
+		return errors.New("user does not exist")
+	}
+
+	// Store database access permission
+	key := dbAccessPrefix + username + ":" + database
+	data := []byte(`{"database":"` + database + `","granted":true}`)
+	return m.store.Put(key, data)
+}
+
+// RevokeDatabaseAccess revokes a user's access to a specific database.
+func (m *AuthManager) RevokeDatabaseAccess(username, database string) error {
+	// Verify that the user exists
+	if _, err := m.store.Get(userKeyPrefix + username); err != nil {
+		return errors.New("user does not exist")
+	}
+
+	key := dbAccessPrefix + username + ":" + database
+	return m.store.Delete(key)
+}
+
+// HasDatabaseAccess checks if a user has access to a specific database.
+// This now uses RBAC as the primary authorization mechanism.
+func (m *AuthManager) HasDatabaseAccess(username, database string) bool {
+	// Empty username means unauthenticated - deny access
+	if username == "" {
+		return false
+	}
+
+	// Check RBAC privileges first (primary mechanism)
+	// Check if user has any role with privileges on this database
+	check := m.CheckPrivilege(username, PrivilegeSelect, database, "*")
+	if check.Allowed {
+		return true
+	}
+
+	// Legacy: Check for wildcard access in old permission system
+	wildcardKey := dbAccessPrefix + username + ":" + WildcardDatabase
+	if _, err := m.store.Get(wildcardKey); err == nil {
+		return true
+	}
+
+	// Legacy: Check for specific database access in old permission system
+	key := dbAccessPrefix + username + ":" + database
+	_, err := m.store.Get(key)
+	return err == nil
+}
+
+// GrantOnDatabase grants a permission to a user on a specific table within a database.
+// This is the database-scoped version of Grant.
+func (m *AuthManager) GrantOnDatabase(username, database, table string, rlsCol, rlsVal string) error {
+	// Verify that the user exists
+	if _, err := m.store.Get(userKeyPrefix + username); err != nil {
+		return errors.New("user does not exist")
+	}
+
+	// Build the RLS condition if column is specified
+	var rls *RLS
+	if rlsCol != "" {
+		rls = &RLS{Column: rlsCol, Value: rlsVal}
+	}
+
+	// Create the database permission
+	perm := DatabasePermission{
+		Database:   database,
+		TableName:  table,
+		Privileges: []PrivilegeType{PrivilegeAll},
+		RLS:        rls,
+	}
+
+	data, err := json.Marshal(perm)
+	if err != nil {
+		return err
+	}
+
+	// Store with database-scoped key
+	key := dbPrivKeyPrefix + username + ":" + database + ":" + table
+	return m.store.Put(key, data)
+}
+
+// RevokeOnDatabase revokes a permission from a user on a specific table within a database.
+func (m *AuthManager) RevokeOnDatabase(username, database, table string) error {
+	// Verify that the user exists
+	if _, err := m.store.Get(userKeyPrefix + username); err != nil {
+		return errors.New("user does not exist")
+	}
+
+	key := dbPrivKeyPrefix + username + ":" + database + ":" + table
+	return m.store.Delete(key)
+}
+
+// CheckDatabasePermission checks if a user has access to a specific table within a database.
+// Returns (allowed, rls) where allowed indicates if access is granted and rls is the
+// row-level security condition to apply (nil if no RLS).
+// This now uses RBAC as the primary authorization mechanism.
+func (m *AuthManager) CheckDatabasePermission(username, database, table string) (bool, *RLS) {
+	// Empty username means unauthenticated - deny access
+	if username == "" {
+		return false, nil
+	}
+
+	// Check RBAC privileges first (primary mechanism)
+	check := m.CheckPrivilege(username, PrivilegeSelect, database, table)
+	if check.Allowed {
+		return true, nil // RBAC doesn't support RLS yet
+	}
+
+	// Legacy: Check for wildcard table permission on this database
+	wildcardKey := dbPrivKeyPrefix + username + ":" + database + ":" + WildcardTable
+	if val, err := m.store.Get(wildcardKey); err == nil {
+		var perm DatabasePermission
+		if json.Unmarshal(val, &perm) == nil {
+			return true, perm.RLS
+		}
+	}
+
+	// Legacy: Check for specific table permission
+	key := dbPrivKeyPrefix + username + ":" + database + ":" + table
+	val, err := m.store.Get(key)
+	if err != nil {
+		// Fall back to legacy permission check (for backward compatibility)
+		return m.CheckPermission(username, table)
+	}
+
+	var perm DatabasePermission
+	if err := json.Unmarshal(val, &perm); err != nil {
+		return false, nil
+	}
+
+	return true, perm.RLS
+}
+
+// ListUserDatabases returns a list of databases the user has access to.
+func (m *AuthManager) ListUserDatabases(username string) []string {
+	// Admin has access to all databases
+	if username == AdminUsername || username == "" {
+		return nil // nil means all databases
+	}
+
+	// Scan for database access permissions
+	prefix := dbAccessPrefix + username + ":"
+	data, err := m.store.Scan(prefix)
+	if err != nil {
+		return []string{}
+	}
+
+	databases := make([]string, 0, len(data))
+	for key := range data {
+		// Extract database name from key
+		dbName := key[len(prefix):]
+		if dbName != "" {
+			databases = append(databases, dbName)
+		}
+	}
+
+	return databases
 }
