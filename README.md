@@ -12,7 +12,7 @@ _/ ____\  | ___.__. __| _/\_ |__
   <p><strong>The Lightweight, Embeddable SQL Database for Go Applications</strong></p>
 
   <p>
-    <a href="https://github.com/firefly-oss/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.7-blue.svg" alt="Version"></a>
+    <a href="https://github.com/firefly-oss/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.9-blue.svg" alt="Version"></a>
     <a href="https://github.com/firefly-oss/flydb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="License"></a>
     <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go" alt="Go Version"></a>
     <a href="https://github.com/firefly-oss/flydb"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg" alt="Platform"></a>
@@ -34,6 +34,7 @@ Whether you are building microservices that need local persistence, edge applica
 - **Security by Default** — AES-256-GCM encryption at rest and row-level security policies protect sensitive data without additional configuration.
 - **Scale When Ready** — Start embedded, then seamlessly transition to leader-follower replication with automatic failover as your needs grow.
 - **Full SQL Support** — Joins, subqueries, transactions, stored procedures, triggers, and prepared statements. No compromises on query capabilities.
+- **ODBC/JDBC Ready** — Binary wire protocol with complete metadata APIs enables building standard database drivers for any language or platform.
 
 ### Quick Example
 
@@ -364,12 +365,42 @@ Leader-follower replication provides read scalability and fault tolerance:
 3. Leader streams WAL entries from that offset
 4. Follower applies entries to local storage
 
-**Consistency Model:** Eventual consistency with ~100ms replication lag
+**Replication Modes:**
+| Mode | Description |
+|------|-------------|
+| `ASYNC` | Return immediately, replicate in background (default) |
+| `SEMI_SYNC` | Wait for at least one replica to acknowledge |
+| `SYNC` | Wait for all replicas to acknowledge |
+
+**Consistency Model:** Configurable from eventual consistency (~100ms lag) to synchronous replication
 
 **Failure Handling:**
 - Followers automatically reconnect after network partitions
 - WAL offset ensures no data loss or duplication
 - Followers catch up by replaying missed entries
+- Per-follower health monitoring and lag tracking
+
+### Reactive Events (WATCH)
+
+FlyDB provides real-time data change notifications:
+
+```sql
+-- Subscribe to table changes
+WATCH users
+
+-- Subscribe to schema changes
+WATCH SCHEMA
+
+-- Unsubscribe
+UNWATCH users
+UNWATCH ALL
+```
+
+**Event Types:**
+- `EVENT INSERT <table> <json>` — Row inserted
+- `EVENT UPDATE <table> <old_json> <new_json>` — Row updated
+- `EVENT DELETE <table> <json>` — Row deleted
+- `EVENT SCHEMA <type> <object> <details>` — Schema changed
 
 ### Authentication & Authorization
 
@@ -906,7 +937,7 @@ GRANT SELECT ON orders WHERE user_id = 'alice' TO alice;
 
 ## Replication
 
-FlyDB supports leader-follower replication with automatic failover.
+FlyDB supports leader-follower replication with automatic failover and configurable consistency modes.
 
 ### Start a Leader
 
@@ -921,6 +952,15 @@ FlyDB supports leader-follower replication with automatic failover.
 ```
 
 Followers automatically sync from the leader and can be promoted if the leader fails.
+
+### Cluster Features
+
+- **Term-based Elections**: Monotonically increasing term numbers prevent stale leaders
+- **Quorum Requirements**: Majority required for leader election and decisions
+- **Split-brain Prevention**: Leaders step down if they lose quorum
+- **Dynamic Membership**: Nodes can join/leave without cluster restart
+- **Health Monitoring**: Per-node health tracking with automatic failure detection
+- **Replication Lag Tracking**: Monitor lag per follower for capacity planning
 
 ---
 

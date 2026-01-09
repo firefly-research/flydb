@@ -2,8 +2,8 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.8
-**Last Updated:** January 8, 2026
+**Version:** 01.26.9
+**Last Updated:** January 9, 2026
 
 ---
 
@@ -151,6 +151,13 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Offset-Based Sync | Replica catch-up from any position | 01.26.1 |
 | Automatic Retry | Connection failure recovery | 01.26.1 |
 | Automatic Failover | Leader election using Bully algorithm | 01.26.1 |
+| Cluster Mode | Full cluster mode with automatic leader election | 01.26.9 |
+| Pre-Vote Protocol | Optional pre-vote to prevent disruptions from partitioned nodes | 01.26.9 |
+| Quorum-Based Decisions | Configurable minimum quorum for cluster consensus | 01.26.9 |
+| Health Monitoring | Automatic detection of unhealthy nodes | 01.26.9 |
+| Cluster Events | Real-time event notifications for cluster state changes | 01.26.9 |
+| Dynamic Membership | Nodes can join and leave cluster without downtime | 01.26.9 |
+| Replication Modes | Async, semi-sync, and sync replication modes | 01.26.9 |
 
 ### Performance Features
 
@@ -388,6 +395,7 @@ storage:
 
 | Version | Release Date | Highlights |
 |---------|--------------|------------|
+| 01.26.9 | January 2026 | Production-ready cluster mode with automatic leader election and failover |
 | 01.26.8 | January 2026 | Unified disk-based storage engine with auto-sizing buffer pool |
 | 01.26.7 | January 2026 | Professional multi-line editing with semicolon termination (like psql/mysql) |
 | 01.26.6 | January 2026 | Role-Based Access Control (RBAC), built-in roles, mandatory authentication |

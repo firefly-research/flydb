@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [01.26.9] - 2026-01-09
+
+### Production-Ready Cluster Mode with Automatic Failover
+
+This release introduces a fully integrated cluster mode with automatic leader election, enhanced configuration management, and an improved setup wizard. FlyDB now supports four operational modes: standalone, master, slave, and cluster.
+
+### Added
+
+#### Cluster Mode (`role = "cluster"`)
+- **Automatic Leader Election**: Enhanced Bully algorithm with term-based elections and split-brain prevention
+- **Quorum-Based Decisions**: Configurable minimum quorum for cluster consensus
+- **Pre-Vote Protocol**: Optional pre-vote to prevent disruptions from partitioned nodes
+- **Health Monitoring**: Automatic detection of unhealthy nodes with configurable thresholds
+- **Cluster Events**: Real-time event notifications for leader changes, node joins/leaves, and quorum status
+- **Dynamic Membership**: Nodes can join and leave the cluster without downtime
+
+#### Enhanced Configuration
+- **New Environment Variables**:
+  - `FLYDB_CLUSTER_PORT` - Port for cluster communication (default: 9998)
+  - `FLYDB_CLUSTER_PEERS` - Comma-separated list of peer addresses
+  - `FLYDB_REPLICATION_MODE` - Replication mode: async, semi_sync, or sync
+  - `FLYDB_HEARTBEAT_INTERVAL_MS` - Heartbeat interval in milliseconds
+  - `FLYDB_HEARTBEAT_TIMEOUT_MS` - Heartbeat timeout in milliseconds
+  - `FLYDB_ELECTION_TIMEOUT_MS` - Election timeout in milliseconds
+  - `FLYDB_MIN_QUORUM` - Minimum quorum size for cluster decisions
+- **New Configuration Options**:
+  - `cluster_port` - Port for cluster communication
+  - `cluster_peers` - List of peer node addresses
+  - `replication_mode` - async, semi_sync, or sync
+  - `heartbeat_interval_ms`, `heartbeat_timeout_ms`, `election_timeout_ms`
+  - `min_quorum`, `enable_pre_vote`, `sync_timeout_ms`, `max_replication_lag`
+
+#### Enhanced Setup Wizard
+- **Cluster Role Option**: New "Cluster" option in the role selection menu
+- **Peer Configuration**: Interactive configuration of cluster peer addresses
+- **Replication Mode Selection**: Choose between async, semi_sync, or sync replication
+- **Advanced Cluster Settings**: Configure heartbeat intervals, election timeouts, quorum size, and pre-vote
+
+#### Install Script Enhancements
+- **Updated Configuration Template**: Default config file now includes all cluster options
+- **Cluster Setup Instructions**: Post-install instructions include cluster setup examples
+- **Help Text Updates**: Documentation of all server roles and cluster configuration options
+
+### Changed
+- **Role Validation**: Configuration validation now accepts `cluster` as a valid role
+- **Cluster Role Requirements**: Cluster mode requires at least one peer to be configured
+- **Replication Mode Validation**: Validates replication mode is one of: async, semi_sync, sync
+
+### Example
+
+```bash
+# Start a 3-node cluster
+# Node 1:
+flydb -role cluster -cluster-port 9998 -cluster-peers node2:9998,node3:9998
+
+# Node 2:
+flydb -role cluster -cluster-port 9998 -cluster-peers node1:9998,node3:9998
+
+# Node 3:
+flydb -role cluster -cluster-port 9998 -cluster-peers node1:9998,node2:9998
+```
+
+Or using environment variables:
+```bash
+FLYDB_ROLE=cluster \
+FLYDB_CLUSTER_PORT=9998 \
+FLYDB_CLUSTER_PEERS=node2:9998,node3:9998 \
+FLYDB_REPLICATION_MODE=semi_sync \
+flydb
+```
+
+---
+
 ## [01.26.8] - 2026-01-08
 
 ### Unified Disk-Based Storage Engine
