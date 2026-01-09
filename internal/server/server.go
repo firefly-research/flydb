@@ -134,7 +134,11 @@ type Server struct {
 	// Structure: map[tableName]map[connection]struct{}
 	subscribers map[string]map[net.Conn]struct{}
 
-	// subMu protects the subscribers map from concurrent access.
+	// schemaSubscribers is a set of connections watching schema changes.
+	// These connections receive notifications for CREATE/DROP/ALTER TABLE, etc.
+	schemaSubscribers map[net.Conn]struct{}
+
+	// subMu protects the subscribers and schemaSubscribers maps from concurrent access.
 	subMu sync.Mutex
 
 	// conns maps connections to authenticated usernames.
@@ -226,18 +230,19 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, store storage.E
 
 	// Initialize the server with all components.
 	srv := &Server{
-		addr:          addr,
-		binaryAddr:    binaryAddr,
-		executor:      exec,
-		store:         store,
-		auth:          authMgr,
-		subscribers:   make(map[string]map[net.Conn]struct{}),
-		conns:         make(map[net.Conn]string),
-		connDatabases: make(map[net.Conn]string),
-		transactions:  make(map[net.Conn]*storage.Transaction),
-		preparedStmts: prepMgr,
-		listeners:     make([]net.Listener, 0),
-		stopCh:        make(chan struct{}),
+		addr:              addr,
+		binaryAddr:        binaryAddr,
+		executor:          exec,
+		store:             store,
+		auth:              authMgr,
+		subscribers:       make(map[string]map[net.Conn]struct{}),
+		schemaSubscribers: make(map[net.Conn]struct{}),
+		conns:             make(map[net.Conn]string),
+		connDatabases:     make(map[net.Conn]string),
+		transactions:      make(map[net.Conn]*storage.Transaction),
+		preparedStmts:     prepMgr,
+		listeners:         make([]net.Listener, 0),
+		stopCh:            make(chan struct{}),
 	}
 
 	// Create the binary protocol handler if binary address is specified.
@@ -247,12 +252,25 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, store storage.E
 			prepMgr,
 			&serverAuthenticator{auth: authMgr},
 		)
+
+		// Wire up optional dependencies for ODBC/JDBC driver support
+		srv.binaryHandler.SetMetadataProvider(&serverMetadataProvider{srv: srv})
+		srv.binaryHandler.SetDatabaseManager(&serverDatabaseManager{srv: srv})
 	}
 
 	// Wire up the OnInsert callback for reactive WATCH functionality.
 	// When the executor inserts a row, it calls this callback,
 	// which broadcasts the event to all subscribers of that table.
 	exec.OnInsert = srv.broadcastInsert
+
+	// Wire up the OnUpdate callback for reactive WATCH functionality.
+	exec.OnUpdate = srv.broadcastUpdate
+
+	// Wire up the OnDelete callback for reactive WATCH functionality.
+	exec.OnDelete = srv.broadcastDelete
+
+	// Wire up the OnSchemaChange callback for reactive WATCH functionality.
+	exec.OnSchemaChange = srv.broadcastSchemaChange
 
 	return srv
 }
@@ -293,19 +311,20 @@ func NewServerWithDatabaseManager(addr string, binaryAddr string, dbManager *sto
 
 	// Initialize the server with all components.
 	srv := &Server{
-		addr:          addr,
-		binaryAddr:    binaryAddr,
-		executor:      exec,
-		store:         store,
-		auth:          authMgr,
-		dbManager:     dbManager,
-		subscribers:   make(map[string]map[net.Conn]struct{}),
-		conns:         make(map[net.Conn]string),
-		connDatabases: make(map[net.Conn]string),
-		transactions:  make(map[net.Conn]*storage.Transaction),
-		preparedStmts: prepMgr,
-		listeners:     make([]net.Listener, 0),
-		stopCh:        make(chan struct{}),
+		addr:              addr,
+		binaryAddr:        binaryAddr,
+		executor:          exec,
+		store:             store,
+		auth:              authMgr,
+		dbManager:         dbManager,
+		subscribers:       make(map[string]map[net.Conn]struct{}),
+		schemaSubscribers: make(map[net.Conn]struct{}),
+		conns:             make(map[net.Conn]string),
+		connDatabases:     make(map[net.Conn]string),
+		transactions:      make(map[net.Conn]*storage.Transaction),
+		preparedStmts:     prepMgr,
+		listeners:         make([]net.Listener, 0),
+		stopCh:            make(chan struct{}),
 	}
 
 	// Create the binary protocol handler if binary address is specified.
@@ -315,6 +334,10 @@ func NewServerWithDatabaseManager(addr string, binaryAddr string, dbManager *sto
 			prepMgr,
 			&serverAuthenticator{auth: authMgr},
 		)
+
+		// Wire up optional dependencies for ODBC/JDBC driver support
+		srv.binaryHandler.SetMetadataProvider(&serverMetadataProvider{srv: srv})
+		srv.binaryHandler.SetDatabaseManager(&serverDatabaseManager{srv: srv})
 	}
 
 	// Wire up the OnInsert callback for reactive WATCH functionality.
@@ -322,7 +345,51 @@ func NewServerWithDatabaseManager(addr string, binaryAddr string, dbManager *sto
 	// which broadcasts the event to all subscribers of that table.
 	exec.OnInsert = srv.broadcastInsert
 
+	// Wire up the OnUpdate callback for reactive WATCH functionality.
+	exec.OnUpdate = srv.broadcastUpdate
+
+	// Wire up the OnDelete callback for reactive WATCH functionality.
+	exec.OnDelete = srv.broadcastDelete
+
+	// Wire up the OnSchemaChange callback for reactive WATCH functionality.
+	exec.OnSchemaChange = srv.broadcastSchemaChange
+
 	return srv
+}
+
+// serverDatabaseManager implements the protocol.DatabaseManager interface.
+type serverDatabaseManager struct {
+	srv *Server
+}
+
+// UseDatabase switches to a different database.
+func (m *serverDatabaseManager) UseDatabase(database string) error {
+	if m.srv.dbManager == nil {
+		if database == "" || database == "default" {
+			return nil
+		}
+		return fmt.Errorf("database '%s' does not exist", database)
+	}
+	if !m.srv.dbManager.DatabaseExists(database) {
+		return fmt.Errorf("database '%s' does not exist", database)
+	}
+	return nil
+}
+
+// DatabaseExists checks if a database exists.
+func (m *serverDatabaseManager) DatabaseExists(database string) bool {
+	if m.srv.dbManager == nil {
+		return database == "" || database == "default"
+	}
+	return m.srv.dbManager.DatabaseExists(database)
+}
+
+// ListDatabases returns a list of available database names.
+func (m *serverDatabaseManager) ListDatabases() []string {
+	if m.srv.dbManager == nil {
+		return []string{"default"}
+	}
+	return m.srv.dbManager.ListDatabases()
 }
 
 // serverQueryExecutor adapts the server for the QueryExecutor interface.
@@ -940,13 +1007,90 @@ func (s *Server) broadcastInsert(table string, data string) {
 	// Check if there are any subscribers for this table.
 	if subs, ok := s.subscribers[table]; ok {
 		// Format the event message.
-		msg := fmt.Sprintf("EVENT %s %s\n", table, data)
+		msg := fmt.Sprintf("EVENT INSERT %s %s\n", table, data)
 
 		// Send to each subscriber asynchronously.
 		// Using goroutines prevents slow clients from blocking others.
 		for conn := range subs {
 			go conn.Write([]byte(msg))
 		}
+	}
+}
+
+// broadcastUpdate notifies all subscribers of a table about an UPDATE.
+// This function is called by the executor's OnUpdate callback whenever
+// a row is updated in a table.
+//
+// The notification is sent asynchronously to avoid blocking the UPDATE.
+// Each subscriber receives a message in the format: "EVENT UPDATE <table> <old_json> <new_json>\n"
+//
+// Parameters:
+//   - table: Name of the table where the UPDATE occurred
+//   - oldData: JSON representation of the row before update
+//   - newData: JSON representation of the row after update
+func (s *Server) broadcastUpdate(table string, oldData string, newData string) {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+
+	// Check if there are any subscribers for this table.
+	if subs, ok := s.subscribers[table]; ok {
+		// Format the event message with both old and new data.
+		msg := fmt.Sprintf("EVENT UPDATE %s %s %s\n", table, oldData, newData)
+
+		// Send to each subscriber asynchronously.
+		for conn := range subs {
+			go conn.Write([]byte(msg))
+		}
+	}
+}
+
+// broadcastDelete notifies all subscribers of a table about a DELETE.
+// This function is called by the executor's OnDelete callback whenever
+// a row is deleted from a table.
+//
+// The notification is sent asynchronously to avoid blocking the DELETE.
+// Each subscriber receives a message in the format: "EVENT DELETE <table> <json>\n"
+//
+// Parameters:
+//   - table: Name of the table where the DELETE occurred
+//   - data: JSON representation of the deleted row
+func (s *Server) broadcastDelete(table string, data string) {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+
+	// Check if there are any subscribers for this table.
+	if subs, ok := s.subscribers[table]; ok {
+		// Format the event message.
+		msg := fmt.Sprintf("EVENT DELETE %s %s\n", table, data)
+
+		// Send to each subscriber asynchronously.
+		for conn := range subs {
+			go conn.Write([]byte(msg))
+		}
+	}
+}
+
+// broadcastSchemaChange notifies all schema subscribers about a schema change.
+// This function is called by the executor's OnSchemaChange callback whenever
+// a DDL operation (CREATE TABLE, DROP TABLE, ALTER TABLE, etc.) is executed.
+//
+// The notification is sent asynchronously to avoid blocking the DDL operation.
+// Each subscriber receives a message in the format: "EVENT SCHEMA <event_type> <object_name> <details>\n"
+//
+// Parameters:
+//   - eventType: Type of schema change (CREATE_TABLE, DROP_TABLE, ALTER_TABLE, etc.)
+//   - objectName: Name of the affected object (table, view, index, etc.)
+//   - details: JSON representation of additional details
+func (s *Server) broadcastSchemaChange(eventType string, objectName string, details string) {
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+
+	// Format the event message.
+	msg := fmt.Sprintf("EVENT SCHEMA %s %s %s\n", eventType, objectName, details)
+
+	// Send to all schema subscribers asynchronously.
+	for conn := range s.schemaSubscribers {
+		go conn.Write([]byte(msg))
 	}
 }
 
@@ -981,6 +1125,11 @@ func (s *Server) handleConnection(conn net.Conn) {
 				subscriptionCount++
 				delete(subs, conn)
 			}
+		}
+		// Also remove from schema subscribers
+		if _, ok := s.schemaSubscribers[conn]; ok {
+			subscriptionCount++
+			delete(s.schemaSubscribers, conn)
 		}
 		s.subMu.Unlock()
 
@@ -1048,11 +1197,17 @@ func (s *Server) handleConnection(conn net.Conn) {
 			isError = strings.HasPrefix(response, "ERROR")
 
 		case "WATCH":
-			// WATCH: Subscribe to INSERT events on a table.
-			// Format: WATCH <table>
-			// After subscribing, the client receives "EVENT <table> <json>"
-			// messages whenever a row is inserted into the table.
+			// WATCH: Subscribe to data change events on a table or schema changes.
+			// Format: WATCH <table> or WATCH SCHEMA
+			// After subscribing, the client receives "EVENT <type> <table> <json>"
+			// messages whenever data is inserted, updated, or deleted.
 			response = s.handleWatch(conn, parts)
+			isError = strings.HasPrefix(response, "ERROR")
+
+		case "UNWATCH":
+			// UNWATCH: Unsubscribe from events.
+			// Format: UNWATCH <table>, UNWATCH SCHEMA, or UNWATCH ALL
+			response = s.handleUnwatch(conn, parts)
 			isError = strings.HasPrefix(response, "ERROR")
 
 		case "SQL":
@@ -1142,6 +1297,10 @@ func (s *Server) handleAuth(conn net.Conn, parts []string) string {
 // handleWatch processes the WATCH command for reactive subscriptions.
 // It adds the connection to the subscribers list for the specified table.
 //
+// Supported formats:
+//   - WATCH <table>: Subscribe to INSERT/UPDATE/DELETE events on a table
+//   - WATCH SCHEMA: Subscribe to schema change events (CREATE/DROP/ALTER TABLE, etc.)
+//
 // Parameters:
 //   - conn: The client connection to subscribe
 //   - parts: Command parts [command, table]
@@ -1150,21 +1309,75 @@ func (s *Server) handleAuth(conn net.Conn, parts []string) string {
 func (s *Server) handleWatch(conn net.Conn, parts []string) string {
 	// Validate command format.
 	if len(parts) < 2 {
-		return "ERROR: Missing table name. Usage: WATCH <table>"
+		return "ERROR: Missing table name. Usage: WATCH <table> or WATCH SCHEMA"
 	}
 
-	table := parts[1]
+	target := parts[1]
 
-	// Add the connection to the subscribers map.
-	// Create the table's subscriber set if it doesn't exist.
 	s.subMu.Lock()
-	if _, ok := s.subscribers[table]; !ok {
-		s.subscribers[table] = make(map[net.Conn]struct{})
+	defer s.subMu.Unlock()
+
+	// Check if subscribing to schema changes
+	if strings.ToUpper(target) == "SCHEMA" {
+		s.schemaSubscribers[conn] = struct{}{}
+		return "WATCH SCHEMA OK"
 	}
-	s.subscribers[table][conn] = struct{}{}
-	s.subMu.Unlock()
+
+	// Add the connection to the subscribers map for the table.
+	// Create the table's subscriber set if it doesn't exist.
+	if _, ok := s.subscribers[target]; !ok {
+		s.subscribers[target] = make(map[net.Conn]struct{})
+	}
+	s.subscribers[target][conn] = struct{}{}
 
 	return "WATCH OK"
+}
+
+// handleUnwatch processes the UNWATCH command to remove subscriptions.
+// It removes the connection from the subscribers list for the specified table.
+//
+// Supported formats:
+//   - UNWATCH <table>: Unsubscribe from events on a specific table
+//   - UNWATCH SCHEMA: Unsubscribe from schema change events
+//   - UNWATCH ALL: Unsubscribe from all events
+//
+// Parameters:
+//   - conn: The client connection to unsubscribe
+//   - parts: Command parts [command, table]
+//
+// Returns the response string to send to the client.
+func (s *Server) handleUnwatch(conn net.Conn, parts []string) string {
+	// Validate command format.
+	if len(parts) < 2 {
+		return "ERROR: Missing table name. Usage: UNWATCH <table>, UNWATCH SCHEMA, or UNWATCH ALL"
+	}
+
+	target := strings.ToUpper(parts[1])
+
+	s.subMu.Lock()
+	defer s.subMu.Unlock()
+
+	switch target {
+	case "SCHEMA":
+		delete(s.schemaSubscribers, conn)
+		return "UNWATCH SCHEMA OK"
+
+	case "ALL":
+		// Remove from all table subscriptions
+		for _, subs := range s.subscribers {
+			delete(subs, conn)
+		}
+		// Remove from schema subscriptions
+		delete(s.schemaSubscribers, conn)
+		return "UNWATCH ALL OK"
+
+	default:
+		// Remove from specific table subscription
+		if subs, ok := s.subscribers[parts[1]]; ok {
+			delete(subs, conn)
+		}
+		return "UNWATCH OK"
+	}
 }
 
 // handleSQL processes the SQL command for statement execution.

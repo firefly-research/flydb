@@ -25,6 +25,15 @@ FlyDB implements Leader-Follower (Master-Slave) replication for:
   - Fault tolerance: Slaves can be promoted if master fails
   - Data durability: Multiple copies of data across nodes
 
+Replication Modes:
+==================
+
+FlyDB supports three replication modes:
+
+  - ASYNC: Return immediately, replicate in background (default)
+  - SEMI_SYNC: Wait for at least one replica to acknowledge
+  - SYNC: Wait for all replicas to acknowledge
+
 Replication Architecture:
 =========================
 
@@ -32,11 +41,13 @@ Replication Architecture:
     - Accepts all write operations
     - Maintains the authoritative WAL
     - Streams WAL updates to connected slaves
+    - Tracks per-follower replication state
 
   Slave Node:
     - Connects to master and requests WAL updates
     - Applies received updates to local storage
     - Can serve read queries (eventually consistent)
+    - Automatically reconnects on failure
 
 Replication Protocol:
 =====================
@@ -44,8 +55,9 @@ Replication Protocol:
 The replication protocol is binary for efficiency:
 
   1. Slave connects to master's replication port
-  2. Slave sends its current WAL offset (8 bytes, big-endian int64)
-  3. Master streams WAL entries from that offset:
+  2. Slave sends its address for identification
+  3. Slave sends its current WAL offset (8 bytes, big-endian int64)
+  4. Master streams WAL entries from that offset:
      - Op (1 byte): OpPut=1, OpDelete=2
      - KeyLen (4 bytes, big-endian uint32)
      - Key (KeyLen bytes)
@@ -55,13 +67,10 @@ The replication protocol is binary for efficiency:
 Consistency Model:
 ==================
 
-FlyDB provides eventual consistency for replicated data:
-  - Writes are immediately visible on the master
-  - Slaves receive updates asynchronously (100ms polling interval)
-  - There may be a brief delay before slaves see new data
-
-This model is suitable for read-heavy workloads where slight
-staleness is acceptable in exchange for better performance.
+FlyDB provides configurable consistency:
+  - ASYNC: Eventual consistency with ~100ms replication lag
+  - SEMI_SYNC: At least one replica has the data
+  - SYNC: All replicas have the data before returning
 
 Failure Handling:
 =================
@@ -69,6 +78,7 @@ Failure Handling:
   - If a slave disconnects, it reconnects and resumes from its last offset
   - The WAL offset ensures no data is lost or duplicated
   - Slaves automatically catch up after network partitions
+  - Per-follower health monitoring with automatic failure detection
 */
 package server
 
@@ -78,12 +88,111 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
 // replicationPollInterval defines how often the master checks for new WAL entries.
 // A shorter interval means lower replication lag but higher CPU usage.
 const replicationPollInterval = 100 * time.Millisecond
+
+// ReplicationMode defines how writes are acknowledged
+type ReplicationMode int
+
+const (
+	// ReplicationAsync returns immediately, replicates in background
+	ReplicationAsync ReplicationMode = iota
+
+	// ReplicationSemiSync waits for at least one replica to acknowledge
+	ReplicationSemiSync
+
+	// ReplicationSync waits for all replicas to acknowledge
+	ReplicationSync
+)
+
+func (m ReplicationMode) String() string {
+	switch m {
+	case ReplicationAsync:
+		return "ASYNC"
+	case ReplicationSemiSync:
+		return "SEMI_SYNC"
+	case ReplicationSync:
+		return "SYNC"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+// ReplicationConfig holds configuration for replication
+type ReplicationConfig struct {
+	// Mode determines how writes are acknowledged
+	Mode ReplicationMode
+
+	// SyncTimeout is how long to wait for sync acknowledgments
+	SyncTimeout time.Duration
+
+	// MaxLagThreshold is the maximum acceptable replication lag
+	MaxLagThreshold time.Duration
+
+	// PollInterval is how often to check for new WAL entries
+	PollInterval time.Duration
+
+	// ReconnectInterval is how long to wait before reconnecting
+	ReconnectInterval time.Duration
+
+	// EnableCompression enables compression for replication traffic
+	EnableCompression bool
+}
+
+// DefaultReplicationConfig returns sensible defaults
+func DefaultReplicationConfig() ReplicationConfig {
+	return ReplicationConfig{
+		Mode:              ReplicationAsync,
+		SyncTimeout:       5 * time.Second,
+		MaxLagThreshold:   10 * time.Second,
+		PollInterval:      100 * time.Millisecond,
+		ReconnectInterval: 3 * time.Second,
+		EnableCompression: false,
+	}
+}
+
+// FollowerState tracks the replication state of a follower
+type FollowerState struct {
+	Address     string
+	WALOffset   int64
+	LastAckTime time.Time
+	Lag         time.Duration
+	IsHealthy   bool
+	FailedSends int
+	conn        net.Conn
+	mu          sync.Mutex
+}
+
+// ReplicationMetrics holds replication statistics
+type ReplicationMetrics struct {
+	mu sync.RWMutex
+
+	// TotalBytesReplicated is the total bytes sent to followers
+	TotalBytesReplicated int64
+
+	// TotalEntriesReplicated is the total WAL entries replicated
+	TotalEntriesReplicated int64
+
+	// AverageLag is the average replication lag across followers
+	AverageLag time.Duration
+
+	// MaxLag is the maximum replication lag
+	MaxLag time.Duration
+
+	// HealthyFollowers is the count of healthy followers
+	HealthyFollowers int
+
+	// TotalFollowers is the total follower count
+	TotalFollowers int
+
+	// LastReplicationTime is when the last replication occurred
+	LastReplicationTime time.Time
+}
 
 // Replicator handles Leader-Follower replication for FlyDB.
 // It can operate in two modes:
@@ -93,6 +202,8 @@ const replicationPollInterval = 100 * time.Millisecond
 // The Replicator uses the WAL (Write-Ahead Log) as the source of truth
 // for replication, ensuring that all operations are replicated in order.
 type Replicator struct {
+	config ReplicationConfig
+
 	// wal is the Write-Ahead Log used for reading/writing operations.
 	wal *storage.WAL
 
@@ -101,6 +212,21 @@ type Replicator struct {
 
 	// isLeader indicates whether this node is the master (true) or slave (false).
 	isLeader bool
+
+	// Follower tracking (leader only)
+	followers   map[string]*FollowerState
+	followersMu sync.RWMutex
+
+	// Metrics
+	metrics *ReplicationMetrics
+
+	// Pending acknowledgments for sync replication
+	pendingAcks   map[int64]chan struct{}
+	pendingAcksMu sync.Mutex
+
+	// Lifecycle
+	stopCh chan struct{}
+	wg     sync.WaitGroup
 }
 
 // NewReplicator creates a new Replicator instance.
@@ -112,7 +238,49 @@ type Replicator struct {
 //
 // Returns a configured Replicator ready to start.
 func NewReplicator(wal *storage.WAL, store storage.Engine, isLeader bool) *Replicator {
-	return &Replicator{wal: wal, store: store, isLeader: isLeader}
+	return NewReplicatorWithConfig(DefaultReplicationConfig(), wal, store, isLeader)
+}
+
+// NewReplicatorWithConfig creates a new Replicator with custom configuration.
+func NewReplicatorWithConfig(config ReplicationConfig, wal *storage.WAL, store storage.Engine, isLeader bool) *Replicator {
+	return &Replicator{
+		config:      config,
+		wal:         wal,
+		store:       store,
+		isLeader:    isLeader,
+		followers:   make(map[string]*FollowerState),
+		metrics:     &ReplicationMetrics{},
+		pendingAcks: make(map[int64]chan struct{}),
+		stopCh:      make(chan struct{}),
+	}
+}
+
+// GetMetrics returns a copy of the current replication metrics
+func (r *Replicator) GetMetrics() ReplicationMetrics {
+	r.metrics.mu.RLock()
+	defer r.metrics.mu.RUnlock()
+	return *r.metrics
+}
+
+// GetFollowerStates returns the state of all followers
+func (r *Replicator) GetFollowerStates() []FollowerState {
+	r.followersMu.RLock()
+	defer r.followersMu.RUnlock()
+
+	states := make([]FollowerState, 0, len(r.followers))
+	for _, f := range r.followers {
+		f.mu.Lock()
+		states = append(states, FollowerState{
+			Address:     f.Address,
+			WALOffset:   f.WALOffset,
+			LastAckTime: f.LastAckTime,
+			Lag:         f.Lag,
+			IsHealthy:   f.IsHealthy,
+			FailedSends: f.FailedSends,
+		})
+		f.mu.Unlock()
+	}
+	return states
 }
 
 // StartMaster starts the replication server, listening for slave connections.
@@ -132,91 +300,188 @@ func (r *Replicator) StartMaster(port string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Replication Master listening on %s\n", port)
+	fmt.Printf("Replication Master listening on %s (mode: %s)\n", port, r.config.Mode)
 
-	// Accept loop: continuously accept new slave connections.
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			// Log and continue on accept errors.
-			continue
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		for {
+			select {
+			case <-r.stopCh:
+				ln.Close()
+				return
+			default:
+			}
+
+			ln.(*net.TCPListener).SetDeadline(time.Now().Add(1 * time.Second))
+			conn, err := ln.Accept()
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				continue
+			}
+
+			go r.handleFollower(conn)
 		}
-		// Handle each slave in a separate goroutine.
-		go r.handleSlave(conn)
-	}
+	}()
+
+	return nil
 }
 
-// handleSlave manages a single slave connection.
-// It reads the slave's current offset and streams WAL updates from that point.
-//
-// The streaming process:
-//  1. Read the slave's current WAL offset
-//  2. Poll for new WAL entries at regular intervals
-//  3. Serialize and send new entries to the slave
-//  4. Continue until the connection is closed
-//
-// Parameters:
-//   - conn: The TCP connection to the slave
-func (r *Replicator) handleSlave(conn net.Conn) {
+// handleFollower manages a single follower connection with health tracking
+func (r *Replicator) handleFollower(conn net.Conn) {
 	defer conn.Close()
 
-	// Read the slave's current WAL offset.
-	// This tells us where to start streaming from.
-	// The offset is sent as a big-endian int64 (8 bytes).
+	// Read the follower's address for identification
+	var addrLen uint32
+	if err := binary.Read(conn, binary.BigEndian, &addrLen); err != nil {
+		// Legacy protocol: no address sent, use connection address
+		addrLen = 0
+	}
+
+	var followerAddr string
+	if addrLen > 0 {
+		addrBuf := make([]byte, addrLen)
+		if _, err := io.ReadFull(conn, addrBuf); err != nil {
+			return
+		}
+		followerAddr = string(addrBuf)
+	} else {
+		followerAddr = conn.RemoteAddr().String()
+	}
+
+	// Read the follower's current WAL offset
 	var offset int64
-	err := binary.Read(conn, binary.BigEndian, &offset)
-	if err != nil {
-		fmt.Printf("Failed to read slave offset: %v\n", err)
+	if err := binary.Read(conn, binary.BigEndian, &offset); err != nil {
+		fmt.Printf("Failed to read follower offset: %v\n", err)
 		return
 	}
 
-	fmt.Printf("Slave connected with offset %d\n", offset)
+	fmt.Printf("Follower %s connected with offset %d\n", followerAddr, offset)
 
-	// Create a ticker for polling new WAL entries.
-	// Polling is simpler than push-based notification and works well
-	// for this educational implementation.
-	ticker := time.NewTicker(replicationPollInterval)
+	// Register the follower
+	r.followersMu.Lock()
+	follower := &FollowerState{
+		Address:     followerAddr,
+		WALOffset:   offset,
+		LastAckTime: time.Now(),
+		IsHealthy:   true,
+		conn:        conn,
+	}
+	r.followers[followerAddr] = follower
+	r.followersMu.Unlock()
+
+	// Update metrics
+	r.updateFollowerMetrics()
+
+	defer func() {
+		r.followersMu.Lock()
+		delete(r.followers, followerAddr)
+		r.followersMu.Unlock()
+		r.updateFollowerMetrics()
+		fmt.Printf("Follower %s disconnected\n", followerAddr)
+	}()
+
+	// Start streaming WAL entries
+	ticker := time.NewTicker(r.config.PollInterval)
 	defer ticker.Stop()
 
-	// Track the current position in the WAL.
 	currentOffset := offset
 
-	// Polling loop: check for new WAL entries periodically.
-	for range ticker.C {
-		// Get the current WAL size to check for new entries.
-		size, err := r.wal.Size()
-		if err != nil {
-			continue
-		}
+	for {
+		select {
+		case <-r.stopCh:
+			return
+		case <-ticker.C:
+			size, err := r.wal.Size()
+			if err != nil {
+				continue
+			}
 
-		// If there are new entries, stream them to the slave.
-		if size > currentOffset {
-			// Replay WAL entries from the current offset.
-			// For each entry, serialize it and send to the slave.
-			err := r.wal.Replay(currentOffset, func(op byte, key string, value []byte) {
-				// Serialize the WAL entry in the replication protocol format.
-				// Format: Op(1) + KeyLen(4) + Key + ValueLen(4) + Value
-				buf := make([]byte, 1+4+len(key)+4+len(value))
-				buf[0] = op
-				binary.BigEndian.PutUint32(buf[1:], uint32(len(key)))
-				copy(buf[5:], []byte(key))
-				off := 5 + len(key)
-				binary.BigEndian.PutUint32(buf[off:], uint32(len(value)))
-				copy(buf[off+4:], value)
+			if size > currentOffset {
+				bytesReplicated := int64(0)
+				entriesReplicated := int64(0)
 
-				// Send the serialized entry to the slave.
-				conn.Write(buf)
+				err := r.wal.Replay(currentOffset, func(op byte, key string, value []byte) {
+					// Serialize the WAL entry
+					buf := make([]byte, 1+4+len(key)+4+len(value))
+					buf[0] = op
+					binary.BigEndian.PutUint32(buf[1:], uint32(len(key)))
+					copy(buf[5:], []byte(key))
+					off := 5 + len(key)
+					binary.BigEndian.PutUint32(buf[off:], uint32(len(value)))
+					copy(buf[off+4:], value)
 
-				// Update the offset to track progress.
-				currentOffset += int64(len(buf))
-			})
+					// Send to follower
+					if _, err := conn.Write(buf); err != nil {
+						follower.mu.Lock()
+						follower.FailedSends++
+						if follower.FailedSends >= 3 {
+							follower.IsHealthy = false
+						}
+						follower.mu.Unlock()
+						return
+					}
 
-			if err != nil && err != io.EOF {
-				fmt.Printf("Replay error: %v\n", err)
-				return
+					bytesReplicated += int64(len(buf))
+					entriesReplicated++
+					currentOffset += int64(len(buf))
+				})
+
+				if err != nil && err != io.EOF {
+					fmt.Printf("Replay error for %s: %v\n", followerAddr, err)
+					return
+				}
+
+				// Update metrics
+				r.metrics.mu.Lock()
+				r.metrics.TotalBytesReplicated += bytesReplicated
+				r.metrics.TotalEntriesReplicated += entriesReplicated
+				r.metrics.LastReplicationTime = time.Now()
+				r.metrics.mu.Unlock()
+
+				// Update follower state
+				follower.mu.Lock()
+				follower.WALOffset = currentOffset
+				follower.LastAckTime = time.Now()
+				follower.FailedSends = 0
+				follower.IsHealthy = true
+				follower.mu.Unlock()
 			}
 		}
 	}
+}
+
+// updateFollowerMetrics updates the aggregate follower metrics
+func (r *Replicator) updateFollowerMetrics() {
+	r.followersMu.RLock()
+	defer r.followersMu.RUnlock()
+
+	healthyCount := 0
+	var totalLag time.Duration
+	var maxLag time.Duration
+
+	for _, f := range r.followers {
+		f.mu.Lock()
+		if f.IsHealthy {
+			healthyCount++
+		}
+		totalLag += f.Lag
+		if f.Lag > maxLag {
+			maxLag = f.Lag
+		}
+		f.mu.Unlock()
+	}
+
+	r.metrics.mu.Lock()
+	r.metrics.HealthyFollowers = healthyCount
+	r.metrics.TotalFollowers = len(r.followers)
+	if len(r.followers) > 0 {
+		r.metrics.AverageLag = totalLag / time.Duration(len(r.followers))
+	}
+	r.metrics.MaxLag = maxLag
+	r.metrics.mu.Unlock()
 }
 
 // StartSlave connects to a master and synchronizes data.
@@ -234,66 +499,99 @@ func (r *Replicator) handleSlave(conn net.Conn) {
 //
 // Returns an error if the connection fails or is lost.
 func (r *Replicator) StartSlave(masterAddr string) error {
-	// Connect to the master's replication port.
+	return r.StartSlaveWithAddr(masterAddr, "")
+}
+
+// StartSlaveWithAddr connects to a master with a specific self address for identification
+func (r *Replicator) StartSlaveWithAddr(masterAddr string, selfAddr string) error {
+	for {
+		select {
+		case <-r.stopCh:
+			return nil
+		default:
+		}
+
+		err := r.connectAndSync(masterAddr, selfAddr)
+		if err != nil {
+			fmt.Printf("Replication connection lost: %v. Reconnecting in %v...\n",
+				err, r.config.ReconnectInterval)
+			time.Sleep(r.config.ReconnectInterval)
+			continue
+		}
+	}
+}
+
+// connectAndSync establishes connection and syncs with master
+func (r *Replicator) connectAndSync(masterAddr string, selfAddr string) error {
 	conn, err := net.Dial("tcp", masterAddr)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	// Get the current WAL size as our starting offset.
-	// This ensures we only receive entries we don't already have.
+	// Send our address for identification (if provided)
+	if selfAddr != "" {
+		if err := binary.Write(conn, binary.BigEndian, uint32(len(selfAddr))); err != nil {
+			return err
+		}
+		if _, err := conn.Write([]byte(selfAddr)); err != nil {
+			return err
+		}
+	}
+
+	// Get current WAL size as starting offset
 	offset, err := r.wal.Size()
 	if err != nil {
 		return err
 	}
 
-	// Send our offset to the master.
-	// The master will start streaming from this position.
-	err = binary.Write(conn, binary.BigEndian, offset)
-	if err != nil {
+	// Send our offset
+	if err := binary.Write(conn, binary.BigEndian, offset); err != nil {
 		return err
 	}
 
 	fmt.Printf("Connected to Master at %s with offset %d\n", masterAddr, offset)
 
-	// Receive loop: continuously read and apply WAL entries.
+	// Receive and apply WAL entries
 	for {
-		// Read the operation type (1 byte).
+		select {
+		case <-r.stopCh:
+			return nil
+		default:
+		}
+
+		// Set read deadline
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+
+		// Read operation type
 		opBuf := make([]byte, 1)
 		if _, err := io.ReadFull(conn, opBuf); err != nil {
 			return fmt.Errorf("failed to read operation: %w", err)
 		}
 		op := opBuf[0]
 
-		// Read the key length (4 bytes, big-endian).
+		// Read key
 		var keyLen uint32
 		if err := binary.Read(conn, binary.BigEndian, &keyLen); err != nil {
 			return fmt.Errorf("failed to read key length: %w", err)
 		}
-
-		// Read the key bytes.
 		keyBuf := make([]byte, keyLen)
 		if _, err := io.ReadFull(conn, keyBuf); err != nil {
 			return fmt.Errorf("failed to read key: %w", err)
 		}
 		key := string(keyBuf)
 
-		// Read the value length (4 bytes, big-endian).
+		// Read value
 		var valLen uint32
 		if err := binary.Read(conn, binary.BigEndian, &valLen); err != nil {
 			return fmt.Errorf("failed to read value length: %w", err)
 		}
-
-		// Read the value bytes.
 		valBuf := make([]byte, valLen)
 		if _, err := io.ReadFull(conn, valBuf); err != nil {
 			return fmt.Errorf("failed to read value: %w", err)
 		}
 
-		// Apply the operation to the local storage engine.
-		// Note: This writes to the local WAL, which increases our offset.
-		// This is intentional - it ensures the slave's WAL matches the master's.
+		// Apply the operation
 		switch op {
 		case storage.OpPut:
 			if err := r.store.Put(key, valBuf); err != nil {
@@ -303,10 +601,49 @@ func (r *Replicator) StartSlave(masterAddr string) error {
 			if err := r.store.Delete(key); err != nil {
 				fmt.Printf("Failed to apply DELETE %s: %v\n", key, err)
 			}
-		default:
-			fmt.Printf("Unknown operation type: %d\n", op)
 		}
 
 		fmt.Printf("Replicated: %s\n", key)
 	}
+}
+
+// Stop gracefully stops the replicator
+func (r *Replicator) Stop() {
+	close(r.stopCh)
+	r.wg.Wait()
+}
+
+// WaitForReplication waits for replication to complete (for sync mode)
+func (r *Replicator) WaitForReplication(offset int64, timeout time.Duration) error {
+	if r.config.Mode == ReplicationAsync {
+		return nil // No waiting in async mode
+	}
+
+	r.pendingAcksMu.Lock()
+	ch := make(chan struct{})
+	r.pendingAcks[offset] = ch
+	r.pendingAcksMu.Unlock()
+
+	defer func() {
+		r.pendingAcksMu.Lock()
+		delete(r.pendingAcks, offset)
+		r.pendingAcksMu.Unlock()
+	}()
+
+	select {
+	case <-ch:
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("replication timeout after %v", timeout)
+	}
+}
+
+// GetMode returns the current replication mode
+func (r *Replicator) GetMode() ReplicationMode {
+	return r.config.Mode
+}
+
+// SetMode changes the replication mode
+func (r *Replicator) SetMode(mode ReplicationMode) {
+	r.config.Mode = mode
 }
