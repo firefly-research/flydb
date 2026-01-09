@@ -82,6 +82,7 @@ type Config struct {
 	Port                 string
 	BinaryPort           string
 	ReplPort             string
+	ClusterPort          string
 	Role                 string
 	MasterAddr           string
 	DBPath               string
@@ -96,6 +97,19 @@ type Config struct {
 	IsFirstSetup         bool   // True if this is a first-time setup requiring admin initialization
 	ConfigFile           string // Path to the configuration file (if loaded or saved)
 	SaveConfig           bool   // Whether to save the configuration to a file
+
+	// Cluster configuration
+	ClusterPeers      []string // List of peer addresses for cluster mode
+	HeartbeatInterval int      // Heartbeat interval in milliseconds
+	HeartbeatTimeout  int      // Heartbeat timeout in milliseconds
+	ElectionTimeout   int      // Election timeout in milliseconds
+	MinQuorum         int      // Minimum nodes for quorum (0 = auto)
+	EnablePreVote     bool     // Enable pre-vote protocol
+
+	// Replication configuration
+	ReplicationMode   string // async, semi_sync, or sync
+	SyncTimeout       int    // Timeout for sync replication in ms
+	MaxReplicationLag int    // Max acceptable replication lag in ms
 }
 
 // DefaultConfig returns the default configuration values.
@@ -106,6 +120,7 @@ func DefaultConfig() Config {
 		Port:              "8888",
 		BinaryPort:        "8889",
 		ReplPort:          "9999",
+		ClusterPort:       "9998",
 		Role:              "standalone",
 		MasterAddr:        "",
 		DBPath:            "flydb.fdb",
@@ -118,6 +133,19 @@ func DefaultConfig() Config {
 		IsFirstSetup:      false,
 		ConfigFile:        "",
 		SaveConfig:        false,
+
+		// Cluster defaults
+		ClusterPeers:      []string{},
+		HeartbeatInterval: 500,  // 500ms
+		HeartbeatTimeout:  2000, // 2s
+		ElectionTimeout:   1000, // 1s
+		MinQuorum:         0,    // auto-calculate
+		EnablePreVote:     true,
+
+		// Replication defaults
+		ReplicationMode:   "async",
+		SyncTimeout:       5000,  // 5s
+		MaxReplicationLag: 10000, // 10s
 	}
 }
 
@@ -127,6 +155,7 @@ func FromConfig(cfg *config.Config) Config {
 		Port:                 strconv.Itoa(cfg.Port),
 		BinaryPort:           strconv.Itoa(cfg.BinaryPort),
 		ReplPort:             strconv.Itoa(cfg.ReplPort),
+		ClusterPort:          strconv.Itoa(cfg.ClusterPort),
 		Role:                 cfg.Role,
 		MasterAddr:           cfg.MasterAddr,
 		DBPath:               cfg.DBPath,
@@ -140,6 +169,19 @@ func FromConfig(cfg *config.Config) Config {
 		IsFirstSetup:         false,
 		ConfigFile:           cfg.ConfigFile,
 		SaveConfig:           false,
+
+		// Cluster configuration
+		ClusterPeers:      cfg.ClusterPeers,
+		HeartbeatInterval: cfg.HeartbeatInterval,
+		HeartbeatTimeout:  cfg.HeartbeatTimeout,
+		ElectionTimeout:   cfg.ElectionTimeout,
+		MinQuorum:         cfg.MinQuorum,
+		EnablePreVote:     cfg.EnablePreVote,
+
+		// Replication configuration
+		ReplicationMode:   cfg.ReplicationMode,
+		SyncTimeout:       cfg.SyncTimeout,
+		MaxReplicationLag: cfg.MaxReplicationLag,
 	}
 }
 
@@ -148,6 +190,7 @@ func (c *Config) ToConfig() *config.Config {
 	port, _ := strconv.Atoi(c.Port)
 	binaryPort, _ := strconv.Atoi(c.BinaryPort)
 	replPort, _ := strconv.Atoi(c.ReplPort)
+	clusterPort, _ := strconv.Atoi(c.ClusterPort)
 
 	dataDir := c.DataDir
 	if !c.MultiDBEnabled {
@@ -158,6 +201,7 @@ func (c *Config) ToConfig() *config.Config {
 		Port:                 port,
 		BinaryPort:           binaryPort,
 		ReplPort:             replPort,
+		ClusterPort:          clusterPort,
 		Role:                 c.Role,
 		MasterAddr:           c.MasterAddr,
 		DBPath:               c.DBPath,
@@ -168,6 +212,19 @@ func (c *Config) ToConfig() *config.Config {
 		LogJSON:              c.LogJSON,
 		AdminPassword:        c.AdminPassword,
 		ConfigFile:           c.ConfigFile,
+
+		// Cluster configuration
+		ClusterPeers:      c.ClusterPeers,
+		HeartbeatInterval: c.HeartbeatInterval,
+		HeartbeatTimeout:  c.HeartbeatTimeout,
+		ElectionTimeout:   c.ElectionTimeout,
+		MinQuorum:         c.MinQuorum,
+		EnablePreVote:     c.EnablePreVote,
+
+		// Replication configuration
+		ReplicationMode:   c.ReplicationMode,
+		SyncTimeout:       c.SyncTimeout,
+		MaxReplicationLag: c.MaxReplicationLag,
 	}
 }
 
@@ -229,6 +286,8 @@ func DisplayExistingConfig(cfg *config.Config, configPath string) {
 		roleDisplay = "Master"
 	case "slave":
 		roleDisplay = "Slave"
+	case "cluster":
+		roleDisplay = "Cluster"
 	default:
 		roleDisplay = cfg.Role
 	}
@@ -236,8 +295,15 @@ func DisplayExistingConfig(cfg *config.Config, configPath string) {
 	fmt.Printf("    %-16s %s %s\n", cli.Dimmed("Role:"), roleDisplay, cli.Dimmed(getRoleDescription(cfg.Role)))
 	fmt.Printf("    %-16s %d\n", cli.Dimmed("Text Port:"), cfg.Port)
 	fmt.Printf("    %-16s %d\n", cli.Dimmed("Binary Port:"), cfg.BinaryPort)
-	if cfg.Role == "master" {
+	if cfg.Role == "master" || cfg.Role == "cluster" {
 		fmt.Printf("    %-16s %d\n", cli.Dimmed("Repl Port:"), cfg.ReplPort)
+	}
+	if cfg.Role == "cluster" {
+		fmt.Printf("    %-16s %d\n", cli.Dimmed("Cluster Port:"), cfg.ClusterPort)
+		if len(cfg.ClusterPeers) > 0 {
+			fmt.Printf("    %-16s %v\n", cli.Dimmed("Cluster Peers:"), cfg.ClusterPeers)
+		}
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Replication:"), cfg.ReplicationMode)
 	}
 
 	if cfg.Role == "slave" && cfg.MasterAddr != "" {
@@ -264,6 +330,8 @@ func getRoleDescription(role string) string {
 		return "(leader node)"
 	case "slave":
 		return "(follower node)"
+	case "cluster":
+		return "(distributed cluster)"
 	default:
 		return ""
 	}
@@ -573,6 +641,7 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 	fmt.Printf("    %s  Standalone %s\n", cli.Success("[1]"), cli.Dimmed("- single server, development/small deployments"))
 	fmt.Printf("    %s  Master     %s\n", cli.Highlight("[2]"), cli.Dimmed("- leader node, accepts writes"))
 	fmt.Printf("    %s  Slave      %s\n", cli.Highlight("[3]"), cli.Dimmed("- follower node, read replicas"))
+	fmt.Printf("    %s  Cluster    %s\n", cli.Highlight("[4]"), cli.Dimmed("- distributed cluster with automatic failover"))
 	fmt.Println()
 
 	// Determine default mode selection based on current role
@@ -584,6 +653,8 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 		defaultMode = "2"
 	case "slave":
 		defaultMode = "3"
+	case "cluster":
+		defaultMode = "4"
 	}
 
 	mode := promptWithDefault(reader, "  Select role", defaultMode)
@@ -594,6 +665,8 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 		cfg.Role = "master"
 	case "3":
 		cfg.Role = "slave"
+	case "4":
+		cfg.Role = "cluster"
 	default:
 		cfg.Role = "standalone"
 	}
@@ -606,12 +679,15 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 	cfg.Port = promptPortWithValidation(reader, "  Text protocol port", cfg.Port)
 	cfg.BinaryPort = promptPortWithValidation(reader, "  Binary protocol port", cfg.BinaryPort)
 
-	if cfg.Role == "master" {
+	if cfg.Role == "master" || cfg.Role == "cluster" {
 		cfg.ReplPort = promptPortWithValidation(reader, "  Replication port", cfg.ReplPort)
+	}
+	if cfg.Role == "cluster" {
+		cfg.ClusterPort = promptPortWithValidation(reader, "  Cluster port", cfg.ClusterPort)
 	}
 	fmt.Println()
 
-	// Step 3: Configure slave-specific settings
+	// Step 3: Configure role-specific settings
 	stepNum := 3
 	if cfg.Role == "slave" {
 		printStepHeader(stepNum, "Replication")
@@ -621,6 +697,112 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 			defaultMaster = "localhost:9999"
 		}
 		cfg.MasterAddr = promptWithValidation(reader, "  Master address (host:port)", defaultMaster, validateAddress)
+		fmt.Println()
+		stepNum++
+	}
+
+	// Configure cluster-specific settings
+	if cfg.Role == "cluster" {
+		printStepHeader(stepNum, "Cluster Configuration")
+		fmt.Println()
+		fmt.Printf("    %s Enter peer addresses for cluster nodes\n", cli.Dimmed("•"))
+		fmt.Printf("    %s Format: host:port (comma-separated for multiple)\n", cli.Dimmed("•"))
+		fmt.Printf("    %s Example: node2:9998,node3:9998\n", cli.Dimmed("•"))
+		fmt.Println()
+
+		// Get existing peers as default
+		defaultPeers := ""
+		if len(cfg.ClusterPeers) > 0 {
+			defaultPeers = strings.Join(cfg.ClusterPeers, ",")
+		}
+		peersInput := promptWithDefault(reader, "  Cluster peers", defaultPeers)
+		if peersInput != "" {
+			peers := strings.Split(peersInput, ",")
+			cfg.ClusterPeers = make([]string, 0, len(peers))
+			for _, peer := range peers {
+				peer = strings.TrimSpace(peer)
+				if peer != "" {
+					cfg.ClusterPeers = append(cfg.ClusterPeers, peer)
+				}
+			}
+		}
+		fmt.Println()
+		stepNum++
+
+		// Replication mode
+		printStepHeader(stepNum, "Replication Mode")
+		fmt.Println()
+		fmt.Printf("    %s  Async     %s\n", cli.Success("[1]"), cli.Dimmed("- best performance, eventual consistency"))
+		fmt.Printf("    %s  Semi-sync %s\n", cli.Highlight("[2]"), cli.Dimmed("- balanced, at least one replica confirms"))
+		fmt.Printf("    %s  Sync      %s\n", cli.Highlight("[3]"), cli.Dimmed("- strongest consistency, all replicas confirm"))
+		fmt.Println()
+
+		defaultReplMode := "1"
+		switch cfg.ReplicationMode {
+		case "async":
+			defaultReplMode = "1"
+		case "semi_sync":
+			defaultReplMode = "2"
+		case "sync":
+			defaultReplMode = "3"
+		}
+
+		replMode := promptWithDefault(reader, "  Select replication mode", defaultReplMode)
+		switch replMode {
+		case "1":
+			cfg.ReplicationMode = "async"
+		case "2":
+			cfg.ReplicationMode = "semi_sync"
+		case "3":
+			cfg.ReplicationMode = "sync"
+		default:
+			cfg.ReplicationMode = "async"
+		}
+		fmt.Println()
+		stepNum++
+
+		// Advanced cluster settings
+		printStepHeader(stepNum, "Advanced Cluster Settings")
+		fmt.Println()
+		fmt.Printf("    %s Press Enter to accept defaults (recommended)\n", cli.Dimmed("•"))
+		fmt.Println()
+
+		// Heartbeat interval
+		defaultHeartbeat := strconv.Itoa(cfg.HeartbeatInterval)
+		heartbeatStr := promptWithDefault(reader, "  Heartbeat interval (ms)", defaultHeartbeat)
+		if hb, err := strconv.Atoi(heartbeatStr); err == nil && hb >= 100 {
+			cfg.HeartbeatInterval = hb
+		}
+
+		// Heartbeat timeout
+		defaultTimeout := strconv.Itoa(cfg.HeartbeatTimeout)
+		timeoutStr := promptWithDefault(reader, "  Heartbeat timeout (ms)", defaultTimeout)
+		if to, err := strconv.Atoi(timeoutStr); err == nil && to >= cfg.HeartbeatInterval*2 {
+			cfg.HeartbeatTimeout = to
+		}
+
+		// Election timeout
+		defaultElection := strconv.Itoa(cfg.ElectionTimeout)
+		electionStr := promptWithDefault(reader, "  Election timeout (ms)", defaultElection)
+		if et, err := strconv.Atoi(electionStr); err == nil && et >= 500 {
+			cfg.ElectionTimeout = et
+		}
+
+		// Min quorum
+		defaultQuorum := strconv.Itoa(cfg.MinQuorum)
+		quorumStr := promptWithDefault(reader, "  Min quorum (0=auto)", defaultQuorum)
+		if q, err := strconv.Atoi(quorumStr); err == nil && q >= 0 {
+			cfg.MinQuorum = q
+		}
+
+		// Pre-vote
+		defaultPreVote := "y"
+		if !cfg.EnablePreVote {
+			defaultPreVote = "n"
+		}
+		preVoteStr := promptWithDefault(reader, "  Enable pre-vote protocol? (y/n)", defaultPreVote)
+		cfg.EnablePreVote = strings.ToLower(preVoteStr) == "y" || strings.ToLower(preVoteStr) == "yes"
+
 		fmt.Println()
 		stepNum++
 	}
@@ -807,15 +989,42 @@ func printSummary(cfg *Config) {
 	// Ports
 	fmt.Printf("    %-16s %s\n", cli.Dimmed("Text Port:"), cfg.Port)
 	fmt.Printf("    %-16s %s\n", cli.Dimmed("Binary Port:"), cfg.BinaryPort)
-	if cfg.Role == "master" {
+	if cfg.Role == "master" || cfg.Role == "cluster" {
 		fmt.Printf("    %-16s %s\n", cli.Dimmed("Repl Port:"), cfg.ReplPort)
+	}
+	if cfg.Role == "cluster" {
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Cluster Port:"), cfg.ClusterPort)
 	}
 
 	if cfg.Role == "slave" {
 		fmt.Printf("    %-16s %s\n", cli.Dimmed("Master:"), cfg.MasterAddr)
 	}
 
+	// Cluster configuration
+	if cfg.Role == "cluster" {
+		fmt.Println()
+		fmt.Println("  " + cli.Highlight("Cluster Settings"))
+		fmt.Println("  " + cli.Separator(56))
+		fmt.Println()
+		if len(cfg.ClusterPeers) > 0 {
+			fmt.Printf("    %-16s %v\n", cli.Dimmed("Peers:"), cfg.ClusterPeers)
+		} else {
+			fmt.Printf("    %-16s %s\n", cli.Dimmed("Peers:"), cli.Warning("none configured"))
+		}
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Replication:"), cfg.ReplicationMode)
+		fmt.Printf("    %-16s %dms\n", cli.Dimmed("Heartbeat:"), cfg.HeartbeatInterval)
+		fmt.Printf("    %-16s %dms\n", cli.Dimmed("HB Timeout:"), cfg.HeartbeatTimeout)
+		fmt.Printf("    %-16s %dms\n", cli.Dimmed("Election:"), cfg.ElectionTimeout)
+		quorumDisplay := "auto"
+		if cfg.MinQuorum > 0 {
+			quorumDisplay = strconv.Itoa(cfg.MinQuorum)
+		}
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Min Quorum:"), quorumDisplay)
+		fmt.Printf("    %-16s %v\n", cli.Dimmed("Pre-vote:"), cfg.EnablePreVote)
+	}
+
 	// Storage
+	fmt.Println()
 	fmt.Printf("    %-16s %s\n", cli.Dimmed("Data Directory:"), cfg.DataDir)
 
 	// Encryption
