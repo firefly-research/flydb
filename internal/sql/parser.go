@@ -653,12 +653,36 @@ func (p *Parser) parseColumnConstraints() ([]ColumnConstraint, error) {
 		case "DEFAULT":
 			p.nextToken() // consume DEFAULT
 			p.nextToken() // get the default value
-			if p.cur.Type != TokenString && p.cur.Type != TokenNumber && p.cur.Type != TokenKeyword {
+			if p.cur.Type != TokenString && p.cur.Type != TokenNumber && p.cur.Type != TokenKeyword && p.cur.Type != TokenIdent {
 				return nil, errors.New("expected default value after DEFAULT")
 			}
+			defaultValue := p.cur.Value
+
+			// Check if this is a function call like NOW(), CURRENT_TIMESTAMP(), etc.
+			if p.peek.Type == TokenLParen {
+				p.nextToken() // consume (
+				// For now, we only support no-argument functions like NOW()
+				// If there are arguments, we'd need to parse them here
+				if p.peek.Type != TokenRParen {
+					// Parse function arguments (for future extensibility)
+					for {
+						p.nextToken() // consume argument or comma
+						if p.cur.Type == TokenRParen {
+							break
+						}
+						if p.cur.Type == TokenComma {
+							continue
+						}
+					}
+				} else {
+					p.nextToken() // consume )
+				}
+				defaultValue = defaultValue + "()"
+			}
+
 			constraints = append(constraints, ColumnConstraint{
 				Type:         ConstraintDefault,
-				DefaultValue: p.cur.Value,
+				DefaultValue: defaultValue,
 			})
 
 		case "REFERENCES":
@@ -732,25 +756,21 @@ func (p *Parser) parseCheckExpression() (*CheckExpr, error) {
 	case TokenEqual:
 		checkExpr.Operator = "="
 		p.nextToken()
+	case TokenNotEqual:
+		checkExpr.Operator = "<>"
+		p.nextToken()
 	case TokenLessThan:
+		checkExpr.Operator = "<"
 		p.nextToken()
-		if p.peek.Type == TokenEqual {
-			p.nextToken()
-			checkExpr.Operator = "<="
-		} else if p.peek.Type == TokenGreaterThan {
-			p.nextToken()
-			checkExpr.Operator = "<>"
-		} else {
-			checkExpr.Operator = "<"
-		}
 	case TokenGreaterThan:
+		checkExpr.Operator = ">"
 		p.nextToken()
-		if p.peek.Type == TokenEqual {
-			p.nextToken()
-			checkExpr.Operator = ">="
-		} else {
-			checkExpr.Operator = ">"
-		}
+	case TokenLessEqual:
+		checkExpr.Operator = "<="
+		p.nextToken()
+	case TokenGreaterEqual:
+		checkExpr.Operator = ">="
+		p.nextToken()
 	case TokenKeyword:
 		switch p.peek.Value {
 		case "IN":
@@ -830,22 +850,21 @@ func (p *Parser) parseCheckExpression() (*CheckExpr, error) {
 		case TokenEqual:
 			nestedCheck.Operator = "="
 			p.nextToken()
+		case TokenNotEqual:
+			nestedCheck.Operator = "<>"
+			p.nextToken()
 		case TokenLessThan:
+			nestedCheck.Operator = "<"
 			p.nextToken()
-			if p.peek.Type == TokenEqual {
-				p.nextToken()
-				nestedCheck.Operator = "<="
-			} else {
-				nestedCheck.Operator = "<"
-			}
 		case TokenGreaterThan:
+			nestedCheck.Operator = ">"
 			p.nextToken()
-			if p.peek.Type == TokenEqual {
-				p.nextToken()
-				nestedCheck.Operator = ">="
-			} else {
-				nestedCheck.Operator = ">"
-			}
+		case TokenLessEqual:
+			nestedCheck.Operator = "<="
+			p.nextToken()
+		case TokenGreaterEqual:
+			nestedCheck.Operator = ">="
+			p.nextToken()
 		default:
 			return nil, errors.New("expected operator in CHECK")
 		}
@@ -1067,12 +1086,11 @@ func (p *Parser) parseInsert() (*InsertStmt, error) {
 		var rowValues []string
 		for {
 			p.nextToken()
-			if p.cur.Type == TokenString || p.cur.Type == TokenNumber || p.cur.Type == TokenIdent ||
-				(p.cur.Type == TokenKeyword && (p.cur.Value == "NULL" || p.cur.Value == "TRUE" || p.cur.Value == "FALSE")) {
-				rowValues = append(rowValues, p.cur.Value)
-			} else {
-				return nil, errors.New("expected value")
+			value, err := p.parseValue()
+			if err != nil {
+				return nil, err
 			}
+			rowValues = append(rowValues, value)
 
 			// Check for more values
 			if p.peek.Type == TokenComma {
@@ -1142,10 +1160,11 @@ func (p *Parser) parseInsert() (*InsertStmt, error) {
 				}
 
 				p.nextToken()
-				if p.cur.Type != TokenString && p.cur.Type != TokenNumber && p.cur.Type != TokenIdent {
-					return nil, errors.New("expected value")
+				value, err := p.parseValue()
+				if err != nil {
+					return nil, err
 				}
-				stmt.OnConflict.Updates[col] = p.cur.Value
+				stmt.OnConflict.Updates[col] = value
 
 				// Check for more assignments
 				if p.peek.Type == TokenComma {
@@ -1197,11 +1216,13 @@ func (p *Parser) parseUpdate() (*UpdateStmt, error) {
 			return nil, errors.New("expected =")
 		}
 
-		// Parse the new value.
-		// Currently supports simple values (strings, numbers, identifiers).
-		// A production parser would support expressions here.
+		// Parse the new value (supports function calls like NOW(), UPPER(), etc.)
 		p.nextToken()
-		updates[col] = p.cur.Value
+		value, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		updates[col] = value
 
 		// Check for more assignments.
 		if p.peek.Type == TokenComma {
@@ -1226,8 +1247,11 @@ func (p *Parser) parseUpdate() (*UpdateStmt, error) {
 		}
 
 		p.nextToken()
-		val := p.cur.Value
-		where = &Condition{Column: col, Value: val}
+		value, err := p.parseValue()
+		if err != nil {
+			return nil, err
+		}
+		where = &Condition{Column: col, Value: value}
 	}
 
 	return &UpdateStmt{TableName: tableName, Updates: updates, Where: where}, nil
@@ -1713,6 +1737,67 @@ func (p *Parser) expectPeek(t TokenType) bool {
 	return false
 }
 
+// parseValue parses a value that may be a simple literal or a function call.
+// This handles cases like: 'hello', 123, column_name, NOW(), UPPER('text'), etc.
+//
+// The current token (p.cur) should already be positioned at the value token.
+// After calling this function, p.cur will be at the last token of the value
+// (either the value itself or the closing parenthesis of a function call).
+//
+// Returns the parsed value as a string, or an error if parsing fails.
+func (p *Parser) parseValue() (string, error) {
+	// Check if current token is a valid value type
+	if p.cur.Type != TokenString && p.cur.Type != TokenNumber &&
+		p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
+		return "", errors.New("expected value")
+	}
+
+	value := p.cur.Value
+
+	// Check if this is a function call (identifier or keyword followed by parenthesis)
+	if p.peek.Type == TokenLParen {
+		p.nextToken() // consume (
+
+		// Build the function call string
+		var args []string
+
+		// Parse function arguments if any
+		if p.peek.Type != TokenRParen {
+			for {
+				p.nextToken() // get argument
+
+				// Recursively parse the argument value (could be another function call)
+				argValue, err := p.parseValue()
+				if err != nil {
+					return "", fmt.Errorf("error parsing function argument: %v", err)
+				}
+				args = append(args, argValue)
+
+				// Check for more arguments
+				if p.peek.Type == TokenComma {
+					p.nextToken() // consume comma
+				} else {
+					break
+				}
+			}
+		}
+
+		// Expect closing parenthesis
+		if !p.expectPeek(TokenRParen) {
+			return "", errors.New("expected ) after function arguments")
+		}
+
+		// Build the function call string
+		if len(args) > 0 {
+			value = value + "(" + strings.Join(args, ", ") + ")"
+		} else {
+			value = value + "()"
+		}
+	}
+
+	return value, nil
+}
+
 // parseBegin parses a BEGIN statement.
 // Syntax: BEGIN [TRANSACTION]
 //
@@ -1929,25 +2014,11 @@ func (p *Parser) parseExecute() (*ExecuteStmt, error) {
 	if p.cur.Type == TokenKeyword && p.cur.Value == "USING" {
 		p.nextToken()
 
-		// Parse parameter values
+		// Parse parameter values (supports function calls like NOW(), UPPER(), etc.)
 		for {
-			var value string
-			switch p.cur.Type {
-			case TokenNumber, TokenIdent:
-				value = p.cur.Value
-			case TokenString:
-				value = p.cur.Value
-			case TokenKeyword:
-				// Handle TRUE/FALSE as boolean values
-				if p.cur.Value == "TRUE" || p.cur.Value == "FALSE" {
-					value = p.cur.Value
-				} else if p.cur.Value == "NULL" {
-					value = "NULL"
-				} else {
-					return nil, fmt.Errorf("unexpected keyword in USING clause: %s", p.cur.Value)
-				}
-			default:
-				return nil, errors.New("expected parameter value")
+			value, err := p.parseValue()
+			if err != nil {
+				return nil, fmt.Errorf("expected parameter value: %v", err)
 			}
 			stmt.Params = append(stmt.Params, value)
 
@@ -2247,15 +2318,17 @@ func (p *Parser) parseWhereClause() (*WhereClause, error) {
 		if !p.expectPeek(TokenRParen) {
 			return nil, errors.New("expected ) after EXISTS subquery")
 		}
-		return &WhereClause{
+		clause := &WhereClause{
 			Operator:   "EXISTS",
 			Subquery:   subquery,
 			IsSubquery: true,
-		}, nil
+		}
+		return p.parseCompoundCondition(clause)
 	}
 
-	// Parse column name
-	if !p.expectPeek(TokenIdent) {
+	// Parse column name (can be identifier or keyword used as column name)
+	p.nextToken()
+	if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
 		return nil, errors.New("expected column in WHERE")
 	}
 	col := p.cur.Value
@@ -2265,6 +2338,9 @@ func (p *Parser) parseWhereClause() (*WhereClause, error) {
 	switch p.peek.Type {
 	case TokenEqual:
 		operator = "="
+		p.nextToken()
+	case TokenNotEqual:
+		operator = "<>"
 		p.nextToken()
 	case TokenLessThan:
 		operator = "<"
@@ -2339,23 +2415,24 @@ func (p *Parser) parseWhereClause() (*WhereClause, error) {
 			if !p.expectPeek(TokenRParen) {
 				return nil, errors.New("expected ) after IN subquery")
 			}
-			return &WhereClause{
+			clause := &WhereClause{
 				Column:     col,
 				Operator:   operator,
 				Subquery:   subquery,
 				IsSubquery: true,
-			}, nil
+			}
+			return p.parseCompoundCondition(clause)
 		}
 
-		// Parse value list
+		// Parse value list (supports function calls like NOW(), UPPER(), etc.)
 		var values []string
 		for {
 			p.nextToken()
-			if p.cur.Type == TokenString || p.cur.Type == TokenNumber || p.cur.Type == TokenIdent {
-				values = append(values, p.cur.Value)
-			} else {
-				return nil, errors.New("expected value in IN list")
+			value, err := p.parseValue()
+			if err != nil {
+				return nil, fmt.Errorf("expected value in IN list: %v", err)
 			}
+			values = append(values, value)
 			if p.peek.Type == TokenComma {
 				p.nextToken()
 			} else {
@@ -2365,60 +2442,92 @@ func (p *Parser) parseWhereClause() (*WhereClause, error) {
 		if !p.expectPeek(TokenRParen) {
 			return nil, errors.New("expected ) after IN list")
 		}
-		return &WhereClause{
+		clause := &WhereClause{
 			Column:   col,
 			Operator: operator,
 			Values:   values,
-		}, nil
+		}
+		return p.parseCompoundCondition(clause)
 	}
 
 	// Handle IS NULL and IS NOT NULL (no value needed)
 	if operator == "IS NULL" || operator == "IS NOT NULL" {
-		return &WhereClause{
+		clause := &WhereClause{
 			Column:   col,
 			Operator: operator,
-		}, nil
+		}
+		return p.parseCompoundCondition(clause)
 	}
 
 	// Handle BETWEEN: column BETWEEN low AND high
 	if operator == "BETWEEN" {
 		p.nextToken()
-		if p.cur.Type != TokenString && p.cur.Type != TokenNumber && p.cur.Type != TokenIdent {
-			return nil, errors.New("expected low value in BETWEEN")
+		lowVal, err := p.parseValue()
+		if err != nil {
+			return nil, fmt.Errorf("expected low value in BETWEEN: %v", err)
 		}
-		lowVal := p.cur.Value
 
-		// Expect AND keyword
+		// Expect AND keyword (this is part of BETWEEN syntax, not a compound condition)
 		if !p.expectPeek(TokenKeyword) || p.cur.Value != "AND" {
 			return nil, errors.New("expected AND in BETWEEN")
 		}
 
 		p.nextToken()
-		if p.cur.Type != TokenString && p.cur.Type != TokenNumber && p.cur.Type != TokenIdent {
-			return nil, errors.New("expected high value in BETWEEN")
+		highVal, err := p.parseValue()
+		if err != nil {
+			return nil, fmt.Errorf("expected high value in BETWEEN: %v", err)
 		}
-		highVal := p.cur.Value
 
-		return &WhereClause{
+		clause := &WhereClause{
 			Column:      col,
 			Operator:    operator,
 			BetweenLow:  lowVal,
 			BetweenHigh: highVal,
-		}, nil
+		}
+		return p.parseCompoundCondition(clause)
 	}
 
-	// Parse simple value (for =, <, >, <=, >=, LIKE, NOT LIKE)
+	// Parse simple value (for =, <, >, <=, >=, <>, LIKE, NOT LIKE)
+	// Supports function calls like NOW(), UPPER(), etc.
 	p.nextToken()
-	if p.cur.Type != TokenString && p.cur.Type != TokenNumber && p.cur.Type != TokenIdent {
-		return nil, errors.New("expected value in WHERE")
+	val, err := p.parseValue()
+	if err != nil {
+		return nil, fmt.Errorf("expected value in WHERE: %v", err)
 	}
-	val := p.cur.Value
 
-	return &WhereClause{
+	clause := &WhereClause{
 		Column:   col,
 		Operator: operator,
 		Value:    val,
-	}, nil
+	}
+
+	// Check for AND/OR to chain conditions
+	return p.parseCompoundCondition(clause)
+}
+
+// parseCompoundCondition checks for AND/OR after a WHERE condition and chains them.
+func (p *Parser) parseCompoundCondition(clause *WhereClause) (*WhereClause, error) {
+	// Check for AND/OR to chain conditions
+	if p.peek.Type == TokenKeyword {
+		switch p.peek.Value {
+		case "AND":
+			p.nextToken() // consume AND
+			nextClause, err := p.parseWhereClause()
+			if err != nil {
+				return nil, fmt.Errorf("error parsing AND condition: %v", err)
+			}
+			clause.And = nextClause
+		case "OR":
+			p.nextToken() // consume OR
+			nextClause, err := p.parseWhereClause()
+			if err != nil {
+				return nil, fmt.Errorf("error parsing OR condition: %v", err)
+			}
+			clause.Or = nextClause
+		}
+	}
+
+	return clause, nil
 }
 
 // parseCreateProcedure parses a CREATE PROCEDURE statement.
@@ -2939,8 +3048,9 @@ func (p *Parser) parseAlterTable() (*AlterTableStmt, error) {
 		}
 		stmt.Action = AlterActionModifyColumn
 
-		// Parse column name
-		if !p.expectPeek(TokenIdent) {
+		// Parse column name (can be identifier or keyword used as column name)
+		p.nextToken()
+		if p.cur.Type != TokenIdent && p.cur.Type != TokenKeyword {
 			return nil, errors.New("expected column name after MODIFY COLUMN")
 		}
 		stmt.ColumnName = p.cur.Value

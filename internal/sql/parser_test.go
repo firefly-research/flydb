@@ -636,6 +636,116 @@ func TestParseCreateTableWithDefault(t *testing.T) {
 	}
 }
 
+func TestParseCreateTableWithDefaultFunction(t *testing.T) {
+	input := `CREATE TABLE users (
+		id SERIAL PRIMARY KEY,
+		name TEXT NOT NULL,
+		email TEXT UNIQUE,
+		created_at TIMESTAMP DEFAULT NOW()
+	)`
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	createStmt, ok := stmt.(*CreateTableStmt)
+	if !ok {
+		t.Fatalf("Expected CreateTableStmt, got %T", stmt)
+	}
+
+	if createStmt.TableName != "users" {
+		t.Errorf("Expected table name 'users', got '%s'", createStmt.TableName)
+	}
+
+	if len(createStmt.Columns) != 4 {
+		t.Fatalf("Expected 4 columns, got %d", len(createStmt.Columns))
+	}
+
+	// Check created_at column has DEFAULT NOW() constraint
+	createdAtCol := createStmt.Columns[3]
+	if createdAtCol.Name != "created_at" {
+		t.Errorf("Expected column name 'created_at', got '%s'", createdAtCol.Name)
+	}
+	if createdAtCol.Type != "TIMESTAMP" {
+		t.Errorf("Expected column type 'TIMESTAMP', got '%s'", createdAtCol.Type)
+	}
+	defaultVal, hasDefault := createdAtCol.GetDefaultValue()
+	if !hasDefault {
+		t.Fatal("Expected created_at column to have DEFAULT constraint")
+	}
+	if defaultVal != "NOW()" {
+		t.Errorf("Expected default value 'NOW()', got '%s'", defaultVal)
+	}
+}
+
+func TestParseInsertWithFunctionCall(t *testing.T) {
+	input := "INSERT INTO logs (message, created_at) VALUES ('test', NOW())"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	insertStmt, ok := stmt.(*InsertStmt)
+	if !ok {
+		t.Fatalf("Expected InsertStmt, got %T", stmt)
+	}
+
+	if len(insertStmt.Values) != 2 {
+		t.Fatalf("Expected 2 values, got %d", len(insertStmt.Values))
+	}
+	if insertStmt.Values[0] != "test" {
+		t.Errorf("Expected first value 'test', got '%s'", insertStmt.Values[0])
+	}
+	if insertStmt.Values[1] != "NOW()" {
+		t.Errorf("Expected second value 'NOW()', got '%s'", insertStmt.Values[1])
+	}
+}
+
+func TestParseInsertWithNestedFunctionCall(t *testing.T) {
+	input := "INSERT INTO users (name) VALUES (UPPER('alice'))"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	insertStmt, ok := stmt.(*InsertStmt)
+	if !ok {
+		t.Fatalf("Expected InsertStmt, got %T", stmt)
+	}
+
+	if len(insertStmt.Values) != 1 {
+		t.Fatalf("Expected 1 value, got %d", len(insertStmt.Values))
+	}
+	if insertStmt.Values[0] != "UPPER(alice)" {
+		t.Errorf("Expected value 'UPPER(alice)', got '%s'", insertStmt.Values[0])
+	}
+}
+
+func TestParseUpdateWithFunctionCall(t *testing.T) {
+	input := "UPDATE users SET updated_at = NOW() WHERE id = 1"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	updateStmt, ok := stmt.(*UpdateStmt)
+	if !ok {
+		t.Fatalf("Expected UpdateStmt, got %T", stmt)
+	}
+
+	if updateStmt.Updates["updated_at"] != "NOW()" {
+		t.Errorf("Expected updated_at = 'NOW()', got '%s'", updateStmt.Updates["updated_at"])
+	}
+}
+
 func TestParseSelectDistinct(t *testing.T) {
 	input := "SELECT DISTINCT category FROM products"
 	lexer := NewLexer(input)
@@ -658,6 +768,152 @@ func TestParseSelectDistinct(t *testing.T) {
 	}
 	if len(selectStmt.Columns) != 1 || selectStmt.Columns[0] != "category" {
 		t.Errorf("Expected column 'category', got %v", selectStmt.Columns)
+	}
+}
+
+func TestParseWhereNotEqual(t *testing.T) {
+	input := "SELECT * FROM users WHERE status <> 'inactive'"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	selectStmt, ok := stmt.(*SelectStmt)
+	if !ok {
+		t.Fatalf("Expected SelectStmt, got %T", stmt)
+	}
+
+	if selectStmt.WhereExt == nil {
+		t.Fatal("Expected WhereExt to be set")
+	}
+	if selectStmt.WhereExt.Operator != "<>" {
+		t.Errorf("Expected operator '<>', got '%s'", selectStmt.WhereExt.Operator)
+	}
+	if selectStmt.WhereExt.Value != "inactive" {
+		t.Errorf("Expected value 'inactive', got '%s'", selectStmt.WhereExt.Value)
+	}
+}
+
+func TestParseWhereNotEqualBang(t *testing.T) {
+	input := "SELECT * FROM users WHERE status != 'inactive'"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	selectStmt, ok := stmt.(*SelectStmt)
+	if !ok {
+		t.Fatalf("Expected SelectStmt, got %T", stmt)
+	}
+
+	if selectStmt.WhereExt == nil {
+		t.Fatal("Expected WhereExt to be set")
+	}
+	if selectStmt.WhereExt.Operator != "<>" {
+		t.Errorf("Expected operator '<>', got '%s'", selectStmt.WhereExt.Operator)
+	}
+}
+
+func TestParseWhereCompoundAnd(t *testing.T) {
+	input := "SELECT * FROM users WHERE status = 'active' AND age > 18"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	selectStmt, ok := stmt.(*SelectStmt)
+	if !ok {
+		t.Fatalf("Expected SelectStmt, got %T", stmt)
+	}
+
+	if selectStmt.WhereExt == nil {
+		t.Fatal("Expected WhereExt to be set")
+	}
+	if selectStmt.WhereExt.Column != "status" {
+		t.Errorf("Expected first column 'status', got '%s'", selectStmt.WhereExt.Column)
+	}
+	if selectStmt.WhereExt.And == nil {
+		t.Fatal("Expected And condition to be set")
+	}
+	if selectStmt.WhereExt.And.Column != "age" {
+		t.Errorf("Expected And column 'age', got '%s'", selectStmt.WhereExt.And.Column)
+	}
+	if selectStmt.WhereExt.And.Operator != ">" {
+		t.Errorf("Expected And operator '>', got '%s'", selectStmt.WhereExt.And.Operator)
+	}
+}
+
+func TestParseWhereCompoundOr(t *testing.T) {
+	input := "SELECT * FROM users WHERE category = 'admin' OR category = 'superuser'"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	selectStmt, ok := stmt.(*SelectStmt)
+	if !ok {
+		t.Fatalf("Expected SelectStmt, got %T", stmt)
+	}
+
+	if selectStmt.WhereExt == nil {
+		t.Fatal("Expected WhereExt to be set")
+	}
+	if selectStmt.WhereExt.Or == nil {
+		t.Fatal("Expected Or condition to be set")
+	}
+	if selectStmt.WhereExt.Or.Column != "category" {
+		t.Errorf("Expected Or column 'category', got '%s'", selectStmt.WhereExt.Or.Column)
+	}
+	if selectStmt.WhereExt.Or.Value != "superuser" {
+		t.Errorf("Expected Or value 'superuser', got '%s'", selectStmt.WhereExt.Or.Value)
+	}
+}
+
+func TestParseSQLComments(t *testing.T) {
+	// Test single-line comment
+	input := "SELECT * FROM users -- this is a comment\nWHERE id = 1"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	selectStmt, ok := stmt.(*SelectStmt)
+	if !ok {
+		t.Fatalf("Expected SelectStmt, got %T", stmt)
+	}
+
+	if selectStmt.TableName != "users" {
+		t.Errorf("Expected table 'users', got '%s'", selectStmt.TableName)
+	}
+}
+
+func TestParseSQLMultiLineComments(t *testing.T) {
+	// Test multi-line comment
+	input := "SELECT /* this is a comment */ * FROM users"
+	lexer := NewLexer(input)
+	parser := NewParser(lexer)
+	stmt, err := parser.Parse()
+	if err != nil {
+		t.Fatalf("Parse failed: %v", err)
+	}
+
+	selectStmt, ok := stmt.(*SelectStmt)
+	if !ok {
+		t.Fatalf("Expected SelectStmt, got %T", stmt)
+	}
+
+	if selectStmt.TableName != "users" {
+		t.Errorf("Expected table 'users', got '%s'", selectStmt.TableName)
 	}
 }
 
