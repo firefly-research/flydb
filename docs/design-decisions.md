@@ -4,56 +4,256 @@ This document explains the key design decisions made in FlyDB, including the rat
 
 ## Table of Contents
 
-1. [In-Memory Storage with WAL](#in-memory-storage-with-wal)
-2. [Key-Value Foundation](#key-value-foundation)
-3. [Multi-Database Architecture](#multi-database-architecture)
-4. [Internationalization (I18N)](#internationalization-i18n)
-5. [Simple Text Protocol](#simple-text-protocol)
-6. [Bully Algorithm for Leader Election](#bully-algorithm-for-leader-election)
-7. [Eventual Consistency for Replication](#eventual-consistency-for-replication)
-8. [B-Tree for Indexes](#b-tree-for-indexes)
-9. [Transaction Model](#transaction-model)
-10. [bcrypt for Password Hashing](#bcrypt-for-password-hashing)
-11. [Row-Level Security](#row-level-security)
-12. [AES-256-GCM for Encryption](#aes-256-gcm-for-encryption)
-13. [Go as Implementation Language](#go-as-implementation-language)
-14. [Role-Based Access Control](#role-based-access-control)
+1. [Unified Disk-Based Storage](#unified-disk-based-storage)
+2. [Page-Based Storage with Slotted Pages](#page-based-storage-with-slotted-pages)
+3. [Buffer Pool with LRU-K](#buffer-pool-with-lru-k)
+4. [Key-Value Foundation](#key-value-foundation)
+5. [Multi-Database Architecture](#multi-database-architecture)
+6. [Internationalization (I18N)](#internationalization-i18n)
+7. [Binary Wire Protocol](#binary-wire-protocol)
+8. [Bully Algorithm for Leader Election](#bully-algorithm-for-leader-election)
+9. [Replication Strategy](#replication-strategy)
+10. [B-Tree for Indexes](#b-tree-for-indexes)
+11. [Transaction Model](#transaction-model)
+12. [bcrypt for Password Hashing](#bcrypt-for-password-hashing)
+13. [Row-Level Security](#row-level-security)
+14. [AES-256-GCM for Encryption](#aes-256-gcm-for-encryption)
+15. [Go as Implementation Language](#go-as-implementation-language)
+16. [Role-Based Access Control](#role-based-access-control)
 
 ---
 
-## In-Memory Storage with WAL
+## Unified Disk-Based Storage
 
 ### Decision
 
-Store all data in memory using a Go `map[string][]byte`, with a Write-Ahead Log (WAL) for durability.
+Use a unified disk-based storage engine that combines page-based storage, intelligent buffer pool caching, and Write-Ahead Logging (WAL) for durability.
+
+### The Problem
+
+Every database faces a fundamental tension:
+
+- **Memory is fast but volatile**: RAM provides nanosecond access but loses data on power loss
+- **Disk is slow but persistent**: SSDs/HDDs survive crashes but are 1000x slower than RAM
+- **Datasets vary in size**: Some fit in RAM, others are terabytes
+
+A pure in-memory database is fast but limited by RAM and loses data on crashes. A pure disk-based database is slow for every operation. We need the best of both worlds.
 
 ### Rationale
 
-1. **Simplicity**: In-memory storage is straightforward to implement and understand
-2. **Performance**: Memory access is orders of magnitude faster than disk I/O
-3. **Educational Value**: Clearly demonstrates the WAL concept without complex buffer management
-4. **Durability**: WAL ensures committed data survives crashes
+1. **Scalability**: Datasets can exceed available RAM—only hot data needs to be in memory
+2. **Performance**: Buffer pool provides memory-speed access for frequently-used data
+3. **Durability**: WAL ensures committed data survives crashes
+4. **Simplicity**: Single storage engine handles all dataset sizes
+
+### Architecture
+
+```
+┌────────────────────────────────────────────────────────────┐
+│                         SQL Executor                       │
+└────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌────────────────────────────────────────────────────────────┐
+│                 Unified Storage Engine                     │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │              Buffer Pool (LRU-K)                    │   │
+│  │         Caches hot pages in memory                  │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │           Page-Based Disk Storage                   │   │
+│  │         8KB slotted pages on disk                   │   │
+│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │            Write-Ahead Log (WAL)                    │   │
+│  │         Ensures durability before writes            │   │
+│  └─────────────────────────────────────────────────────┘   │
+└────────────────────────────────────────────────────────────┘
+```
 
 ### Trade-offs
 
 | Advantage | Disadvantage |
 |-----------|--------------|
-| Fast reads (O(1) average) | Limited by available RAM |
-| Simple implementation | Full dataset must fit in memory |
-| Easy debugging | Startup time grows with data size |
-| No buffer pool complexity | No partial loading of data |
+| Handles any dataset size | More complex than pure in-memory |
+| Memory-speed for hot data | Cold data requires disk I/O |
+| Crash-safe by design | Buffer pool management overhead |
+| Single unified engine | Page management complexity |
 
 ### Alternatives Considered
 
-1. **Disk-based storage (like SQLite)**: More complex, requires buffer pool management
-2. **Memory-mapped files**: Platform-specific behavior, complex crash recovery
-3. **LSM-Tree (like RocksDB)**: Better for write-heavy workloads, but more complex
+1. **Pure in-memory with WAL**: Simpler, but limited by RAM and slow startup (must replay entire WAL)
+2. **Memory-mapped files**: Platform-specific behavior, OS controls caching (less predictable)
+3. **LSM-Tree (like RocksDB)**: Better for write-heavy workloads, but complex compaction
+4. **Separate engines for small/large**: Complexity of choosing and switching engines
 
-### When to Reconsider
+### Why Not Pure In-Memory?
 
-- Dataset exceeds available RAM
-- Need for partial data loading
-- Cold start time becomes unacceptable
+While simpler, pure in-memory storage has critical limitations:
+
+- **RAM ceiling**: Dataset must fit entirely in memory
+- **Slow startup**: Must replay entire WAL on restart (can take minutes for large datasets)
+- **No partial loading**: Can't load just the data you need
+- **Cost**: RAM is 10-100x more expensive than SSD per GB
+
+The unified disk-based approach provides the same performance for hot data while supporting datasets of any size.
+
+---
+
+## Page-Based Storage with Slotted Pages
+
+### Decision
+
+Store data in fixed-size 8KB pages using a slotted page layout for variable-length records.
+
+### The Problem
+
+Database records (rows) have variable lengths—a user's name might be 5 characters or 50. How do we store variable-length data efficiently on disk?
+
+**Naive approaches fail:**
+- **Fixed-size records**: Wastes space (reserve 255 bytes for every VARCHAR(255))
+- **Heap allocation**: Fragmentation, no locality, complex free space management
+- **Append-only log**: Fast writes, but reads require scanning entire log
+
+### Rationale
+
+1. **Efficient space usage**: Variable-length records packed tightly within pages
+2. **Fast lookups**: Slot array provides O(1) access to any record in a page
+3. **Stable record IDs**: Slot numbers don't change when records move within page
+4. **Simple free space management**: Track free space per page, not per byte
+
+### Slotted Page Layout
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                        Page Header                             │
+│  ┌──────────┬──────────┬──────────┬──────────┐                 │
+│  │ Page ID  │ Num Slots│ Free Ptr │ Checksum │                 │
+│  └──────────┴──────────┴──────────┴──────────┘                 │
+├────────────────────────────────────────────────────────────────┤
+│                        Slot Array                              │
+│  ┌──────────┬──────────┬──────────┬──────────┐                 │
+│  │ Slot 0   │ Slot 1   │ Slot 2   │   ...    │  ← Grows down   │
+│  │ (off,len)│ (off,len)│ (off,len)│          │                 │
+│  └──────────┴──────────┴──────────┴──────────┘                 │
+│                           ...                                  │
+│                      Free Space                                │
+│                           ...                                  │
+├────────────────────────────────────────────────────────────────┤
+│                        Record Data                             │
+│  ┌──────────────────────────────────────────────┐              │
+│  │ Record 2 │ Record 1 │ Record 0 │             │  ← Grows up  │
+│  └──────────────────────────────────────────────┘              │
+└────────────────────────────────────────────────────────────────┘
+```
+
+**Key insight**: Slot array grows down from the header, record data grows up from the bottom. They meet in the middle when the page is full.
+
+### Why 8KB Pages?
+
+| Page Size | Pros | Cons |
+|-----------|------|------|
+| 4KB | Matches OS page size, less wasted space | More I/O for large scans |
+| **8KB** | Good balance, matches PostgreSQL | Slightly more internal fragmentation |
+| 16KB | Fewer I/Os for scans | More wasted space, larger buffer pool |
+
+FlyDB chose 8KB as a balance between I/O efficiency and space utilization, matching PostgreSQL's default.
+
+### Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|--------------|
+| Efficient variable-length storage | Page splits on overflow |
+| O(1) record access within page | Compaction needed after deletes |
+| Stable slot-based record IDs | Internal fragmentation |
+| Simple free space tracking | Fixed page size limits max record |
+
+### Alternatives Considered
+
+1. **Log-structured storage**: Append-only, but requires compaction and slow reads
+2. **Heap files without slots**: Simpler, but fragile record addressing
+3. **B+ tree leaf pages**: Good for indexes, overkill for heap storage
+
+---
+
+## Buffer Pool with LRU-K
+
+### Decision
+
+Use an LRU-K (K=2) page replacement algorithm with automatic sizing based on available system memory.
+
+### The Problem
+
+The buffer pool caches disk pages in memory. When it's full and we need a new page, which page should we evict?
+
+**Simple LRU fails for databases:**
+
+```
+Scenario: Buffer pool has 3 pages, all frequently accessed
+Query: Full table scan reads 1000 pages sequentially
+
+With simple LRU:
+- Each scan page evicts a hot page
+- After scan, all hot pages are gone
+- This is called "buffer pool pollution"
+```
+
+### Rationale
+
+1. **Scan resistance**: LRU-K distinguishes between frequently-accessed and one-time-access pages
+2. **Automatic sizing**: Buffer pool adapts to available system memory
+3. **Predictable performance**: Hot data stays in memory regardless of scan patterns
+4. **Simple implementation**: K=2 provides good results with minimal complexity
+
+### How LRU-K Works
+
+LRU-K tracks the **K-th most recent access** for each page, not just the most recent:
+
+```
+Page A: Accessed at times [100, 200, 300, 400]  → K=2 reference: 300
+Page B: Accessed at times [350, 400]            → K=2 reference: 350
+Page C: Accessed at times [400]                 → K=2 reference: -∞ (only 1 access)
+
+Eviction order: C first (only accessed once), then A (older K-th reference)
+```
+
+**Key insight**: A page accessed only once (like during a table scan) has K-th reference of -∞ and is evicted first, protecting frequently-accessed pages.
+
+### Auto-Sizing Formula
+
+```go
+// Buffer pool uses 25% of available RAM
+bufferPoolSize = availableMemory * 0.25
+
+// With bounds:
+// Minimum: 2MB (256 pages × 8KB)
+// Maximum: 1GB (131,072 pages × 8KB)
+```
+
+| Available RAM | Buffer Pool Size | Pages |
+|---------------|------------------|-------|
+| 4 GB | 1 GB (capped) | 131,072 |
+| 8 GB | 1 GB (capped) | 131,072 |
+| 1 GB | 256 MB | 32,768 |
+| 512 MB | 128 MB | 16,384 |
+| 64 MB | 16 MB | 2,048 |
+
+### Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|--------------|
+| Scan-resistant | More memory per page (track K accesses) |
+| Automatic sizing | May compete with OS page cache |
+| Predictable eviction | K=2 is heuristic, not optimal for all workloads |
+| Simple implementation | No workload-adaptive tuning |
+
+### Alternatives Considered
+
+1. **Simple LRU**: Easier to implement, but vulnerable to scans
+2. **LRU-K with K>2**: Diminishing returns, more memory overhead
+3. **ARC (Adaptive Replacement Cache)**: Self-tuning, but patented and complex
+4. **2Q**: Similar benefits to LRU-K, different implementation
+5. **Clock/Second-Chance**: Simpler, but less effective than LRU-K
 
 ---
 
@@ -193,43 +393,92 @@ Support pluggable character encodings and collations per database.
 
 ---
 
-## Simple Text Protocol
+## Binary Wire Protocol
 
 ### Decision
 
-Use a line-based text protocol for the primary interface (port 8888).
+Use a binary protocol with 8-byte headers, length-prefixed framing, and JSON payloads.
+
+### The Problem
+
+Binary protocols require careful design decisions:
+
+1. **Framing**: How does the receiver know where one message ends and the next begins?
+2. **Versioning**: How do we evolve the protocol without breaking clients?
+3. **Extensibility**: How do we add new message types?
+4. **Debugging**: Binary is hard to read—how do we debug issues?
 
 ### Rationale
 
-1. **Debuggability**: Can interact with database using telnet/netcat
-2. **Simplicity**: Easy to implement clients in any language
-3. **Educational**: Protocol is human-readable
-4. **Testing**: Easy to write integration tests
+1. **Length-prefixed framing**: Unambiguous message boundaries, no delimiter escaping
+2. **Magic byte**: Quick rejection of non-FlyDB connections
+3. **Version field**: Forward compatibility for protocol evolution
+4. **JSON payloads**: Human-readable when debugging, easy to extend
 
-### Protocol Format
+### Message Frame Format
 
 ```
-Request:  COMMAND [args]\n
-Response: RESULT\n
+┌─────────┬─────────┬─────────┬─────────┬─────────────────┬─────────────────┐
+│ Magic   │ Version │ MsgType │ Flags   │ Length (4B)     │ Payload (var)   │
+│ 0xFD    │ 0x01    │         │         │ big-endian      │ JSON            │
+└─────────┴─────────┴─────────┴─────────┴─────────────────┴─────────────────┘
+```
 
-Examples:
-  PING           → PONG
-  AUTH user pass → AUTH OK
-  SQL SELECT ... → id|name|age\n1|Alice|30
+| Field | Size | Purpose |
+|-------|------|---------|
+| Magic | 1 byte | Protocol identification (0xFD = "FlyDB") |
+| Version | 1 byte | Protocol version for compatibility |
+| MsgType | 1 byte | Message type for routing |
+| Flags | 1 byte | Optional features (compression, encryption) |
+| Length | 4 bytes | Payload size (max 16 MB) |
+| Payload | variable | JSON-encoded message data |
+
+### Why JSON Payloads?
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| Pure binary (like PostgreSQL) | Smallest, fastest | Hard to debug, rigid schema |
+| Pure text (like Redis RESP) | Easy to debug | Slow parsing, framing issues |
+| **Binary frame + JSON** | Easy to debug, clear framing | Slightly larger than pure binary |
+
+For FlyDB, debuggability and ease of driver development outweigh the small size overhead.
+
+### Message Type Organization
+
+```go
+// Core operations (0x01-0x0F)
+MsgQuery        = 0x01  // SQL query
+MsgQueryResult  = 0x02  // Query response
+MsgError        = 0x03  // Error response
+
+// Prepared statements (0x04-0x07)
+MsgPrepare      = 0x04  // Prepare statement
+MsgExecute      = 0x06  // Execute prepared
+
+// Authentication (0x08-0x09)
+MsgAuth         = 0x08  // Login request
+MsgAuthResult   = 0x09  // Login response
+
+// Control (0x0A-0x0F)
+MsgPing         = 0x0A  // Keep-alive
+MsgPong         = 0x0B  // Keep-alive response
 ```
 
 ### Trade-offs
 
 | Advantage | Disadvantage |
 |-----------|--------------|
-| Human-readable | Parsing overhead |
-| Easy debugging | No binary data support |
-| Simple clients | Escaping issues with special chars |
-| Telnet-friendly | Less efficient than binary |
+| Clear message boundaries | 8-byte header overhead |
+| Easy to extend | JSON parsing overhead |
+| Version negotiation | More complex than text |
+| Compression support | Requires binary-aware tools |
 
-### Mitigation
+### Alternatives Considered
 
-A binary protocol is also available on port 8889 for clients that need efficiency.
+1. **Protocol Buffers**: Efficient, but adds dependency and complexity
+2. **MessagePack**: Binary JSON, but less human-readable
+3. **Custom binary format**: Maximum efficiency, but hard to debug
+4. **WebSocket**: Good for browsers, but overkill for database protocol
 
 ---
 
@@ -278,50 +527,95 @@ Use the Bully algorithm for automatic leader election in cluster mode.
 
 ---
 
-## Eventual Consistency for Replication
+## Replication Strategy
 
 ### Decision
 
-Use asynchronous WAL streaming with 100ms polling interval.
+Use WAL-based leader-follower replication with configurable consistency modes (async, semi-sync, sync).
+
+### The Problem
+
+A single database server has critical limitations:
+
+1. **Single point of failure**: Server crash = database unavailable
+2. **Read bottleneck**: All queries go to one server
+3. **Data loss risk**: Disk failure can lose data
+
+Replication solves these by maintaining copies on multiple servers.
 
 ### Rationale
 
-1. **Simplicity**: No complex consensus protocol
-2. **Performance**: Leader doesn't wait for follower acknowledgment
-3. **Availability**: Leader can continue if followers are slow
-4. **Educational**: Demonstrates replication concepts clearly
+1. **WAL-based**: Reuse existing WAL infrastructure—no separate replication log
+2. **Leader-follower**: Simple model, clear write path, easy to reason about
+3. **Configurable modes**: Applications choose their consistency/performance trade-off
+4. **Pull-based**: Followers poll leader, simplifying leader implementation
+
+### Replication Modes
+
+FlyDB supports three replication modes:
+
+| Mode | Behavior | Durability | Latency |
+|------|----------|------------|---------|
+| **Async** | Return immediately, replicate in background | May lose recent writes | Lowest |
+| **Semi-sync** | Wait for at least one follower | Survives single failure | Medium |
+| **Sync** | Wait for all followers | Strongest | Highest |
+
+```go
+type ReplicationMode int
+
+const (
+    ReplicationAsync    ReplicationMode = iota  // Default
+    ReplicationSemiSync
+    ReplicationSync
+)
+```
 
 ### Replication Flow
 
 ```
-Leader                          Follower
-   │                               │
-   │ ◄─── REPLICATE <offset> ──────│ (every 100ms)
-   │                               │
-   │ ──── WAL entries ────────────►│
-   │                               │
-   │                               │ (apply to local store)
+Leader                              Follower
+   │                                   │
+   │ ◄──── REPLICATE <offset> ─────────│ (poll every 100ms)
+   │                                   │
+   │ ───── WAL entries ───────────────►│
+   │       (binary format)             │
+   │                                   │
+   │                                   │ (apply to local store)
+   │                                   │
+   │ ◄──── ACK <new_offset> ───────────│ (for semi-sync/sync)
 ```
+
+### Why Pull-Based?
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Pull (FlyDB)** | Simple leader, follower controls pace | Polling overhead |
+| Push | Lower latency, no polling | Leader tracks all followers |
+| Hybrid | Best of both | Complex implementation |
+
+Pull-based is simpler: the leader just responds to requests, followers manage their own state.
+
+### Consistency Window
+
+- **Async mode**: 100ms poll interval + network latency + apply time ≈ 100-300ms typical lag
+- **Semi-sync mode**: Network round-trip + apply time ≈ 10-50ms
+- **Sync mode**: All followers must acknowledge ≈ slowest follower determines latency
 
 ### Trade-offs
 
 | Advantage | Disadvantage |
 |-----------|--------------|
-| Simple implementation | Data loss on leader failure |
-| High write throughput | Stale reads on followers |
-| Leader availability | No read-your-writes guarantee |
-| Low latency writes | Replication lag visible |
-
-### Consistency Window
-
-- **Maximum lag**: 100ms + network latency + apply time
-- **Typical lag**: < 200ms under normal conditions
+| Simple implementation | Async may lose data on leader failure |
+| Configurable consistency | Semi-sync/sync add latency |
+| WAL reuse | No multi-master support |
+| Pull-based simplicity | Polling overhead |
 
 ### Alternatives Considered
 
-1. **Synchronous replication**: Stronger consistency, but higher latency
-2. **Semi-synchronous**: Wait for one follower, balance of both
-3. **Raft-based replication**: Strong consistency, complex implementation
+1. **Raft consensus**: Strong consistency, but complex leader election and log management
+2. **Paxos**: Proven correct, but notoriously difficult to implement
+3. **Multi-master**: Higher availability, but conflict resolution is complex
+4. **Logical replication**: More flexible, but requires parsing and transforming operations
 
 ---
 
@@ -329,37 +623,92 @@ Leader                          Follower
 
 ### Decision
 
-Use B-Tree data structure for secondary indexes.
+Use B-Tree data structure for secondary indexes with configurable minimum degree.
+
+### The Problem
+
+Without indexes, finding a row requires scanning the entire table:
+
+```sql
+SELECT * FROM users WHERE email = 'alice@example.com';
+-- Without index: O(N) - scan all rows
+-- With index: O(log N) - tree traversal
+```
+
+For a table with 1 million rows, that's the difference between 1 million comparisons and ~20 comparisons.
 
 ### Rationale
 
-1. **Balanced**: Guaranteed O(log N) operations
-2. **Range Queries**: Efficient for ORDER BY and BETWEEN
-3. **Well-Understood**: Classic database index structure
-4. **Educational**: Demonstrates fundamental CS concepts
+1. **Balanced**: Guaranteed O(log N) operations regardless of insertion order
+2. **Range Queries**: Efficient for ORDER BY, BETWEEN, and inequality comparisons
+3. **Well-Understood**: Classic database index structure with decades of research
+4. **In-Memory Optimized**: FlyDB's B-Tree is tuned for memory, not disk
+
+### How B-Trees Work
+
+A B-Tree is a self-balancing tree where:
+- Each node can have multiple keys (not just one like binary trees)
+- All leaves are at the same depth (perfectly balanced)
+- Nodes split when full, maintaining balance automatically
+
+```
+                    [50]
+                   /    \
+           [20, 30]      [70, 80, 90]
+          /   |   \      /   |   |   \
+        [10] [25] [35] [60] [75] [85] [95]
+```
+
+**Key insight**: More keys per node = shorter tree = fewer comparisons.
 
 ### Implementation Details
 
-- **Minimum degree (t)**: Configurable, default 16 (optimized for in-memory use)
-- **Node capacity**: 2t-1 keys per node (up to 31 keys with default t=16)
-- **Leaf nodes**: Store actual row key references
-- **Automatic maintenance**: Indexes updated on INSERT, UPDATE, DELETE
+```go
+type BTree struct {
+    root *BTreeNode
+    t    int  // Minimum degree
+}
+
+type BTreeNode struct {
+    keys     []string      // Indexed values
+    values   []string      // Row key references
+    children []*BTreeNode  // Child nodes (nil for leaves)
+    leaf     bool
+}
+```
+
+**Parameters:**
+- **Minimum degree (t)**: Default 16 for in-memory use
+- **Keys per node**: Between t-1 and 2t-1 (15 to 31 with t=16)
+- **Children per node**: Between t and 2t (16 to 32 with t=16)
+
+### Why t=16?
+
+| Minimum Degree | Keys/Node | Tree Height (1M rows) | Memory/Node |
+|----------------|-----------|----------------------|-------------|
+| t=2 | 1-3 | ~20 levels | Small |
+| t=4 | 3-7 | ~10 levels | Medium |
+| **t=16** | **15-31** | **~5 levels** | **Larger** |
+| t=64 | 63-127 | ~3 levels | Very large |
+
+t=16 provides a good balance: short trees (fast lookups) without excessive memory per node.
 
 ### Trade-offs
 
 | Advantage | Disadvantage |
 |-----------|--------------|
-| Balanced height | More complex than hash index |
-| Range query support | Higher memory overhead |
-| Ordered traversal | Split/merge complexity |
-| Proven algorithm | Not cache-optimized |
+| Guaranteed O(log N) | More complex than hash index |
+| Range query support | Split/merge on insert/delete |
+| Ordered traversal | Higher memory per node |
+| Self-balancing | Not cache-line optimized |
 
 ### Alternatives Considered
 
-1. **Hash Index**: O(1) lookups, but no range queries
-2. **B+ Tree**: Better for disk, leaves linked for scans
-3. **Skip List**: Simpler, probabilistic balance
-4. **LSM Tree**: Better for writes, complex compaction
+1. **Hash Index**: O(1) average lookups, but no range queries or ordering
+2. **B+ Tree**: Leaves linked for efficient scans, but more complex
+3. **Skip List**: Probabilistic balance, simpler but less predictable
+4. **LSM Tree**: Write-optimized, but requires background compaction
+5. **Red-Black Tree**: Binary tree, but taller than B-Tree (more comparisons)
 
 ---
 
@@ -367,50 +716,122 @@ Use B-Tree data structure for secondary indexes.
 
 ### Decision
 
-Use optimistic concurrency with write buffering and savepoint support.
+Use optimistic concurrency with write buffering, read-your-writes semantics, and savepoint support.
+
+### The Problem
+
+Transactions must provide ACID guarantees, but different approaches have different trade-offs:
+
+| Approach | Consistency | Performance | Complexity |
+|----------|-------------|-------------|------------|
+| No transactions | None | Fastest | Simplest |
+| Pessimistic locking | Strong | Slower (blocking) | Deadlock handling |
+| Optimistic concurrency | Read-committed | Fast (no blocking) | Conflict detection |
+| MVCC | Snapshot isolation | Fast | Version management |
 
 ### Rationale
 
-1. **Simplicity**: No complex locking protocols
-2. **Performance**: Reads don't block writes
-3. **Easy Rollback**: Discard buffer on ROLLBACK
+1. **Simplicity**: No complex locking protocols or version chains
+2. **Performance**: Reads never block, writes are buffered
+3. **Read-Your-Writes**: Transactions see their own uncommitted changes
 4. **Partial Rollback**: Savepoints allow undoing part of a transaction
+
+### How It Works
+
+```
+BEGIN TRANSACTION
+    │
+    ▼
+┌──────────────────────────────────────────────────────┐
+│                   Transaction State                  │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   │
+│  │ Write Buffer│  │ Read Cache  │  │ Delete Set  │   │
+│  │ (pending    │  │ (read-your- │  │ (pending    │   │
+│  │  writes)    │  │  writes)    │  │  deletes)   │   │
+│  └─────────────┘  └─────────────┘  └─────────────┘   │
+└──────────────────────────────────────────────────────┘
+    │                                    │
+    ▼                                    ▼
+  COMMIT                              ROLLBACK
+    │                                    │
+    ▼                                    ▼
+  Apply all                           Discard
+  buffered ops                        everything
+```
 
 ### Implementation
 
 ```go
 type Transaction struct {
-    store      *KVStore
-    buffer     []TxOperation      // Pending operations
-    readCache  map[string][]byte  // Read-your-writes
-    deleteSet  map[string]bool    // Pending deletes
-    savepoints []Savepoint
-}
-
-type Savepoint struct {
-    Name           string
-    BufferPosition int  // Position in buffer to rollback to
+    store      Engine              // Underlying storage
+    buffer     []TxOperation       // Ordered pending operations
+    readCache  map[string][]byte   // Read-your-writes cache
+    deleteSet  map[string]bool     // Pending deletes
+    savepoints []Savepoint         // Named rollback points
+    state      TxState             // Active, Committed, RolledBack
 }
 ```
 
-### Isolation Level
+### Read Path (Read-Your-Writes)
 
-**Read Committed**: Reads see committed data from the underlying store, plus any uncommitted writes from the current transaction (read-your-writes).
+```go
+func (tx *Transaction) Get(key string) ([]byte, error) {
+    // 1. Check if deleted in this transaction
+    if tx.deleteSet[key] {
+        return nil, ErrNotFound
+    }
+    // 2. Check local write buffer
+    if val, ok := tx.readCache[key]; ok {
+        return val, nil
+    }
+    // 3. Fall back to committed data
+    return tx.store.Get(key)
+}
+```
+
+### Isolation Level: Read Committed
+
+FlyDB provides **Read Committed** isolation:
+
+| Guarantee | Provided? | Explanation |
+|-----------|-----------|-------------|
+| No dirty reads | Yes | Only see committed data from others |
+| Read-your-writes | Yes | See your own uncommitted changes |
+| Repeatable reads | No | Same query may return different results |
+| No phantom reads | No | New rows may appear between queries |
+
+**Why Read Committed?**
+
+It's the sweet spot for most applications—strong enough to prevent data corruption, weak enough to allow high concurrency.
+
+### Savepoints
+
+Savepoints allow partial rollback within a transaction:
+
+```sql
+BEGIN;
+INSERT INTO orders VALUES (1, 'pending');
+SAVEPOINT sp1;
+INSERT INTO orders VALUES (2, 'pending');
+-- Oops, rollback just the second insert
+ROLLBACK TO sp1;
+COMMIT;  -- Only first insert is committed
+```
 
 ### Trade-offs
 
 | Advantage | Disadvantage |
 |-----------|--------------|
 | Simple implementation | No serializable isolation |
-| Reads don't block | Last writer wins (no conflict detection) |
-| Easy rollback | No MVCC |
-| Savepoint support | Single writer at a time |
+| Reads never block | Last writer wins |
+| Easy rollback | No automatic conflict detection |
+| Savepoint support | Memory grows with transaction size |
 
 ### Alternatives Considered
 
-1. **MVCC**: True snapshot isolation, but complex implementation
-2. **Pessimistic Locking**: Stronger isolation, but potential deadlocks
-3. **Serializable**: Strongest isolation, but significant overhead
+1. **MVCC (Multi-Version Concurrency Control)**: Snapshot isolation, but requires version chains and garbage collection
+2. **Pessimistic Locking (2PL)**: Serializable, but deadlock-prone and blocking
+3. **Serializable Snapshot Isolation**: Strongest, but complex conflict detection
 
 ---
 
@@ -632,6 +1053,103 @@ The RBAC system consists of three main components:
 - User-role assignments stored with `_sys_user_roles:` prefix
 - Built-in roles are marked with `is_built_in: true` and cannot be dropped
 - Authorization checks cascade: admin status → role privileges → direct grants
+
+---
+
+## Metadata Provider Architecture
+
+### Decision
+
+Implement a `MetadataProvider` interface that bridges the binary protocol handler with the SQL catalog, providing ODBC/JDBC-compatible metadata responses.
+
+### The Problem
+
+ODBC and JDBC drivers require standardized metadata APIs to discover database schema:
+
+- `getTables()` - List available tables and views
+- `getColumns()` - Get column definitions with types and constraints
+- `getPrimaryKeys()` - Retrieve primary key information
+- `getForeignKeys()` - Get foreign key relationships
+- `getIndexInfo()` - List indexes on tables
+- `getTypeInfo()` - Enumerate supported SQL types
+
+These APIs expect specific response formats with ODBC type codes, nullability flags, and other standardized fields.
+
+### Rationale
+
+1. **Separation of Concerns**: The MetadataProvider abstracts catalog access from protocol handling
+2. **ODBC/JDBC Compatibility**: Response formats match standard driver expectations
+3. **Extensibility**: New metadata operations can be added without modifying the protocol handler
+4. **Testability**: The interface can be mocked for unit testing
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    BinaryHandler                                 │
+│  Receives: MsgGetTables, MsgGetColumns, etc.                    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  MetadataProvider Interface                      │
+│  GetTables(), GetColumns(), GetPrimaryKeys(), GetForeignKeys(), │
+│  GetIndexes(), GetTypeInfo()                                    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                  serverMetadataProvider                          │
+│  Accesses Executor.GetCatalog() and Executor.GetIndexManager()  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      SQL Catalog                                 │
+│  Tables, Views, Columns, Constraints, Indexes                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|--------------|
+| Clean abstraction | Additional interface layer |
+| ODBC/JDBC compatible | Some fields return defaults |
+| Graceful nil handling | Pattern matching overhead |
+| Easy to extend | Requires catalog access |
+
+### Default Values vs. Actual Schema Information
+
+Some metadata fields return default values rather than actual schema information:
+
+| Field | Behavior | Rationale |
+|-------|----------|-----------|
+| TABLE_CAT | Returns provided catalog | FlyDB uses database names, not catalogs |
+| TABLE_SCHEM | Returns provided schema | Single schema per database |
+| REMARKS | Returns empty string | TableSchema doesn't store comments |
+| COLUMN_SIZE | Returns type-based default | Actual size not always tracked |
+| DECIMAL_DIGITS | Returns 0 | Scale not tracked for all types |
+
+**Why Accept Defaults?**
+
+1. **Simplicity**: Tracking every ODBC field would add significant complexity
+2. **Compatibility**: Drivers work correctly with sensible defaults
+3. **Performance**: Fewer fields to store and retrieve
+4. **Pragmatism**: Most applications don't use all metadata fields
+
+### Performance Considerations
+
+Metadata queries iterate over the entire catalog, which could be slow for databases with many tables. Current mitigations:
+
+1. **Pattern Matching**: Clients can filter with SQL wildcards (%)
+2. **Lazy Loading**: Catalog is only accessed when metadata is requested
+3. **No Caching**: Results are computed fresh (catalog may change)
+
+For very large schemas, future enhancements could include:
+- Metadata result caching with invalidation
+- Indexed catalog lookups
+- Pagination for large result sets
 
 ---
 

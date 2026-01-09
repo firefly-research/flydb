@@ -11,18 +11,17 @@ FlyDB is a lightweight SQL database written in Go, designed to demonstrate core 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                      Client Applications                        │
-│         (fsql CLI, TCP clients, connection pools, drivers)      │
+│         (fsql CLI, ODBC/JDBC drivers, connection pools)         │
 └─────────────────────────────────────────────────────────────────┘
                                 │
-                    ┌───────────┴───────────┐
-                    ▼                       ▼
-┌──────────────────────────┐   ┌──────────────────────────┐
-│   Text Protocol (:8888)  │   │  Binary Protocol (:8889) │
-│   • Line-based commands  │   │  • Length-prefixed JSON  │
-│   • Human-readable       │   │  • Efficient for drivers │
-└──────────────────────────┘   └──────────────────────────┘
-                    │                       │
-                    └───────────┬───────────┘
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   Binary Protocol (:8889)                       │
+│   • Length-prefixed JSON payloads  • Efficient for drivers      │
+│   • Full SQL support               • Cursor operations          │
+│   • Transaction management         • Metadata queries           │
+└─────────────────────────────────────────────────────────────────┘
+                                │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Server Layer                             │
@@ -626,21 +625,56 @@ FlyDB uses Go's concurrency primitives for thread safety:
 - **Subscribers**: `sync.Mutex` protects the WATCH subscription map
 - **Transactions**: Per-connection transaction isolation
 
-## Network Protocols
+## Network Protocol
 
-### Text Protocol (Port 8888)
+### Binary Protocol (Port 8889)
 
-Simple line-based protocol for human interaction:
+FlyDB uses a binary wire protocol for all client communication. The protocol provides:
+
+- **Efficient framing**: 8-byte header with length-prefixed payloads
+- **JSON payloads**: Human-readable for debugging, efficient for parsing
+- **Full SQL support**: Queries, prepared statements, transactions
+- **Driver support**: Cursors, metadata queries, session management
 
 ```
-Request:  <COMMAND> [arguments]\n
-Response: <RESULT>\n
+Message Format:
+┌───────────┬─────────┬──────────┬───────────┬────────────┬─────────────────┐
+│ Magic (1B)│ Ver (1B)│ Type (1B)│ Flags (1B)│ Length (4B)│ Payload (var)   │
+└───────────┴─────────┴──────────┴───────────┴────────────┴─────────────────┘
 
-Commands:
-  PING              → PONG
-  AUTH user pass    → AUTH OK | ERROR
-  SQL <statement>   → Result | ERROR
-  WATCH <table>     → WATCH OK (then EVENT notifications)
+Magic: 0xFD (FlyDB identifier)
+Version: 0x01 (current protocol version)
+Max payload: 16 MB
+```
+
+See [Driver Development Guide](driver-development.md) for complete protocol specification.
+
+### Reactive Event System (WATCH)
+
+FlyDB provides a reactive event system for real-time data change notifications:
+
+**Event Types:**
+| Event | Format | Description |
+|-------|--------|-------------|
+| INSERT | `EVENT INSERT <table> <json>` | Row inserted |
+| UPDATE | `EVENT UPDATE <table> <old_json> <new_json>` | Row updated |
+| DELETE | `EVENT DELETE <table> <json>` | Row deleted |
+| SCHEMA | `EVENT SCHEMA <type> <object> <details>` | Schema changed |
+
+**Schema Event Types:**
+- `CREATE_TABLE`, `DROP_TABLE`, `ALTER_TABLE`
+- `CREATE_VIEW`, `DROP_VIEW`
+- `CREATE_TRIGGER`, `DROP_TRIGGER`
+- `TRUNCATE_TABLE`
+
+**Example Usage:**
+```
+WATCH users
+WATCH SCHEMA
+# Client receives events as they occur:
+# EVENT INSERT users {"id":1,"name":"Alice"}
+# EVENT UPDATE users {"id":1,"name":"Alice"} {"id":1,"name":"Alice Smith"}
+# EVENT SCHEMA CREATE_TABLE orders {}
 ```
 
 ### Binary Protocol (Port 8889)
@@ -663,32 +697,100 @@ The binary protocol provides a complete wire protocol for developing external JD
 | Metadata | GetTables, GetColumns, GetTypeInfo | Schema discovery |
 | Transactions | BeginTx, CommitTx, RollbackTx | Transaction control |
 | Sessions | SetOption, GetOption, GetServerInfo | Connection management |
+| Database | UseDatabase, GetDatabases | Multi-database support |
+
+### ODBC/JDBC Driver Support Components
+
+The binary protocol handler uses two key interfaces to support ODBC/JDBC driver operations:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    BinaryHandler                                 │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              MetadataProvider                           │    │
+│  │  - GetTables()      Schema discovery                    │    │
+│  │  - GetColumns()     Column metadata                     │    │
+│  │  - GetPrimaryKeys() Primary key info                    │    │
+│  │  - GetForeignKeys() Foreign key relationships           │    │
+│  │  - GetIndexes()     Index information                   │    │
+│  │  - GetTypeInfo()    Supported SQL types                 │    │
+│  └─────────────────────────────────────────────────────────┘    │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────┐    │
+│  │              DatabaseManager                            │    │
+│  │  - UseDatabase()     Switch database context            │    │
+│  │  - DatabaseExists()  Check database availability        │    │
+│  │  - ListDatabases()   Enumerate available databases      │    │
+│  └─────────────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**MetadataProvider** bridges the protocol handler with the SQL catalog, providing ODBC/JDBC-compatible metadata responses. It accesses the Executor's catalog and index manager to retrieve schema information.
+
+**DatabaseManager** enables multi-database support for drivers, allowing connections to switch between databases and enumerate available databases.
 
 See [Driver Development Guide](driver-development.md) for complete protocol specification.
 
 ## Cluster Architecture
 
-FlyDB supports automatic failover using the Bully algorithm:
+FlyDB supports automatic failover using an enhanced Bully algorithm with term-based elections and quorum requirements:
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│                        Cluster                                 │
+│                    Enhanced Cluster                            │
 │                                                                │
 │  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐         │
 │  │   Node A    │    │   Node B    │    │   Node C    │         │
 │  │  (Leader)   │◄──►│ (Follower)  │◄──►│ (Follower)  │         │
+│  │  Term: 5    │    │  Term: 5    │    │  Term: 5    │         │
 │  │             │    │             │    │             │         │
 │  │ Heartbeats  │───►│             │    │             │         │
 │  │ every 500ms │───►│             │    │             │         │
 │  └─────────────┘    └─────────────┘    └─────────────┘         │
 │                                                                │
+│  Enhanced Features:                                            │
+│  • Term-based elections (monotonically increasing)             │
+│  • Quorum requirements (majority needed for decisions)         │
+│  • Split-brain prevention (leaders step down without quorum)   │
+│  • Dynamic membership (nodes can join/leave at runtime)        │
+│  • Health monitoring (per-node health tracking)                │
+│  • Cluster metrics (election count, leader changes, lag)       │
+│                                                                │
 │  If Leader fails:                                              │
 │  1. Followers detect missing heartbeat (2s timeout)            │
-│  2. Highest-ID node initiates election                         │
-│  3. New leader announces via COORDINATOR message               │
-│  4. Followers update their leader reference                    │
+│  2. Highest-ID node initiates election with new term           │
+│  3. Election requires quorum acknowledgment                    │
+│  4. New leader announces via COORDINATOR message               │
+│  5. Followers update their leader reference and term           │
 └────────────────────────────────────────────────────────────────┘
 ```
+
+### Cluster Events
+
+The cluster manager emits events for monitoring and integration:
+
+| Event | Description |
+|-------|-------------|
+| `LEADER_ELECTED` | A new leader was elected |
+| `LEADER_STEP_DOWN` | Leader voluntarily stepped down |
+| `NODE_JOINED` | A new node joined the cluster |
+| `NODE_LEFT` | A node left the cluster |
+| `NODE_UNHEALTHY` | A node became unhealthy |
+| `NODE_RECOVERED` | An unhealthy node recovered |
+| `QUORUM_LOST` | Cluster lost quorum |
+| `QUORUM_RESTORED` | Cluster regained quorum |
+| `SPLIT_BRAIN_RISK` | Potential split-brain detected |
+
+### Replication Modes
+
+FlyDB supports multiple replication modes for different consistency requirements:
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| `ASYNC` | Return immediately, replicate in background | Maximum performance |
+| `SEMI_SYNC` | Wait for at least one replica to acknowledge | Balanced |
+| `SYNC` | Wait for all replicas to acknowledge | Maximum durability |
 
 ## SQL Command Summary
 

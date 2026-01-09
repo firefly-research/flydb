@@ -185,6 +185,14 @@ Close the TCP connection. The server will clean up any open cursors and transact
 | MsgGetServerInfo | 0x42 | Get server information |
 | MsgSessionResult | 0x43 | Session operation result |
 
+### Database Messages (0x50-0x52)
+
+| Type | Code | Description |
+|------|------|-------------|
+| MsgUseDatabase | 0x50 | Switch to a different database |
+| MsgGetDatabases | 0x51 | List available databases |
+| MsgDatabaseResult | 0x52 | Database operation result |
+
 ---
 
 ## Data Encoding
@@ -329,6 +337,181 @@ Each column includes:
 | scale | Numeric scale |
 | auto_increment | Auto-generated values |
 
+### GetPrimaryKeys Request
+
+```json
+{
+  "catalog": "",
+  "schema": "public",
+  "table_name": "users"
+}
+```
+
+### Primary Key Response
+
+```json
+{
+  "success": true,
+  "rows": [
+    {"column_name": "id", "key_seq": 1, "pk_name": "users_pkey"}
+  ]
+}
+```
+
+### GetForeignKeys Request
+
+```json
+{
+  "catalog": "",
+  "schema": "public",
+  "table_name": "orders"
+}
+```
+
+### Foreign Key Response
+
+```json
+{
+  "success": true,
+  "rows": [
+    {
+      "pk_table": "users",
+      "pk_column": "id",
+      "fk_table": "orders",
+      "fk_column": "user_id",
+      "key_seq": 1,
+      "fk_name": "orders_user_id_fkey",
+      "update_rule": 1,
+      "delete_rule": 1
+    }
+  ]
+}
+```
+
+### GetIndexes Request
+
+```json
+{
+  "catalog": "",
+  "schema": "public",
+  "table_name": "users",
+  "unique": false
+}
+```
+
+### Index Response
+
+```json
+{
+  "success": true,
+  "rows": [
+    {
+      "index_name": "users_email_idx",
+      "column_name": "email",
+      "ordinal_position": 1,
+      "non_unique": false,
+      "type": 3
+    }
+  ]
+}
+```
+
+### GetTypeInfo Request
+
+Request type information for all supported SQL types:
+
+```json
+{}
+```
+
+### GetTypeInfo Response
+
+Returns ODBC/JDBC-compatible type information:
+
+```json
+{
+  "success": true,
+  "rows": [
+    {
+      "type_name": "INTEGER",
+      "data_type": 4,
+      "precision": 10,
+      "literal_prefix": null,
+      "literal_suffix": null,
+      "create_params": null,
+      "nullable": 1,
+      "case_sensitive": false,
+      "searchable": 3,
+      "unsigned_attribute": false,
+      "fixed_prec_scale": false,
+      "auto_unique_value": false,
+      "local_type_name": "INTEGER",
+      "minimum_scale": 0,
+      "maximum_scale": 0,
+      "sql_data_type": 4,
+      "sql_datetime_sub": null,
+      "num_prec_radix": 10
+    }
+  ]
+}
+```
+
+### Supported SQL Types
+
+| Type Name | ODBC Code | Description |
+|-----------|-----------|-------------|
+| INTEGER | 4 | 32-bit signed integer |
+| BIGINT | -5 | 64-bit signed integer |
+| SMALLINT | 5 | 16-bit signed integer |
+| REAL | 7 | Single-precision float |
+| DOUBLE | 8 | Double-precision float |
+| VARCHAR | 12 | Variable-length string |
+| TEXT | -1 | Long text |
+| BOOLEAN | -7 | Boolean value |
+| DATE | 91 | Date value |
+| TIME | 92 | Time value |
+| TIMESTAMP | 93 | Date and time |
+| BLOB | -4 | Binary large object |
+
+### Metadata Provider Architecture
+
+The FlyDB server implements metadata queries through a `MetadataProvider` interface that bridges the binary protocol handler with the SQL catalog:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Binary Protocol Handler                       │
+│                                                                 │
+│  Receives: MsgGetTables, MsgGetColumns, MsgGetPrimaryKeys, etc. │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     MetadataProvider                             │
+│                                                                 │
+│  GetTables()      - Returns table/view metadata                 │
+│  GetColumns()     - Returns column definitions with types       │
+│  GetPrimaryKeys() - Returns primary key constraints             │
+│  GetForeignKeys() - Returns foreign key relationships           │
+│  GetIndexes()     - Returns index information                   │
+│  GetTypeInfo()    - Returns supported SQL types                 │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      SQL Catalog                                 │
+│                                                                 │
+│  Tables map[string]*TableSchema                                 │
+│  Views  map[string]*ViewDefinition                              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Design Rationale:**
+
+1. **Separation of Concerns**: The MetadataProvider abstracts catalog access from protocol handling
+2. **ODBC/JDBC Compatibility**: Response formats match standard driver expectations
+3. **Pattern Matching**: Table and column patterns support SQL wildcards (%)
+4. **Graceful Degradation**: Returns empty results when catalog is unavailable
+
 ---
 
 ## Session Management
@@ -364,6 +547,65 @@ Each column includes:
   "max_statement_length": 16777216
 }
 ```
+
+---
+
+## Database Operations
+
+FlyDB supports multiple databases. Drivers can switch databases and enumerate available databases.
+
+### Use Database Request
+
+Switch the connection to a different database:
+
+```json
+{
+  "database": "mydb"
+}
+```
+
+### Use Database Response
+
+```json
+{
+  "success": true,
+  "database": "mydb",
+  "message": "database changed"
+}
+```
+
+### Get Databases Request
+
+List available databases (optional pattern with % wildcards):
+
+```json
+{
+  "pattern": "prod%"
+}
+```
+
+### Get Databases Response
+
+```json
+{
+  "success": true,
+  "databases": ["default", "production", "prod_backup"]
+}
+```
+
+### Authentication with Database
+
+Specify the initial database during authentication:
+
+```json
+{
+  "username": "admin",
+  "password": "secret",
+  "database": "mydb"
+}
+```
+
+If the database doesn't exist, authentication fails with an error.
 
 ---
 
@@ -505,6 +747,68 @@ public class FlyDBConnection {
 | 404 | Not found (table, cursor, etc.) |
 | 500 | Internal server error |
 | 501 | Feature not supported |
+
+### SQLSTATE Codes
+
+FlyDB uses standard SQLSTATE codes for error classification:
+
+| SQLSTATE | Class | Description |
+|----------|-------|-------------|
+| 00000 | Success | Successful completion |
+| 08000 | Connection | Connection exception |
+| 08P01 | Connection | Protocol violation |
+| 22000 | Data | Data exception |
+| 23000 | Integrity | Integrity constraint violation |
+| 23505 | Integrity | Unique violation |
+| 25000 | Transaction | Invalid transaction state |
+| 28000 | Authorization | Invalid authorization specification |
+| 3D000 | Catalog | Invalid catalog name (database not found) |
+| 40001 | Transaction | Serialization failure |
+| 40P01 | Transaction | Deadlock detected |
+| 42000 | Syntax | Syntax error or access rule violation |
+| 42501 | Syntax | Insufficient privilege |
+| 42601 | Syntax | Syntax error |
+| 42703 | Syntax | Undefined column |
+| 42804 | Syntax | Datatype mismatch |
+| 42P01 | Syntax | Undefined table |
+| HY000 | General | General error |
+
+---
+
+## Connection Pooling
+
+Drivers should implement connection pooling for production use:
+
+### Recommended Pool Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| MinConnections | 1 | Minimum idle connections |
+| MaxConnections | 10 | Maximum total connections |
+| MaxIdleTime | 5 min | Close idle connections after this time |
+| MaxLifetime | 1 hour | Maximum connection lifetime |
+| AcquireTimeout | 30 sec | Timeout waiting for connection |
+
+### Connection Validation
+
+Before returning a connection from the pool:
+
+1. Check if connection is still open
+2. Send a PING message and wait for PONG
+3. Verify connection lifetime hasn't exceeded MaxLifetime
+4. Reset session state if needed (auto-commit, isolation level)
+
+### Connection String Formats
+
+**ODBC Format:**
+```
+Driver={FlyDB};Server=localhost;Port=8889;Database=mydb;Uid=user;Pwd=pass
+```
+
+**JDBC Format:**
+```
+jdbc:flydb://localhost:8889/mydb?user=user&password=pass
+```
 
 ---
 

@@ -37,56 +37,9 @@ This document provides a complete reference for FlyDB's SQL syntax, protocol com
 
 ---
 
-## Protocol Commands
+## Protocol
 
-FlyDB supports two protocols: a text protocol (port 8888) and a binary protocol (port 8889).
-
-### Text Protocol Commands
-
-Connect using: `telnet localhost 8888` or `nc localhost 8888`
-
-#### PING
-
-Test server connectivity.
-
-```
-PING
-→ PONG
-```
-
-#### AUTH
-
-Authenticate with username and password.
-
-```
-AUTH <username> <password>
-→ AUTH OK
-→ ERROR: invalid credentials
-```
-
-#### SQL
-
-Execute a SQL statement.
-
-```
-SQL <statement>
-→ <result>
-→ ERROR: <message>
-```
-
-#### WATCH
-
-Subscribe to table change notifications.
-
-```
-WATCH <table>
-→ WATCH OK
-
-# Then receive events:
-→ EVENT INSERT users 42
-→ EVENT UPDATE users 42
-→ EVENT DELETE users 42
-```
+FlyDB uses a binary wire protocol on port 8889 for all client communication. This protocol is designed for efficiency and provides full support for ODBC/JDBC driver development.
 
 ### Binary Protocol
 
@@ -125,9 +78,13 @@ The binary protocol provides a complete wire protocol for developing external JD
 | CursorOpen | 0x10 | Request | Open server-side cursor |
 | CursorFetch | 0x11 | Request | Fetch rows from cursor |
 | CursorClose | 0x12 | Request | Close cursor |
+| CursorScroll | 0x13 | Request | Scroll cursor position |
 | CursorResult | 0x14 | Response | Cursor operation result |
 | GetTables | 0x20 | Request | Get table metadata |
 | GetColumns | 0x21 | Request | Get column metadata |
+| GetPrimaryKeys | 0x22 | Request | Get primary key info |
+| GetForeignKeys | 0x23 | Request | Get foreign key info |
+| GetIndexes | 0x24 | Request | Get index info |
 | GetTypeInfo | 0x25 | Request | Get type information |
 | MetadataResult | 0x26 | Response | Metadata query result |
 | BeginTx | 0x30 | Request | Begin transaction |
@@ -138,6 +95,9 @@ The binary protocol provides a complete wire protocol for developing external JD
 | GetOption | 0x41 | Request | Get session option |
 | GetServerInfo | 0x42 | Request | Get server information |
 | SessionResult | 0x43 | Response | Session operation result |
+| UseDatabase | 0x50 | Request | Switch to a different database |
+| GetDatabases | 0x51 | Request | List available databases |
+| DatabaseResult | 0x52 | Response | Database operation result |
 
 #### Connection Lifecycle
 
@@ -513,7 +473,19 @@ ALTER TABLE table_name RENAME COLUMN old_name TO new_name
 
 -- Modify a column type
 ALTER TABLE table_name MODIFY COLUMN column_name NEW_TYPE
+
+-- Add a table constraint
+ALTER TABLE table_name ADD CONSTRAINT constraint_name constraint_type (columns)
+
+-- Drop a table constraint
+ALTER TABLE table_name DROP CONSTRAINT constraint_name
 ```
+
+**Constraint Types:**
+- `PRIMARY KEY (column1, column2, ...)` - Composite primary key
+- `UNIQUE (column1, column2, ...)` - Unique constraint on columns
+- `FOREIGN KEY (column) REFERENCES other_table(column)` - Foreign key relationship
+- `CHECK (expression)` - Check constraint
 
 **Examples:**
 ```sql
@@ -521,6 +493,15 @@ ALTER TABLE users ADD COLUMN phone TEXT
 ALTER TABLE users DROP COLUMN phone
 ALTER TABLE users RENAME COLUMN email TO email_address
 ALTER TABLE users MODIFY COLUMN age BIGINT
+
+-- Add a unique constraint on email
+ALTER TABLE users ADD CONSTRAINT unique_email UNIQUE (email)
+
+-- Add a foreign key constraint
+ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)
+
+-- Drop a constraint
+ALTER TABLE users DROP CONSTRAINT unique_email
 ```
 
 ### Data Manipulation Language (DML)
@@ -1489,8 +1470,10 @@ FlyDB is configured via command-line flags:
 | `-binary-port` | `8889` | Binary protocol port |
 | `-repl-port` | `9999` | Replication port (master only) |
 | `-db` | `flydb.fdb` | WAL file path |
-| `-role` | `master` | Server role: `standalone`, `master`, or `slave` |
+| `-role` | `master` | Server role: `standalone`, `master`, `slave`, or `cluster` |
 | `-master` | - | Master address for slave mode (host:port) |
+| `-cluster-port` | `9998` | Cluster communication port (cluster mode only) |
+| `-cluster-peers` | - | Comma-separated list of peer addresses (cluster mode) |
 | `-log-level` | `info` | Log level: debug, info, warn, error |
 | `-log-json` | `false` | Enable JSON log output |
 
@@ -1501,6 +1484,42 @@ FlyDB is configured via command-line flags:
 | `standalone` | Single server mode | None |
 | `master` | Leader node | Accepts slaves on repl-port |
 | `slave` | Follower node | Connects to master |
+| `cluster` | Cluster node with automatic failover | Automatic leader election, quorum-based decisions |
+
+### Cluster Configuration
+
+When running in cluster mode (`-role cluster`), additional configuration options are available:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-cluster-port` | `9998` | Port for cluster communication |
+| `-cluster-peers` | - | Comma-separated list of peer node addresses |
+| `-replication-mode` | `async` | Replication mode: `async`, `semi_sync`, or `sync` |
+| `-heartbeat-interval-ms` | `1000` | Heartbeat interval in milliseconds |
+| `-heartbeat-timeout-ms` | `5000` | Heartbeat timeout in milliseconds |
+| `-election-timeout-ms` | `10000` | Election timeout in milliseconds |
+| `-min-quorum` | `0` | Minimum quorum size (0 = automatic majority) |
+| `-enable-pre-vote` | `false` | Enable pre-vote protocol to prevent disruptions |
+
+#### Cluster Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `FLYDB_CLUSTER_PORT` | Port for cluster communication (default: 9998) |
+| `FLYDB_CLUSTER_PEERS` | Comma-separated list of peer addresses |
+| `FLYDB_REPLICATION_MODE` | Replication mode: async, semi_sync, or sync |
+| `FLYDB_HEARTBEAT_INTERVAL_MS` | Heartbeat interval in milliseconds |
+| `FLYDB_HEARTBEAT_TIMEOUT_MS` | Heartbeat timeout in milliseconds |
+| `FLYDB_ELECTION_TIMEOUT_MS` | Election timeout in milliseconds |
+| `FLYDB_MIN_QUORUM` | Minimum quorum size for cluster decisions |
+
+#### Replication Modes
+
+| Mode | Description |
+|------|-------------|
+| `async` | Return immediately, replicate in background (default) |
+| `semi_sync` | Wait for at least one replica to acknowledge |
+| `sync` | Wait for all replicas to acknowledge |
 
 ### Encryption Configuration
 
@@ -1589,6 +1608,26 @@ export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
 # Slave connecting to master
 export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
 ./flydb -port 8889 -role slave -master localhost:9999 -db slave.fdb
+
+# Cluster mode (3-node example)
+# Node 1:
+export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
+./flydb -role cluster -cluster-port 9998 -cluster-peers node2:9998,node3:9998
+
+# Node 2:
+export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
+./flydb -role cluster -cluster-port 9998 -cluster-peers node1:9998,node3:9998
+
+# Node 3:
+export FLYDB_ENCRYPTION_PASSPHRASE="my-secure-passphrase"
+./flydb -role cluster -cluster-port 9998 -cluster-peers node1:9998,node2:9998
+
+# Cluster with semi-sync replication
+FLYDB_ROLE=cluster \
+FLYDB_CLUSTER_PORT=9998 \
+FLYDB_CLUSTER_PEERS=node2:9998,node3:9998 \
+FLYDB_REPLICATION_MODE=semi_sync \
+./flydb
 
 # With debug logging
 ./flydb -role standalone -log-level debug
