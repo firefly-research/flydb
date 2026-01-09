@@ -314,6 +314,21 @@ flydb>
 
 ## SQL Statements
 
+### SQL Comments
+
+FlyDB supports both single-line and multi-line SQL comments:
+
+```sql
+-- This is a single-line comment
+SELECT * FROM users; -- Comment at end of line
+
+/* This is a
+   multi-line comment */
+SELECT * FROM orders;
+
+/* Inline comment */ SELECT name /* column */ FROM users;
+```
+
 ### Data Definition Language (DDL)
 
 #### CREATE TABLE
@@ -1262,6 +1277,7 @@ INSPECT TABLE users
 | `DOUBLE` | - | 64-bit floating point | `3.14159265359` |
 | `REAL` | - | 64-bit floating point | `2.718` |
 | `DECIMAL` | `NUMERIC` | Arbitrary precision decimal | `123.456` |
+| `MONEY` | - | Currency values | `$1234.56`, `€99.99` |
 
 ### String Types
 
@@ -1270,6 +1286,10 @@ INSPECT TABLE users
 | `TEXT` | - | Variable-length string (unlimited) | `'Hello World'` |
 | `VARCHAR(n)` | - | String with max length n | `'Hello'` |
 | `CHAR(n)` | `CHARACTER` | Fixed-length string | `'ABC'` |
+| `CLOB` | - | Character large object | `'Long text...'` |
+| `NCHAR(n)` | - | Fixed-length Unicode string | `'日本語'` |
+| `NVARCHAR(n)` | - | Variable-length Unicode string | `'日本語'` |
+| `NTEXT` | - | Unicode text (unlimited) | `'日本語テキスト'` |
 
 ### Boolean Type
 
@@ -1285,6 +1305,7 @@ INSPECT TABLE users
 | `DATETIME` | - | Date and time | `'2024-01-15 10:30:00'` |
 | `DATE` | - | Date only (YYYY-MM-DD) | `'2024-01-15'` |
 | `TIME` | - | Time only (HH:MM:SS) | `'10:30:00'` |
+| `INTERVAL` | - | Time interval/duration | `'1 day'`, `'2 hours'` |
 
 ### Binary Types
 
@@ -1329,6 +1350,22 @@ INSPECT TABLE users
 | `AND` | Logical AND | `WHERE active = true AND age > 18` |
 | `OR` | Logical OR | `WHERE status = 'admin' OR status = 'moderator'` |
 | `NOT` | Logical NOT | `WHERE NOT deleted` |
+
+### Arithmetic Operators
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `+` | Addition | `SELECT price + tax FROM products` |
+| `-` | Subtraction | `SELECT total - discount FROM orders` |
+| `*` | Multiplication | `SELECT quantity * price FROM items` |
+| `/` | Division | `SELECT total / count FROM stats` |
+| `%` | Modulo (remainder) | `SELECT id % 10 FROM users` |
+
+### String Operators
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `\|\|` | String concatenation | `SELECT first_name \|\| ' ' \|\| last_name FROM users` |
 
 ### Aggregate Functions
 

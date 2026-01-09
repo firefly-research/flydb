@@ -650,13 +650,22 @@ const (
     TOKEN_KEYWORD TokenType = iota  // SELECT, INSERT, etc.
     TOKEN_IDENT                      // table names, column names
     TOKEN_NUMBER                     // numeric literals
-    TOKEN_STRING                     // string literals
-    TOKEN_OPERATOR                   // =, <, >, <=, >=, <>
+    TOKEN_STRING                     // string literals (single or double quoted)
+    TOKEN_OPERATOR                   // =, <, >, <=, >=, <>, !=
     TOKEN_COMMA
     TOKEN_LPAREN
     TOKEN_RPAREN
     TOKEN_STAR
     TOKEN_EOF
+    // Arithmetic operators
+    TOKEN_PLUS                       // +
+    TOKEN_MINUS                      // -
+    TOKEN_SLASH                      // /
+    TOKEN_PERCENT                    // %
+    TOKEN_CONCAT                     // ||
+    // Additional operators
+    TOKEN_SEMICOLON                  // ;
+    TOKEN_DOT                        // .
 )
 
 type Token struct {
@@ -666,10 +675,14 @@ type Token struct {
 ```
 
 **Tokenization Process:**
-1. Skip whitespace
+1. Skip whitespace and comments (`--` single-line, `/* */` multi-line)
 2. Identify token type by first character
 3. Consume characters until token boundary
 4. Return token with type and value
+
+**Supported Comments:**
+- Single-line: `-- comment text`
+- Multi-line: `/* comment text */`
 
 ### Parser (`parser.go`)
 
@@ -717,12 +730,15 @@ type InsertStmt struct {
 }
 
 type WhereClause struct {
-    Column   string
-    Operator string
-    Value    string
-    And      *WhereClause
-    Or       *WhereClause
+    Column   string       // Column name for comparison
+    Operator string       // =, <>, <, >, <=, >=, IN, LIKE, BETWEEN, IS NULL, etc.
+    Value    string       // Comparison value
+    And      *WhereClause // Chained AND condition (recursive)
+    Or       *WhereClause // Chained OR condition (recursive)
 }
+
+// Compound conditions are supported:
+// WHERE status = 'active' AND age > 18 OR role = 'admin'
 ```
 
 ### Executor (`executor.go`)
