@@ -22,6 +22,8 @@ This document provides a complete reference for FlyDB's SQL syntax, protocol com
 4. [Operators and Functions](#operators-and-functions)
    - [Comparison Operators](#comparison-operators)
    - [Logical Operators](#logical-operators)
+   - [JSON Operators](#json-operators)
+   - [JSON Functions](#json-functions)
    - [Aggregate Functions](#aggregate-functions)
    - [String Functions](#string-functions)
    - [Numeric Functions](#numeric-functions)
@@ -1347,6 +1349,70 @@ INSPECT TABLE users
 | Operator | Description | Example |
 |----------|-------------|---------|
 | `\|\|` | String concatenation | `SELECT first_name \|\| ' ' \|\| last_name FROM users` |
+
+### JSON Operators
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `->` | Get JSON field (returns JSON) | `SELECT data->'name' FROM products` |
+| `->>` | Get JSON field (returns text) | `SELECT data->>'name' FROM products` |
+| `@>` | Contains (left contains right) | `WHERE data @> '{"active": true}'` |
+| `<@` | Contained by (left is contained by right) | `WHERE '{"a": 1}' <@ data` |
+| `?` | Key exists | `WHERE data ? 'email'` |
+| `?&` | All keys exist | `WHERE data ?& 'name,email'` |
+| `?\|` | Any key exists | `WHERE data ?\| 'phone,mobile'` |
+
+**Examples:**
+```sql
+-- Create table with JSONB column
+CREATE TABLE products (id SERIAL PRIMARY KEY, data JSONB);
+
+-- Insert JSON data
+INSERT INTO products (data) VALUES ('{"name": "Widget", "price": 29.99, "tags": ["sale", "new"]}');
+
+-- Query with JSON operators
+SELECT * FROM products WHERE data @> '{"tags": ["sale"]}';
+SELECT * FROM products WHERE data->>'name' = 'Widget';
+SELECT data->'price' FROM products WHERE data ? 'price';
+```
+
+### JSON Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `json_extract(json, path)` | Extract value at JSON path | `SELECT json_extract(data, '$.name') FROM products` |
+| `json_extract_text(json, path)` | Extract value as text | `SELECT json_extract_text(data, '$.price') FROM products` |
+| `json_array_length(json)` | Get array length | `SELECT json_array_length(data->'tags') FROM products` |
+| `json_keys(json)` | Get object keys as array | `SELECT json_keys(data) FROM products` |
+| `json_typeof(json)` | Get JSON value type | `SELECT json_typeof(data->'price') FROM products` |
+| `json_valid(json)` | Check if valid JSON | `SELECT json_valid('{"a": 1}')` |
+| `json_set(json, path, value)` | Set value at path | `SELECT json_set(data, '$.price', '39.99') FROM products` |
+| `json_remove(json, path)` | Remove value at path | `SELECT json_remove(data, '$.tags') FROM products` |
+| `json_merge(json1, json2)` | Merge two JSON objects | `SELECT json_merge(data, '{"stock": 100}') FROM products` |
+| `json_array_append(json, value)` | Append value to array | `SELECT json_array_append(data->'tags', '"featured"') FROM products` |
+| `json_object(k1, v1, ...)` | Create JSON object | `SELECT json_object('name', 'Widget', 'price', 29.99)` |
+| `json_array(v1, v2, ...)` | Create JSON array | `SELECT json_array('a', 'b', 'c')` |
+
+**JSON Path Syntax:**
+- `$.key` or `key` - Access object field
+- `$.key.subkey` - Nested field access
+- `$.array[0]` - Array index access
+- `$.key[0].field` - Combined access
+
+**Examples:**
+```sql
+-- Extract nested values
+SELECT json_extract(data, '$.address.city') FROM users;
+
+-- Check JSON type
+SELECT json_typeof(data->'price') FROM products;  -- Returns "number"
+
+-- Modify JSON
+UPDATE products SET data = json_set(data, '$.price', '39.99') WHERE id = 1;
+
+-- Create JSON dynamically
+SELECT json_object('id', id, 'name', name) FROM users;
+```
 
 ### Aggregate Functions
 

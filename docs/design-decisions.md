@@ -20,6 +20,9 @@ This document explains the key design decisions made in FlyDB, including the rat
 14. [AES-256-GCM for Encryption](#aes-256-gcm-for-encryption)
 15. [Go as Implementation Language](#go-as-implementation-language)
 16. [Role-Based Access Control](#role-based-access-control)
+17. [Unified Cluster-Replication Architecture](#unified-cluster-replication-architecture)
+18. [SQL Dump Utility](#sql-dump-utility)
+19. [JSONB Data Type](#jsonb-data-type)
 
 ---
 
@@ -1150,6 +1153,187 @@ For very large schemas, future enhancements could include:
 - Metadata result caching with invalidation
 - Indexed catalog lookups
 - Pagination for large result sets
+
+---
+
+## Unified Cluster-Replication Architecture
+
+### Decision
+
+Implement a unified cluster manager that integrates leader election, data replication, sharding, and failover into a single cohesive system.
+
+### The Problem
+
+Traditional database clustering often separates concerns:
+- Leader election in one component
+- Replication in another
+- Sharding logic elsewhere
+- Failover handling scattered across components
+
+This separation leads to:
+- Inconsistent state during failures
+- Complex coordination between components
+- Difficult debugging and maintenance
+- Race conditions during leader transitions
+
+### Rationale
+
+1. **Consistency**: Single source of truth for cluster state
+2. **Simplicity**: One component to understand and debug
+3. **Reliability**: Coordinated failover without race conditions
+4. **Performance**: Optimized data flow without inter-component overhead
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Unified Cluster Manager                       │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Leader Election                          │ │
+│  │              Bully Algorithm with Heartbeats                │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Data Sharding                            │ │
+│  │              Consistent Hashing with Virtual Nodes          │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Replication                              │ │
+│  │              WAL Streaming with Configurable Sync           │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Failover Handling                        │ │
+│  │              Automatic Detection and Recovery               │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|--------------|
+| Unified state management | Larger single component |
+| Coordinated failover | More complex initialization |
+| Consistent behavior | Single point of failure for cluster logic |
+| Easier debugging | Requires careful testing |
+
+---
+
+## SQL Dump Utility
+
+### Decision
+
+Create a dedicated `flydb-dump` binary for database export and import operations, supporting multiple formats (SQL, CSV, JSON).
+
+### The Problem
+
+Database administrators need to:
+- Back up databases for disaster recovery
+- Migrate data between environments
+- Export data for analysis in other tools
+- Share database schemas without data
+
+### Rationale
+
+1. **Separation of Concerns**: Dump utility is independent of the server
+2. **Multiple Formats**: Different use cases require different formats
+3. **Flexibility**: Schema-only, data-only, or full dumps
+4. **Compatibility**: SQL format works with other tools
+
+### Features
+
+| Feature | Description |
+|---------|-------------|
+| Full Dump | Export complete database with schema and data |
+| Schema Only | Export table definitions without data |
+| Table Selection | Export specific tables only |
+| SQL Format | Standard INSERT statements |
+| CSV Format | Comma-separated values for spreadsheets |
+| JSON Format | Structured data for APIs and tools |
+| Import/Restore | Restore from SQL dump files |
+
+### Usage
+
+```bash
+# Full database dump
+flydb-dump -host localhost -port 5432 -database mydb > backup.sql
+
+# Schema only
+flydb-dump -schema-only -database mydb > schema.sql
+
+# Specific tables in CSV format
+flydb-dump -format csv -tables users,orders -database mydb > data.csv
+
+# Restore from dump
+flydb-dump -restore -database mydb < backup.sql
+```
+
+---
+
+## JSONB Data Type
+
+### Decision
+
+Implement full JSONB support with PostgreSQL-compatible operators and functions for storing and querying structured JSON data.
+
+### The Problem
+
+Modern applications often need to store semi-structured data:
+- User preferences and settings
+- API responses and payloads
+- Dynamic attributes that vary by record
+- Nested data structures
+
+### Rationale
+
+1. **Flexibility**: Store varying structures in a single column
+2. **Queryability**: Filter and extract data using SQL
+3. **Compatibility**: PostgreSQL-style operators are widely understood
+4. **Performance**: Binary storage with efficient access
+
+### Operators
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `->` | Get JSON field (returns JSON) | `data->'name'` |
+| `->>` | Get JSON field (returns text) | `data->>'name'` |
+| `@>` | Contains | `data @> '{"active": true}'` |
+| `<@` | Contained by | `'{"a": 1}' <@ data` |
+| `?` | Key exists | `data ? 'email'` |
+| `?&` | All keys exist | `data ?& 'name,email'` |
+| `?\|` | Any key exists | `data ?\| 'phone,mobile'` |
+
+### Functions
+
+| Function | Description |
+|----------|-------------|
+| `json_extract(json, path)` | Extract value at JSON path |
+| `json_extract_text(json, path)` | Extract value as text |
+| `json_array_length(json)` | Get array length |
+| `json_keys(json)` | Get object keys as array |
+| `json_typeof(json)` | Get JSON value type |
+| `json_valid(json)` | Check if valid JSON |
+| `json_set(json, path, value)` | Set value at path |
+| `json_remove(json, path)` | Remove value at path |
+| `json_merge(json1, json2)` | Merge two JSON objects |
+| `json_object(k1, v1, ...)` | Create JSON object |
+| `json_array(v1, v2, ...)` | Create JSON array |
+
+### Path Syntax
+
+JSON paths follow a simple dot notation:
+- `$.key` or `key` - Access object field
+- `$.key.subkey` - Nested field access
+- `$.array[0]` - Array index access
+- `$.key[0].field` - Combined access
+
+### Trade-offs
+
+| Advantage | Disadvantage |
+|-----------|--------------|
+| Flexible schema | Less type safety |
+| Rich query support | Query complexity |
+| PostgreSQL compatible | Storage overhead |
+| Nested data support | Index limitations |
 
 ---
 

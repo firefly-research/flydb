@@ -21,6 +21,8 @@ This document provides an in-depth technical guide to FlyDB's internal architect
 15. [Clustering](#clustering)
 16. [Query Cache](#query-cache)
 17. [Binary Wire Protocol](#binary-wire-protocol)
+18. [SQL Dump Utility](#sql-dump-utility)
+19. [JSONB Data Type](#jsonb-data-type)
 
 ---
 
@@ -2138,6 +2140,203 @@ func ReadMessage(r io.Reader) (*Message, error) {
 | **FlyDB** | **Binary** | **Length-prefixed** | **JSON** |
 
 FlyDB's approach is similar to PostgreSQL and MySQL in framing, but uses JSON payloads for easier debugging and driver development.
+
+---
+
+## SQL Dump Utility
+
+### Overview
+
+The `flydb-dump` utility provides database export and import functionality, supporting multiple output formats for different use cases.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      flydb-dump                                  │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Dumper                                   │ │
+│  │  - Connects to FlyDB server via SDK                        │ │
+│  │  - Retrieves schema and data                               │ │
+│  │  - Formats output based on selected format                 │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Format Handlers                          │ │
+│  │  - SQL: INSERT statements with proper escaping             │ │
+│  │  - CSV: RFC 4180 compliant with headers                    │ │
+│  │  - JSON: Structured with metadata                          │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Restore Handler                          │ │
+│  │  - Parses SQL dump files                                   │ │
+│  │  - Executes statements in order                            │ │
+│  │  - Handles errors gracefully                               │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Output Formats
+
+#### SQL Format
+
+The SQL format produces standard INSERT statements that can be executed to restore the database:
+
+```sql
+-- FlyDB Database Dump
+-- Database: mydb
+-- Generated: 2026-01-10T12:00:00Z
+
+-- Table: users
+CREATE TABLE users (id INT PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE);
+INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.com');
+INSERT INTO users (id, name, email) VALUES (2, 'Bob', 'bob@example.com');
+```
+
+#### CSV Format
+
+The CSV format follows RFC 4180 with headers:
+
+```csv
+id,name,email
+1,Alice,alice@example.com
+2,Bob,bob@example.com
+```
+
+#### JSON Format
+
+The JSON format includes metadata and structured data:
+
+```json
+{
+  "database": "mydb",
+  "generated": "2026-01-10T12:00:00Z",
+  "format": "json",
+  "tables": {
+    "users": {
+      "schema": {
+        "columns": [
+          {"name": "id", "type": "INT", "constraints": ["PRIMARY KEY"]},
+          {"name": "name", "type": "TEXT", "constraints": ["NOT NULL"]},
+          {"name": "email", "type": "TEXT", "constraints": ["UNIQUE"]}
+        ]
+      },
+      "data": [
+        {"id": 1, "name": "Alice", "email": "alice@example.com"},
+        {"id": 2, "name": "Bob", "email": "bob@example.com"}
+      ]
+    }
+  }
+}
+```
+
+---
+
+## JSONB Data Type
+
+### Overview
+
+FlyDB supports the JSONB data type for storing and querying semi-structured JSON data. The implementation provides PostgreSQL-compatible operators and a comprehensive set of functions.
+
+### Storage
+
+JSONB values are stored as compacted JSON strings. On insert, the JSON is parsed and re-serialized to ensure valid, compact storage:
+
+```go
+case TypeJSONB:
+    var v interface{}
+    if err := json.Unmarshal([]byte(value), &v); err != nil {
+        return "", fmt.Errorf("invalid JSONB value: %s", value)
+    }
+    compact, err := json.Marshal(v)
+    if err != nil {
+        return "", err
+    }
+    return string(compact), nil
+```
+
+### Operators
+
+The lexer recognizes JSON operators as distinct token types:
+
+| Token | Operator | Description |
+|-------|----------|-------------|
+| `TokenJSONArrow` | `->` | Get field as JSON |
+| `TokenJSONArrowText` | `->>` | Get field as text |
+| `TokenJSONContains` | `@>` | Contains |
+| `TokenJSONContainedBy` | `<@` | Contained by |
+| `TokenJSONKeyExists` | `?` | Key exists |
+| `TokenJSONAllKeysExist` | `?&` | All keys exist |
+| `TokenJSONAnyKeyExists` | `?\|` | Any key exists |
+
+### Path Navigation
+
+JSON paths are parsed and navigated using a recursive algorithm:
+
+```go
+func navigatePath(data interface{}, path string) (interface{}, error) {
+    path = strings.TrimPrefix(path, "$.")
+    parts := parsePathParts(path)
+    current := data
+
+    for _, part := range parts {
+        if strings.HasPrefix(part, "[") && strings.HasSuffix(part, "]") {
+            // Array index access
+            index, _ := strconv.Atoi(part[1:len(part)-1])
+            arr := current.([]interface{})
+            current = arr[index]
+        } else {
+            // Object key access
+            obj := current.(map[string]interface{})
+            current = obj[part]
+        }
+    }
+    return current, nil
+}
+```
+
+### Containment Check
+
+The `@>` operator checks if the left JSON contains all key-value pairs from the right JSON:
+
+```go
+func containsJSON(left, right interface{}) bool {
+    switch r := right.(type) {
+    case map[string]interface{}:
+        l := left.(map[string]interface{})
+        for k, rv := range r {
+            lv, exists := l[k]
+            if !exists || !containsJSON(lv, rv) {
+                return false
+            }
+        }
+        return true
+    case []interface{}:
+        // Each element in right must exist in left
+        // ...
+    default:
+        return left == right
+    }
+}
+```
+
+### WHERE Clause Integration
+
+JSON operators are evaluated in the `evaluateWhereClause` function:
+
+```go
+case "@>":
+    contains, err := JSONContains(colStr, where.Value)
+    if err != nil {
+        return false
+    }
+    return contains
+case "?":
+    exists, err := JSONKeyExists(colStr, where.Value)
+    if err != nil {
+        return false
+    }
+    return exists
+```
 
 ---
 
