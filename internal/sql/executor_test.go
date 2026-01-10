@@ -1546,6 +1546,518 @@ func TestDefaultValue(t *testing.T) {
 	}
 }
 
+func TestDefaultNowFunction(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create table with DEFAULT NOW() constraint
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "events",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "name", Type: "TEXT"},
+			{Name: "created_at", Type: "TIMESTAMP", Constraints: []ColumnConstraint{
+				{Type: ConstraintDefault, DefaultValue: "NOW()"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE with DEFAULT NOW() failed: %v", err)
+	}
+
+	// Insert without specifying the timestamp column (should use DEFAULT NOW())
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "events",
+		Columns:   []string{"id", "name"},
+		Values:    []string{"1", "Event 1"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT without timestamp failed: %v", err)
+	}
+
+	// Select and verify the timestamp was set
+	result, err := exec.Execute(&SelectStmt{
+		TableName: "events",
+		Columns:   []string{"id", "name", "created_at"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+
+	// The result should contain a valid timestamp (RFC3339 format)
+	if !strings.Contains(result, "Event 1") {
+		t.Errorf("Expected 'Event 1' in result, got: %s", result)
+	}
+	// Check that the timestamp is not "NOW()" literal
+	if strings.Contains(result, "NOW()") {
+		t.Errorf("Timestamp should be evaluated, not literal 'NOW()': %s", result)
+	}
+
+	// Insert with explicit timestamp value (should use provided value, not default)
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "events",
+		Columns:   []string{"id", "name", "created_at"},
+		Values:    []string{"2", "Event 2", "2025-01-15T10:30:45Z"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT with explicit timestamp failed: %v", err)
+	}
+
+	// Verify the explicit timestamp was used
+	result, err = exec.Execute(&SelectStmt{
+		TableName: "events",
+		Columns:   []string{"id", "name", "created_at"},
+		Where:     &Condition{Column: "id", Value: "2"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+	if !strings.Contains(result, "2025-01-15") {
+		t.Errorf("Expected explicit timestamp '2025-01-15', got: %s", result)
+	}
+}
+
+func TestDefaultCurrentTimestamp(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create table with DEFAULT CURRENT_TIMESTAMP constraint
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "logs",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "message", Type: "TEXT"},
+			{Name: "logged_at", Type: "TIMESTAMP", Constraints: []ColumnConstraint{
+				{Type: ConstraintDefault, DefaultValue: "CURRENT_TIMESTAMP"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE with DEFAULT CURRENT_TIMESTAMP failed: %v", err)
+	}
+
+	// Insert without specifying the timestamp column
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "logs",
+		Columns:   []string{"id", "message"},
+		Values:    []string{"1", "Test log message"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT without timestamp failed: %v", err)
+	}
+
+	// Select and verify the timestamp was set
+	result, err := exec.Execute(&SelectStmt{
+		TableName: "logs",
+		Columns:   []string{"id", "message", "logged_at"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+
+	// Check that the timestamp is not "CURRENT_TIMESTAMP" literal
+	if strings.Contains(result, "CURRENT_TIMESTAMP") {
+		t.Errorf("Timestamp should be evaluated, not literal 'CURRENT_TIMESTAMP': %s", result)
+	}
+}
+
+func TestDefaultCurrentDate(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create table with DEFAULT CURRENT_DATE constraint
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "daily_reports",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "report", Type: "TEXT"},
+			{Name: "report_date", Type: "DATE", Constraints: []ColumnConstraint{
+				{Type: ConstraintDefault, DefaultValue: "CURRENT_DATE"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE with DEFAULT CURRENT_DATE failed: %v", err)
+	}
+
+	// Insert without specifying the date column
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "daily_reports",
+		Columns:   []string{"id", "report"},
+		Values:    []string{"1", "Daily summary"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT without date failed: %v", err)
+	}
+
+	// Select and verify the date was set
+	result, err := exec.Execute(&SelectStmt{
+		TableName: "daily_reports",
+		Columns:   []string{"id", "report", "report_date"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+
+	// Check that the date is not "CURRENT_DATE" literal
+	if strings.Contains(result, "CURRENT_DATE") {
+		t.Errorf("Date should be evaluated, not literal 'CURRENT_DATE': %s", result)
+	}
+}
+
+func TestDefaultCurrentTime(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create table with DEFAULT CURRENT_TIME constraint
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "time_entries",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "task", Type: "TEXT"},
+			{Name: "start_time", Type: "TIME", Constraints: []ColumnConstraint{
+				{Type: ConstraintDefault, DefaultValue: "CURRENT_TIME"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE with DEFAULT CURRENT_TIME failed: %v", err)
+	}
+
+	// Insert without specifying the time column
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "time_entries",
+		Columns:   []string{"id", "task"},
+		Values:    []string{"1", "Work on project"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT without time failed: %v", err)
+	}
+
+	// Select and verify the time was set
+	result, err := exec.Execute(&SelectStmt{
+		TableName: "time_entries",
+		Columns:   []string{"id", "task", "start_time"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+
+	// Check that the time is not "CURRENT_TIME" literal
+	if strings.Contains(result, "CURRENT_TIME") {
+		t.Errorf("Time should be evaluated, not literal 'CURRENT_TIME': %s", result)
+	}
+}
+
+func TestUpdateWithNowFunction(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create table with TIMESTAMP column
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "articles",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "title", Type: "TEXT"},
+			{Name: "updated_at", Type: "TIMESTAMP"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE failed: %v", err)
+	}
+
+	// Insert a row with explicit timestamp
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "articles",
+		Columns:   []string{"id", "title", "updated_at"},
+		Values:    []string{"1", "Test Article", "2025-01-01T00:00:00Z"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT failed: %v", err)
+	}
+
+	// Update using NOW() function
+	_, err = exec.Execute(&UpdateStmt{
+		TableName: "articles",
+		Updates:   map[string]string{"updated_at": "NOW()"},
+		Where:     &Condition{Column: "id", Value: "1"},
+	})
+	if err != nil {
+		t.Fatalf("UPDATE with NOW() failed: %v", err)
+	}
+
+	// Select and verify the timestamp was updated
+	result, err := exec.Execute(&SelectStmt{
+		TableName: "articles",
+		Columns:   []string{"id", "title", "updated_at"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+
+	// Check that the timestamp is not "NOW()" literal
+	if strings.Contains(result, "NOW()") {
+		t.Errorf("Timestamp should be evaluated, not literal 'NOW()': %s", result)
+	}
+	// Check that the old timestamp is no longer present
+	if strings.Contains(result, "2025-01-01") {
+		t.Errorf("Timestamp should have been updated from 2025-01-01: %s", result)
+	}
+}
+
+func TestInsertWithExplicitNowFunction(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create table with TIMESTAMP column (no default)
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "audit_log",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "action", Type: "TEXT"},
+			{Name: "timestamp", Type: "TIMESTAMP"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE failed: %v", err)
+	}
+
+	// Insert with explicit NOW() value
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "audit_log",
+		Columns:   []string{"id", "action", "timestamp"},
+		Values:    []string{"1", "login", "NOW()"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT with explicit NOW() failed: %v", err)
+	}
+
+	// Select and verify the timestamp was set
+	result, err := exec.Execute(&SelectStmt{
+		TableName: "audit_log",
+		Columns:   []string{"id", "action", "timestamp"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+
+	// Check that the timestamp is not "NOW()" literal
+	if strings.Contains(result, "NOW()") {
+		t.Errorf("Timestamp should be evaluated, not literal 'NOW()': %s", result)
+	}
+}
+
+func TestInsertWithCurrentTimestampFunction(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create table with TIMESTAMP column
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "sessions",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "user_id", Type: "INT"},
+			{Name: "created_at", Type: "TIMESTAMP"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE failed: %v", err)
+	}
+
+	// Insert with explicit CURRENT_TIMESTAMP value
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "sessions",
+		Columns:   []string{"id", "user_id", "created_at"},
+		Values:    []string{"1", "100", "CURRENT_TIMESTAMP"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT with explicit CURRENT_TIMESTAMP failed: %v", err)
+	}
+
+	// Select and verify the timestamp was set
+	result, err := exec.Execute(&SelectStmt{
+		TableName: "sessions",
+		Columns:   []string{"id", "user_id", "created_at"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+
+	// Check that the timestamp is not "CURRENT_TIMESTAMP" literal
+	if strings.Contains(result, "CURRENT_TIMESTAMP") {
+		t.Errorf("Timestamp should be evaluated, not literal 'CURRENT_TIMESTAMP': %s", result)
+	}
+}
+
+func TestInsertWithUUIDFunction(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create table with UUID column
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "tokens",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "token", Type: "UUID"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE failed: %v", err)
+	}
+
+	// Insert with explicit UUID() value
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "tokens",
+		Columns:   []string{"id", "token"},
+		Values:    []string{"1", "UUID()"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT with UUID() failed: %v", err)
+	}
+
+	// Insert with GEN_RANDOM_UUID()
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "tokens",
+		Columns:   []string{"id", "token"},
+		Values:    []string{"2", "GEN_RANDOM_UUID()"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT with GEN_RANDOM_UUID() failed: %v", err)
+	}
+
+	// Insert with NEWID() (SQL Server style)
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "tokens",
+		Columns:   []string{"id", "token"},
+		Values:    []string{"3", "NEWID()"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT with NEWID() failed: %v", err)
+	}
+
+	// Select and verify the UUIDs were generated
+	result, err := exec.Execute(&SelectStmt{
+		TableName: "tokens",
+		Columns:   []string{"id", "token"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+
+	// Check that the UUID is not a literal function name
+	if strings.Contains(result, "UUID()") || strings.Contains(result, "GEN_RANDOM_UUID()") || strings.Contains(result, "NEWID()") {
+		t.Errorf("UUID should be evaluated, not literal function name: %s", result)
+	}
+
+	// Verify we have 3 rows
+	if !strings.Contains(result, "(3 rows)") {
+		t.Errorf("Expected 3 rows, got: %s", result)
+	}
+}
+
+func TestUpdateWithUUIDFunction(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create table with UUID column
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "api_keys",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "key", Type: "UUID"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE failed: %v", err)
+	}
+
+	// Insert a row with a known UUID
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "api_keys",
+		Columns:   []string{"id", "key"},
+		Values:    []string{"1", "550e8400-e29b-41d4-a716-446655440000"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT failed: %v", err)
+	}
+
+	// Update using UUID() function
+	_, err = exec.Execute(&UpdateStmt{
+		TableName: "api_keys",
+		Updates:   map[string]string{"key": "UUID()"},
+		Where:     &Condition{Column: "id", Value: "1"},
+	})
+	if err != nil {
+		t.Fatalf("UPDATE with UUID() failed: %v", err)
+	}
+
+	// Select and verify the UUID was updated
+	result, err := exec.Execute(&SelectStmt{
+		TableName: "api_keys",
+		Columns:   []string{"id", "key"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+
+	// Check that the UUID is not "UUID()" literal
+	if strings.Contains(result, "UUID()") {
+		t.Errorf("UUID should be evaluated, not literal 'UUID()': %s", result)
+	}
+	// Check that the old UUID is no longer present
+	if strings.Contains(result, "550e8400-e29b-41d4-a716-446655440000") {
+		t.Errorf("UUID should have been updated from the original value: %s", result)
+	}
+}
+
+func TestDefaultUUIDFunction(t *testing.T) {
+	exec, cleanup := setupExecutorTest(t)
+	defer cleanup()
+
+	// Create table with UUID column with default UUID()
+	_, err := exec.Execute(&CreateTableStmt{
+		TableName: "sessions",
+		Columns: []ColumnDef{
+			{Name: "id", Type: "INT", Constraints: []ColumnConstraint{{Type: ConstraintPrimaryKey}}},
+			{Name: "session_id", Type: "UUID", Constraints: []ColumnConstraint{
+				{Type: ConstraintDefault, DefaultValue: "UUID()"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CREATE TABLE failed: %v", err)
+	}
+
+	// Insert without specifying session_id - should use default UUID()
+	_, err = exec.Execute(&InsertStmt{
+		TableName: "sessions",
+		Columns:   []string{"id"},
+		Values:    []string{"1"},
+	})
+	if err != nil {
+		t.Fatalf("INSERT failed: %v", err)
+	}
+
+	// Select and verify the UUID was generated
+	result, err := exec.Execute(&SelectStmt{
+		TableName: "sessions",
+		Columns:   []string{"id", "session_id"},
+	})
+	if err != nil {
+		t.Fatalf("SELECT failed: %v", err)
+	}
+
+	// Check that the UUID is not "UUID()" literal
+	if strings.Contains(result, "UUID()") {
+		t.Errorf("UUID should be evaluated, not literal 'UUID()': %s", result)
+	}
+
+	// Verify the result contains a UUID-like pattern (8-4-4-4-12 hex chars)
+	if !strings.Contains(result, "-") {
+		t.Errorf("Expected UUID format with dashes: %s", result)
+	}
+}
+
 func TestUpdateConstraintValidation(t *testing.T) {
 	exec, cleanup := setupExecutorTest(t)
 	defer cleanup()

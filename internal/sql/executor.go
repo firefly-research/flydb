@@ -115,6 +115,7 @@ and JSON representation of the row. This enables the WATCH feature.
 package sql
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flydb/internal/auth"
@@ -938,6 +939,64 @@ func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 	return fmt.Sprintf("INSERT %d", insertedCount), nil
 }
 
+// evaluateFunctionValue evaluates a value that might be a function call like NOW(), CURRENT_TIMESTAMP, etc.
+// If the value is a recognized function call, it evaluates the function and returns the result.
+// Otherwise, it returns the value as-is.
+// This is used for DEFAULT values, UPDATE SET values, and INSERT values.
+func (e *Executor) evaluateFunctionValue(val string) string {
+	// Check if this is a function call (ends with "()" or contains "(")
+	upperVal := strings.ToUpper(strings.TrimSpace(val))
+
+	// Handle common timestamp functions
+	switch upperVal {
+	case "NOW()", "NOW":
+		return time.Now().Format(time.RFC3339)
+	case "CURRENT_TIMESTAMP()", "CURRENT_TIMESTAMP":
+		return time.Now().Format(time.RFC3339)
+	case "CURRENT_DATE()", "CURRENT_DATE":
+		return time.Now().Format("2006-01-02")
+	case "CURRENT_TIME()", "CURRENT_TIME":
+		return time.Now().Format("15:04:05")
+	case "GETDATE()", "GETDATE":
+		// SQL Server compatibility
+		return time.Now().Format(time.RFC3339)
+	case "SYSDATE()", "SYSDATE":
+		// Oracle compatibility
+		return time.Now().Format(time.RFC3339)
+	case "LOCALTIMESTAMP()", "LOCALTIMESTAMP":
+		return time.Now().Format(time.RFC3339)
+	case "LOCALTIME()", "LOCALTIME":
+		return time.Now().Format("15:04:05")
+	// UUID generation function
+	case "UUID()", "GEN_RANDOM_UUID()", "NEWID()":
+		return generateUUID()
+	}
+
+	// Return the value as-is if it's not a recognized function
+	return val
+}
+
+// generateUUID generates a random UUID v4 string.
+func generateUUID() string {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		// Fallback to a simple timestamp-based ID if random fails
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	// Set version (4) and variant (RFC 4122)
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
+
+// evaluateDefaultValue is an alias for evaluateFunctionValue for backward compatibility.
+// Deprecated: Use evaluateFunctionValue instead.
+func (e *Executor) evaluateDefaultValue(val string) string {
+	return e.evaluateFunctionValue(val)
+}
+
 // prepareInsertRow prepares a single row for insertion, handling column mapping and validation.
 // Returns the normalized values, a conflicting row key (if any), and an error.
 func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values []string) ([]string, string, error) {
@@ -961,7 +1020,8 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 		if columnValueMap != nil {
 			// Column list specified - look up value by column name
 			if v, ok := columnValueMap[col.Name]; ok {
-				value = v
+				// Evaluate function values like NOW(), CURRENT_TIMESTAMP, etc.
+				value = e.evaluateFunctionValue(v)
 			} else if col.IsAutoIncrement() {
 				// Generate auto-increment value
 				nextVal, err := e.catalog.GetNextAutoIncrement(table.Name, col.Name)
@@ -970,7 +1030,8 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 				}
 				value = fmt.Sprintf("%d", nextVal)
 			} else if defaultVal, hasDefault := col.GetDefaultValue(); hasDefault {
-				value = defaultVal
+				// Evaluate the default value (handles functions like NOW(), CURRENT_TIMESTAMP, etc.)
+				value = e.evaluateFunctionValue(defaultVal)
 			} else if col.IsNotNull() {
 				return nil, "", fmt.Errorf("no value provided for NOT NULL column %s", col.Name)
 			} else {
@@ -994,7 +1055,8 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 
 			if col.IsAutoIncrement() {
 				if len(values) == len(table.Columns) {
-					value = values[i]
+					// Evaluate function values for auto-increment columns too
+					value = e.evaluateFunctionValue(values[i])
 					if intVal, err := parseIntValue(value); err == nil {
 						e.catalog.UpdateAutoIncrement(table.Name, col.Name, intVal)
 					}
@@ -1007,9 +1069,11 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 				}
 			} else {
 				if valueIdx < len(values) {
-					value = values[valueIdx]
+					// Evaluate function values like NOW(), CURRENT_TIMESTAMP, etc.
+					value = e.evaluateFunctionValue(values[valueIdx])
 				} else if defaultVal, hasDefault := col.GetDefaultValue(); hasDefault {
-					value = defaultVal
+					// Evaluate the default value (handles functions like NOW(), CURRENT_TIMESTAMP, etc.)
+					value = e.evaluateFunctionValue(defaultVal)
 				} else {
 					return nil, "", fmt.Errorf("no value provided for column %s", col.Name)
 				}
@@ -1456,18 +1520,22 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 		if !exists {
 			return "", fmt.Errorf("column not found: %s", col)
 		}
-		if err := ValidateValue(colType, val); err != nil {
+
+		// Evaluate function values like NOW(), CURRENT_TIMESTAMP, etc.
+		evaluatedVal := e.evaluateFunctionValue(val)
+
+		if err := ValidateValue(colType, evaluatedVal); err != nil {
 			return "", fmt.Errorf("column %s: %v", col, err)
 		}
 
 		// Validate encoding for TEXT/VARCHAR columns
 		if e.encoder != nil && isTextType(colType) {
-			if err := e.encoder.Validate(val); err != nil {
+			if err := e.encoder.Validate(evaluatedVal); err != nil {
 				return "", fmt.Errorf("column %s: encoding error: %v", col, err)
 			}
 		}
 
-		normalized, err := NormalizeValue(colType, val)
+		normalized, err := NormalizeValue(colType, evaluatedVal)
 		if err != nil {
 			return "", fmt.Errorf("column %s: %v", col, err)
 		}
@@ -1810,7 +1878,8 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 					for _, col := range schema.Columns {
 						if col.Name == fk.Column {
 							if defVal, hasDefault := col.GetDefaultValue(); hasDefault {
-								defaultValue = defVal
+								// Evaluate the default value (handles functions like NOW(), CURRENT_TIMESTAMP, etc.)
+								defaultValue = e.evaluateDefaultValue(defVal)
 							} else {
 								return fmt.Errorf("cannot set default: column %s.%s has no default value", tblName, fk.Column)
 							}
@@ -1982,7 +2051,8 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 					for _, col := range schema.Columns {
 						if col.Name == fk.Column {
 							if defVal, hasDefault := col.GetDefaultValue(); hasDefault {
-								defaultValue = defVal
+								// Evaluate the default value (handles functions like NOW(), CURRENT_TIMESTAMP, etc.)
+								defaultValue = e.evaluateDefaultValue(defVal)
 							} else {
 								return fmt.Errorf("cannot set default: column %s.%s has no default value", tblName, fk.Column)
 							}
@@ -5179,7 +5249,8 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 
 		defaultVal := ""
 		if dv, hasDefault := stmt.ColumnDef.GetDefaultValue(); hasDefault {
-			defaultVal = dv
+			// Evaluate the default value (handles functions like NOW(), CURRENT_TIMESTAMP, etc.)
+			defaultVal = e.evaluateDefaultValue(dv)
 		}
 
 		for key, val := range rows {
