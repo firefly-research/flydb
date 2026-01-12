@@ -25,11 +25,8 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Port != 8888 {
-		t.Errorf("Expected default port 8888, got %d", cfg.Port)
-	}
-	if cfg.BinaryPort != 8889 {
-		t.Errorf("Expected default binary port 8889, got %d", cfg.BinaryPort)
+	if cfg.Port != 8889 {
+		t.Errorf("Expected default port 8889, got %d", cfg.Port)
 	}
 	if cfg.ReplPort != 9999 {
 		t.Errorf("Expected default replication port 9999, got %d", cfg.ReplPort)
@@ -103,16 +100,6 @@ func TestConfigValidation(t *testing.T) {
 			cfg: func() *Config {
 				cfg := validTestConfig()
 				cfg.Port = 70000
-				return cfg
-			}(),
-			wantErr: true,
-		},
-		{
-			name: "port conflict",
-			cfg: func() *Config {
-				cfg := validTestConfig()
-				cfg.Port = 8888
-				cfg.BinaryPort = 8888
 				return cfg
 			}(),
 			wantErr: true,
@@ -206,7 +193,6 @@ func TestLoadFromFile(t *testing.T) {
 	configContent := `# Test configuration
 role = "master"
 port = 9000
-binary_port = 9001
 replication_port = 9002
 db_path = "/tmp/test.fdb"
 log_level = "debug"
@@ -231,9 +217,6 @@ master_addr = "localhost:9999"
 	}
 	if cfg.Port != 9000 {
 		t.Errorf("Expected port 9000, got %d", cfg.Port)
-	}
-	if cfg.BinaryPort != 9001 {
-		t.Errorf("Expected binary_port 9001, got %d", cfg.BinaryPort)
 	}
 	if cfg.ReplPort != 9002 {
 		t.Errorf("Expected replication_port 9002, got %d", cfg.ReplPort)
@@ -338,8 +321,7 @@ log_level = "info"
 
 func TestToTOML(t *testing.T) {
 	cfg := &Config{
-		Port:       8888,
-		BinaryPort: 8889,
+		Port:       8889,
 		ReplPort:   9999,
 		Role:       "master",
 		MasterAddr: "localhost:9999",
@@ -354,11 +336,8 @@ func TestToTOML(t *testing.T) {
 	if !contains(toml, "role = \"master\"") {
 		t.Error("TOML output missing role")
 	}
-	if !contains(toml, "port = 8888") {
+	if !contains(toml, "port = 8889") {
 		t.Error("TOML output missing port")
-	}
-	if !contains(toml, "binary_port = 8889") {
-		t.Error("TOML output missing binary_port")
 	}
 	if !contains(toml, "db_path = \"/var/lib/flydb/data.fdb\"") {
 		t.Error("TOML output missing db_path")
@@ -512,8 +491,7 @@ func TestEncryptionConfigFromFile(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	configContent := `role = "standalone"
-port = 8888
-binary_port = 8889
+port = 8889
 replication_port = 9999
 db_path = "test.fdb"
 encryption_enabled = true
@@ -565,8 +543,7 @@ func TestEncryptionConfigFromEnv(t *testing.T) {
 
 func TestEncryptionConfigToTOML(t *testing.T) {
 	cfg := &Config{
-		Port:              8888,
-		BinaryPort:        8889,
+		Port:              8889,
 		ReplPort:          9999,
 		Role:              "standalone",
 		DBPath:            "test.fdb",

@@ -30,8 +30,7 @@ Example configuration file:
 
 	# FlyDB Configuration
 	role = "standalone"
-	port = 8888
-	binary_port = 8889
+	port = 8889              # Client connections (binary protocol)
 	replication_port = 9999
 	data_dir = "/var/lib/flydb"
 	buffer_pool_size = 0  # 0 = auto-size based on available memory
@@ -54,8 +53,7 @@ you have two options:
  2. Disable encryption: Set encryption_enabled = false in your config file
 
 Environment Variables:
-  - FLYDB_PORT: Server port for text protocol
-  - FLYDB_BINARY_PORT: Server port for binary protocol
+  - FLYDB_PORT: Server port for client connections (binary protocol)
   - FLYDB_REPL_PORT: Replication port
   - FLYDB_ROLE: Server role (standalone, master, slave)
   - FLYDB_MASTER_ADDR: Master address for slave mode
@@ -80,9 +78,8 @@ import (
 
 // Environment variable names for configuration.
 const (
-	EnvPort                 = "FLYDB_PORT"
-	EnvBinaryPort           = "FLYDB_BINARY_PORT"
-	EnvReplPort             = "FLYDB_REPL_PORT"
+	EnvPort     = "FLYDB_PORT"
+	EnvReplPort = "FLYDB_REPL_PORT"
 	EnvClusterPort          = "FLYDB_CLUSTER_PORT"
 	EnvRole                 = "FLYDB_ROLE"
 	EnvMasterAddr           = "FLYDB_MASTER_ADDR"
@@ -135,12 +132,13 @@ var DefaultConfigPaths = []string{
 // Config holds all configuration values for FlyDB.
 type Config struct {
 	// Server configuration
-	Port       int    `toml:"port" json:"port"`
-	BinaryPort int    `toml:"binary_port" json:"binary_port"`
-	ReplPort   int    `toml:"replication_port" json:"replication_port"`
-	ClusterPort int   `toml:"cluster_port" json:"cluster_port"`
-	Role       string `toml:"role" json:"role"`
-	MasterAddr string `toml:"master_addr" json:"master_addr"`
+	// Port is the server port for client connections (binary protocol).
+	// The legacy text protocol has been removed - all connections use the binary protocol.
+	Port        int    `toml:"port" json:"port"`
+	ReplPort    int    `toml:"replication_port" json:"replication_port"`
+	ClusterPort int    `toml:"cluster_port" json:"cluster_port"`
+	Role        string `toml:"role" json:"role"`
+	MasterAddr  string `toml:"master_addr" json:"master_addr"`
 
 	// Cluster configuration
 	ClusterPeers      []string `toml:"cluster_peers" json:"cluster_peers"`                 // List of peer addresses for cluster mode
@@ -191,9 +189,8 @@ type Config struct {
 // encryption by setting encryption_enabled = false in the config file.
 func DefaultConfig() *Config {
 	return &Config{
-		// Server
-		Port:        8888,
-		BinaryPort:  8889,
+		// Server - Port is for binary protocol (text protocol has been removed)
+		Port:        8889,
 		ReplPort:    9999,
 		ClusterPort: 9998,
 		Role:        "standalone",
@@ -306,9 +303,6 @@ func (c *Config) Validate() error {
 	if c.Port < 1 || c.Port > 65535 {
 		errs = append(errs, fmt.Sprintf("invalid port: %d (must be 1-65535)", c.Port))
 	}
-	if c.BinaryPort < 1 || c.BinaryPort > 65535 {
-		errs = append(errs, fmt.Sprintf("invalid binary_port: %d (must be 1-65535)", c.BinaryPort))
-	}
 	if c.ReplPort < 1 || c.ReplPort > 65535 {
 		errs = append(errs, fmt.Sprintf("invalid replication_port: %d (must be 1-65535)", c.ReplPort))
 	}
@@ -317,16 +311,13 @@ func (c *Config) Validate() error {
 	}
 
 	// Check for port conflicts
-	if c.Port == c.BinaryPort {
-		errs = append(errs, "port and binary_port cannot be the same")
-	}
-	if c.Role == "master" && (c.Port == c.ReplPort || c.BinaryPort == c.ReplPort) {
-		errs = append(errs, "replication_port must be different from port and binary_port")
+	if c.Role == "master" && c.Port == c.ReplPort {
+		errs = append(errs, "replication_port must be different from port")
 	}
 	if c.Role == "cluster" {
-		ports := map[int]string{c.Port: "port", c.BinaryPort: "binary_port", c.ReplPort: "replication_port", c.ClusterPort: "cluster_port"}
-		if len(ports) < 4 {
-			errs = append(errs, "all ports (port, binary_port, replication_port, cluster_port) must be different in cluster mode")
+		ports := map[int]string{c.Port: "port", c.ReplPort: "replication_port", c.ClusterPort: "cluster_port"}
+		if len(ports) < 3 {
+			errs = append(errs, "all ports (port, replication_port, cluster_port) must be different in cluster mode")
 		}
 	}
 
@@ -421,11 +412,6 @@ func (m *Manager) LoadFromEnv() {
 	if v := os.Getenv(EnvPort); v != "" {
 		if port, err := strconv.Atoi(v); err == nil {
 			cfg.Port = port
-		}
-	}
-	if v := os.Getenv(EnvBinaryPort); v != "" {
-		if port, err := strconv.Atoi(v); err == nil {
-			cfg.BinaryPort = port
 		}
 	}
 	if v := os.Getenv(EnvReplPort); v != "" {
@@ -631,18 +617,14 @@ func parseTOML(data string, cfg *Config) error {
 // applyConfigValue applies a key-value pair to the configuration.
 func applyConfigValue(cfg *Config, key, value string) error {
 	switch key {
-	case "port":
+	case "port", "binary_port":
+		// Accept both "port" and "binary_port" for backward compatibility
+		// (binary_port was used when text protocol existed)
 		port, err := strconv.Atoi(value)
 		if err != nil {
 			return fmt.Errorf("invalid port value: %s", value)
 		}
 		cfg.Port = port
-	case "binary_port":
-		port, err := strconv.Atoi(value)
-		if err != nil {
-			return fmt.Errorf("invalid binary_port value: %s", value)
-		}
-		cfg.BinaryPort = port
 	case "replication_port":
 		port, err := strconv.Atoi(value)
 		if err != nil {
@@ -755,7 +737,6 @@ func (c *Config) String() string {
 	sb.WriteString("FlyDB Configuration:\n")
 	sb.WriteString(fmt.Sprintf("  Role:             %s\n", c.Role))
 	sb.WriteString(fmt.Sprintf("  Port:             %d\n", c.Port))
-	sb.WriteString(fmt.Sprintf("  Binary Port:      %d\n", c.BinaryPort))
 	sb.WriteString(fmt.Sprintf("  Replication Port: %d\n", c.ReplPort))
 	if c.Role == "cluster" {
 		sb.WriteString(fmt.Sprintf("  Cluster Port:     %d\n", c.ClusterPort))
@@ -788,8 +769,8 @@ func (c *Config) ToTOML() string {
 	sb.WriteString("# Server role: standalone, master, slave, or cluster\n")
 	sb.WriteString(fmt.Sprintf("role = \"%s\"\n\n", c.Role))
 	sb.WriteString("# Network ports\n")
+	sb.WriteString("# Port is for client connections (binary protocol)\n")
 	sb.WriteString(fmt.Sprintf("port = %d\n", c.Port))
-	sb.WriteString(fmt.Sprintf("binary_port = %d\n", c.BinaryPort))
 	sb.WriteString(fmt.Sprintf("replication_port = %d\n", c.ReplPort))
 	sb.WriteString(fmt.Sprintf("cluster_port = %d\n\n", c.ClusterPort))
 
