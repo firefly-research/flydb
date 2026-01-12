@@ -309,10 +309,18 @@ obtain_sudo_if_needed() {
 
     # Check if any discovered items require sudo
     local all_items=()
-    [[ ${#FOUND_BINARIES[@]} -gt 0 ]] && all_items+=("${FOUND_BINARIES[@]}")
-    [[ ${#FOUND_SERVICES[@]} -gt 0 ]] && all_items+=("${FOUND_SERVICES[@]}")
-    [[ ${#FOUND_CONFIGS[@]} -gt 0 ]] && [[ "$KEEP_CONFIG" != true ]] && all_items+=("${FOUND_CONFIGS[@]}")
-    [[ ${#FOUND_DATA[@]} -gt 0 ]] && [[ "$REMOVE_DATA" == true ]] && all_items+=("${FOUND_DATA[@]}")
+    if [[ ${#FOUND_BINARIES[@]} -gt 0 ]]; then
+        all_items+=("${FOUND_BINARIES[@]}")
+    fi
+    if [[ ${#FOUND_SERVICES[@]} -gt 0 ]]; then
+        all_items+=("${FOUND_SERVICES[@]}")
+    fi
+    if [[ ${#FOUND_CONFIGS[@]} -gt 0 ]] && [[ "$KEEP_CONFIG" != true ]]; then
+        all_items+=("${FOUND_CONFIGS[@]}")
+    fi
+    if [[ ${#FOUND_DATA[@]} -gt 0 ]] && [[ "$REMOVE_DATA" == true ]]; then
+        all_items+=("${FOUND_DATA[@]}")
+    fi
 
     for item in "${all_items[@]+"${all_items[@]}"}"; do
         if [[ -n "$item" ]] && [[ ! -w "$(dirname "$item")" ]]; then
@@ -381,7 +389,9 @@ find_installations() {
 
     # Binary locations to check (matches install.sh)
     local bin_locations=("/usr/local/bin" "/usr/bin" "$HOME/.local/bin")
-    [[ -n "$PREFIX" ]] && bin_locations=("${PREFIX}/bin" "${bin_locations[@]}")
+    if [[ -n "$PREFIX" ]]; then
+        bin_locations=("${PREFIX}/bin" "${bin_locations[@]}")
+    fi
 
     # All binaries that install.sh creates
     local binary_names=("flydb" "flydb-shell" "flydb-dump" "fsql" "fdump")
@@ -396,19 +406,33 @@ find_installations() {
 
     # Service files (matches install.sh naming)
     if [[ "$INIT_SYSTEM" == "systemd" ]]; then
-        [[ -f "/etc/systemd/system/flydb.service" ]] && FOUND_SERVICES+=("/etc/systemd/system/flydb.service")
+        if [[ -f "/etc/systemd/system/flydb.service" ]]; then
+            FOUND_SERVICES+=("/etc/systemd/system/flydb.service")
+        fi
     elif [[ "$INIT_SYSTEM" == "launchd" ]]; then
-        [[ -f "/Library/LaunchDaemons/io.flydb.flydb.plist" ]] && FOUND_SERVICES+=("/Library/LaunchDaemons/io.flydb.flydb.plist")
-        [[ -f "$HOME/Library/LaunchAgents/io.flydb.flydb.plist" ]] && FOUND_SERVICES+=("$HOME/Library/LaunchAgents/io.flydb.flydb.plist")
+        if [[ -f "/Library/LaunchDaemons/io.flydb.flydb.plist" ]]; then
+            FOUND_SERVICES+=("/Library/LaunchDaemons/io.flydb.flydb.plist")
+        fi
+        if [[ -f "$HOME/Library/LaunchAgents/io.flydb.flydb.plist" ]]; then
+            FOUND_SERVICES+=("$HOME/Library/LaunchAgents/io.flydb.flydb.plist")
+        fi
     fi
 
     # Config directories (matches install.sh paths)
-    [[ -d "/etc/flydb" ]] && FOUND_CONFIGS+=("/etc/flydb")
-    [[ -d "$HOME/.config/flydb" ]] && FOUND_CONFIGS+=("$HOME/.config/flydb")
+    if [[ -d "/etc/flydb" ]]; then
+        FOUND_CONFIGS+=("/etc/flydb")
+    fi
+    if [[ -d "$HOME/.config/flydb" ]]; then
+        FOUND_CONFIGS+=("$HOME/.config/flydb")
+    fi
 
     # Data directories (matches install.sh paths)
-    [[ -d "/var/lib/flydb" ]] && FOUND_DATA+=("/var/lib/flydb")
-    [[ -d "$HOME/.local/share/flydb" ]] && FOUND_DATA+=("$HOME/.local/share/flydb")
+    if [[ -d "/var/lib/flydb" ]]; then
+        FOUND_DATA+=("/var/lib/flydb")
+    fi
+    if [[ -d "$HOME/.local/share/flydb" ]]; then
+        FOUND_DATA+=("$HOME/.local/share/flydb")
+    fi
 }
 
 print_found_items() {
@@ -805,9 +829,15 @@ print_completion() {
 
         # Summary stats
         echo -e "  ${DIM}Summary:${RESET}"
-        [[ $removed_count -gt 0 ]] && echo -e "    ${GREEN}${ICON_SUCCESS}${RESET} Removed: $removed_count items"
-        [[ $skipped_count -gt 0 ]] && echo -e "    ${YELLOW}${ICON_WARNING}${RESET} Skipped: $skipped_count items"
-        [[ $failed_count -gt 0 ]] && echo -e "    ${RED}${ICON_ERROR}${RESET} Failed: $failed_count items"
+        if [[ $removed_count -gt 0 ]]; then
+            echo -e "    ${GREEN}${ICON_SUCCESS}${RESET} Removed: $removed_count items"
+        fi
+        if [[ $skipped_count -gt 0 ]]; then
+            echo -e "    ${YELLOW}${ICON_WARNING}${RESET} Skipped: $skipped_count items"
+        fi
+        if [[ $failed_count -gt 0 ]]; then
+            echo -e "    ${RED}${ICON_ERROR}${RESET} Failed: $failed_count items"
+        fi
         echo ""
 
         # Show preserved data directories
