@@ -15,53 +15,41 @@
  */
 
 /*
-Package server implements the FlyDB TCP server and command dispatcher.
+Package server implements the FlyDB TCP server using the binary wire protocol.
 
 Server Architecture Overview:
 =============================
 
 The FlyDB server is a multi-threaded TCP server that handles client connections
-concurrently. Each client connection is processed in its own goroutine, allowing
-the server to handle many simultaneous clients efficiently.
+concurrently using a binary wire protocol. Each client connection is processed
+in its own goroutine, allowing the server to handle many simultaneous clients
+efficiently.
 
 Connection Lifecycle:
 =====================
 
-  1. Client connects via TCP
+  1. Client connects via TCP to the binary protocol port
   2. Server spawns a goroutine to handle the connection
-  3. Client sends newline-terminated commands
-  4. Server parses and executes commands
-  5. Server sends newline-terminated responses
+  3. Client authenticates using the binary protocol
+  4. Client sends binary-framed messages (queries, prepared statements, etc.)
+  5. Server processes messages and sends binary-framed responses
   6. Connection closes when client disconnects or errors occur
 
 Protocol:
 =========
 
-FlyDB uses a simple text-based protocol:
+FlyDB uses a binary wire protocol with the following frame format:
 
-  Request:  <COMMAND> [arguments]\n
-  Response: <RESULT>\n
+  ┌───────────┬─────────┬──────────┬───────────┬────────────┬─────────────────┐
+  │ Magic (1) │ Ver (1) │ Type (1) │ Flags (1) │ Length (4) │ Payload (var)   │
+  └───────────┴─────────┴──────────┴───────────┴────────────┴─────────────────┘
 
-Supported Commands:
-  - PING              : Health check, returns "PONG"
-  - AUTH <user> <pwd> : Authenticate, returns "AUTH OK" or error
-  - SQL <statement>   : Execute SQL, returns result or error
-  - WATCH <table>     : Subscribe to INSERT events on a table
-
-Reactive Subscriptions (WATCH):
-===============================
-
-The WATCH command enables real-time notifications when rows are inserted
-into a table. This is useful for building reactive applications.
-
-When a client executes "WATCH users", they receive "EVENT users <json>"
-messages whenever a new row is inserted into the users table.
-
-Implementation uses a pub/sub pattern:
-  1. Client sends "WATCH <table>"
-  2. Server adds connection to subscribers map
-  3. On INSERT, executor calls OnInsert callback
-  4. Server broadcasts to all subscribers of that table
+  - Magic: 0xFD (identifies FlyDB protocol)
+  - Version: Protocol version (currently 0x01)
+  - Type: Message type (Query, Auth, Prepare, Execute, etc.)
+  - Flags: Reserved for compression/encryption
+  - Length: Payload length in bytes (max 16 MB)
+  - Payload: JSON-encoded message data
 
 Thread Safety:
 ==============
@@ -75,7 +63,6 @@ This ensures safe concurrent access from multiple goroutines.
 package server
 
 import (
-	"bufio"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -96,15 +83,15 @@ import (
 // Package-level logger for the server component.
 var log = logging.NewLogger("server")
 
-// Server represents the FlyDB TCP server.
+// Server represents the FlyDB TCP server using the binary wire protocol.
 // It handles client connections, command dispatching, authentication,
-// and reactive subscriptions (WATCH).
+// and reactive subscriptions.
 //
 // The server is designed for concurrent access - each client connection
 // is handled in a separate goroutine, and shared state is protected
 // by mutexes.
 type Server struct {
-	// addr is the TCP address to listen on (e.g., ":8888").
+	// addr is the TCP address to listen on for the binary protocol (e.g., ":8889").
 	addr string
 
 	// executor handles SQL statement execution against the storage engine.
@@ -155,9 +142,6 @@ type Server struct {
 	// txMu protects the transactions map from concurrent access.
 	txMu sync.Mutex
 
-	// binaryAddr is the TCP address for binary protocol connections.
-	binaryAddr string
-
 	// binaryHandler handles binary protocol connections.
 	binaryHandler *protocol.BinaryHandler
 
@@ -191,28 +175,15 @@ type Server struct {
 // The function performs the following initialization:
 //  1. Creates an AuthManager for user authentication
 //  2. Creates an Executor for SQL statement execution
-//  3. Initializes the subscribers map for WATCH functionality
+//  3. Initializes the binary protocol handler
 //  4. Wires up the OnInsert callback for reactive notifications
 //
 // Parameters:
-//   - addr: TCP address to listen on (e.g., ":8888")
+//   - addr: TCP address to listen on for binary protocol (e.g., ":8889")
 //   - store: Pre-initialized storage engine instance
 //
 // Returns a fully configured Server ready to start.
 func NewServerWithStore(addr string, store storage.Engine) *Server {
-	return NewServerWithStoreAndBinary(addr, "", store)
-}
-
-// NewServerWithStoreAndBinary creates a new Server with both text and binary protocol support.
-// This constructor is used when both protocols are needed.
-//
-// Parameters:
-//   - addr: TCP address for text protocol (e.g., ":8888")
-//   - binaryAddr: TCP address for binary protocol (e.g., ":8889"), empty to disable
-//   - store: Pre-initialized storage engine instance
-//
-// Returns a fully configured Server ready to start.
-func NewServerWithStoreAndBinary(addr string, binaryAddr string, store storage.Engine) *Server {
 	// Create the authentication manager backed by the same storage.
 	authMgr := auth.NewAuthManager(store)
 
@@ -231,7 +202,6 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, store storage.E
 	// Initialize the server with all components.
 	srv := &Server{
 		addr:              addr,
-		binaryAddr:        binaryAddr,
 		executor:          exec,
 		store:             store,
 		auth:              authMgr,
@@ -245,18 +215,16 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, store storage.E
 		stopCh:            make(chan struct{}),
 	}
 
-	// Create the binary protocol handler if binary address is specified.
-	if binaryAddr != "" {
-		srv.binaryHandler = protocol.NewBinaryHandler(
-			&serverQueryExecutor{srv: srv},
-			prepMgr,
-			&serverAuthenticator{auth: authMgr},
-		)
+	// Create the binary protocol handler.
+	srv.binaryHandler = protocol.NewBinaryHandler(
+		&serverQueryExecutor{srv: srv},
+		prepMgr,
+		&serverAuthenticator{auth: authMgr},
+	)
 
-		// Wire up optional dependencies for ODBC/JDBC driver support
-		srv.binaryHandler.SetMetadataProvider(&serverMetadataProvider{srv: srv})
-		srv.binaryHandler.SetDatabaseManager(&serverDatabaseManager{srv: srv})
-	}
+	// Wire up optional dependencies for ODBC/JDBC driver support
+	srv.binaryHandler.SetMetadataProvider(&serverMetadataProvider{srv: srv})
+	srv.binaryHandler.SetDatabaseManager(&serverDatabaseManager{srv: srv})
 
 	// Wire up the OnInsert callback for reactive WATCH functionality.
 	// When the executor inserts a row, it calls this callback,
@@ -275,16 +243,40 @@ func NewServerWithStoreAndBinary(addr string, binaryAddr string, store storage.E
 	return srv
 }
 
+// NewServerWithStoreAndBinary creates a new Server with the binary protocol.
+// This is an alias for NewServerWithStore for backward compatibility.
+// The binaryAddr parameter is ignored - use addr for the binary protocol port.
+//
+// Parameters:
+//   - addr: TCP address for binary protocol (e.g., ":8889")
+//   - binaryAddr: Ignored (kept for backward compatibility)
+//   - store: Pre-initialized storage engine instance
+//
+// Returns a fully configured Server ready to start.
+func NewServerWithStoreAndBinary(addr string, binaryAddr string, store storage.Engine) *Server {
+	// Use binaryAddr if provided, otherwise use addr
+	if binaryAddr != "" {
+		return NewServerWithStore(binaryAddr, store)
+	}
+	return NewServerWithStore(addr, store)
+}
+
 // NewServerWithDatabaseManager creates a new Server with multi-database support.
 // This constructor uses a DatabaseManager to manage multiple databases.
 //
 // Parameters:
-//   - addr: TCP address for text protocol (e.g., ":8888")
-//   - binaryAddr: TCP address for binary protocol (e.g., ":8889"), empty to disable
+//   - addr: TCP address for binary protocol (e.g., ":8889")
+//   - binaryAddr: Ignored (kept for backward compatibility, use addr instead)
 //   - dbManager: Pre-initialized DatabaseManager instance
 //
 // Returns a fully configured Server ready to start.
 func NewServerWithDatabaseManager(addr string, binaryAddr string, dbManager *storage.DatabaseManager) *Server {
+	// Use binaryAddr if provided, otherwise use addr
+	effectiveAddr := addr
+	if binaryAddr != "" {
+		effectiveAddr = binaryAddr
+	}
+
 	// Get the default database for initial setup
 	defaultDB, _ := dbManager.GetDatabase(storage.DefaultDatabaseName)
 	store := defaultDB.Store
@@ -311,8 +303,7 @@ func NewServerWithDatabaseManager(addr string, binaryAddr string, dbManager *sto
 
 	// Initialize the server with all components.
 	srv := &Server{
-		addr:              addr,
-		binaryAddr:        binaryAddr,
+		addr:              effectiveAddr,
 		executor:          exec,
 		store:             store,
 		auth:              authMgr,
@@ -327,18 +318,16 @@ func NewServerWithDatabaseManager(addr string, binaryAddr string, dbManager *sto
 		stopCh:            make(chan struct{}),
 	}
 
-	// Create the binary protocol handler if binary address is specified.
-	if binaryAddr != "" {
-		srv.binaryHandler = protocol.NewBinaryHandler(
-			&serverQueryExecutor{srv: srv},
-			prepMgr,
-			&serverAuthenticator{auth: authMgr},
-		)
+	// Create the binary protocol handler.
+	srv.binaryHandler = protocol.NewBinaryHandler(
+		&serverQueryExecutor{srv: srv},
+		prepMgr,
+		&serverAuthenticator{auth: authMgr},
+	)
 
-		// Wire up optional dependencies for ODBC/JDBC driver support
-		srv.binaryHandler.SetMetadataProvider(&serverMetadataProvider{srv: srv})
-		srv.binaryHandler.SetDatabaseManager(&serverDatabaseManager{srv: srv})
-	}
+	// Wire up optional dependencies for ODBC/JDBC driver support
+	srv.binaryHandler.SetMetadataProvider(&serverMetadataProvider{srv: srv})
+	srv.binaryHandler.SetDatabaseManager(&serverDatabaseManager{srv: srv})
 
 	// Wire up the OnInsert callback for reactive WATCH functionality.
 	// When the executor inserts a row, it calls this callback,
@@ -759,7 +748,7 @@ func (a *serverAuthenticator) Authenticate(username, password string) bool {
 // This is a convenience constructor for standalone server usage.
 //
 // Parameters:
-//   - addr: TCP address to listen on (e.g., ":8888")
+//   - addr: TCP address to listen on (e.g., ":8889")
 //   - dataDir: Path to the data directory for persistence
 //
 // Returns the server and any error from storage initialization.
@@ -855,11 +844,11 @@ func (s *Server) startTLSListener(ready chan<- struct{}) {
 			continue
 		}
 		log.Debug("New TLS connection accepted", "remote_addr", conn.RemoteAddr().String())
-		go s.handleConnection(conn)
+		go s.binaryHandler.HandleConnection(conn)
 	}
 }
 
-// Start begins listening for TCP connections and enters the accept loop.
+// Start begins listening for TCP connections using the binary protocol.
 // This method blocks indefinitely, accepting and handling client connections.
 // Each connection is handled in a separate goroutine for concurrency.
 //
@@ -868,16 +857,8 @@ func (s *Server) startTLSListener(ready chan<- struct{}) {
 //
 // Returns an error only if the initial Listen call fails.
 func (s *Server) Start() error {
-	// Use a channel to signal when listeners are ready
-	binaryReady := make(chan struct{})
+	// Use a channel to signal when TLS listener is ready
 	tlsReady := make(chan struct{})
-
-	// Start binary protocol listener if configured.
-	if s.binaryAddr != "" {
-		go s.startBinaryListener(binaryReady)
-	} else {
-		close(binaryReady)
-	}
 
 	// Start TLS listener if configured.
 	if s.tlsConfig != nil && s.tlsAddr != "" {
@@ -886,10 +867,10 @@ func (s *Server) Start() error {
 		close(tlsReady)
 	}
 
-	// Create a TCP listener on the configured address for text protocol.
+	// Create a TCP listener on the configured address for binary protocol.
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
-		log.Error("Failed to start text protocol listener", "address", s.addr, "error", err)
+		log.Error("Failed to start binary protocol listener", "address", s.addr, "error", err)
 		return err
 	}
 
@@ -898,10 +879,9 @@ func (s *Server) Start() error {
 	s.listeners = append(s.listeners, ln)
 	s.listenersMu.Unlock()
 
-	log.Info("Text protocol listening", "address", s.addr)
+	log.Info("Binary protocol listening", "address", s.addr)
 
-	// Wait for other listeners to be ready before accepting connections
-	<-binaryReady
+	// Wait for TLS listener to be ready before accepting connections
 	<-tlsReady
 
 	// Accept loop: continuously accept new connections.
@@ -922,10 +902,10 @@ func (s *Server) Start() error {
 			continue
 		}
 
-		// Handle each connection in a separate goroutine.
+		// Handle each connection in a separate goroutine using binary protocol.
 		// This allows the server to handle many clients concurrently.
-		log.Debug("New connection accepted", "remote_addr", conn.RemoteAddr().String())
-		go s.handleConnection(conn)
+		log.Debug("New binary connection accepted", "remote_addr", conn.RemoteAddr().String())
+		go s.binaryHandler.HandleConnection(conn)
 	}
 }
 
@@ -954,40 +934,6 @@ func (s *Server) Stop() error {
 
 	log.Info("Server stopped")
 	return lastErr
-}
-
-// startBinaryListener starts the binary protocol listener.
-func (s *Server) startBinaryListener(ready chan<- struct{}) {
-	ln, err := net.Listen("tcp", s.binaryAddr)
-	if err != nil {
-		log.Error("Failed to start binary protocol listener", "address", s.binaryAddr, "error", err)
-		close(ready)
-		return
-	}
-
-	// Track the listener for graceful shutdown
-	s.listenersMu.Lock()
-	s.listeners = append(s.listeners, ln)
-	s.listenersMu.Unlock()
-
-	log.Info("Binary protocol listening", "address", s.binaryAddr)
-	close(ready) // Signal that we're ready
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			// Check if we're shutting down
-			select {
-			case <-s.stopCh:
-				return
-			default:
-			}
-			log.Warn("Binary accept error", "error", err)
-			continue
-		}
-		log.Debug("New binary connection accepted", "remote_addr", conn.RemoteAddr().String())
-		go s.binaryHandler.HandleConnection(conn)
-	}
 }
 
 // broadcastInsert notifies all subscribers of a table about a new INSERT.
@@ -1092,417 +1038,6 @@ func (s *Server) broadcastSchemaChange(eventType string, objectName string, deta
 	for conn := range s.schemaSubscribers {
 		go conn.Write([]byte(msg))
 	}
-}
-
-// handleConnection processes a single client connection.
-// It reads commands from the connection, dispatches them to the appropriate
-// handler, and sends responses back to the client.
-//
-// The function runs until the client disconnects or an error occurs.
-// On exit, it cleans up subscriptions and connection state.
-//
-// Connection cleanup is handled in a deferred function to ensure
-// resources are released even if a panic occurs.
-func (s *Server) handleConnection(conn net.Conn) {
-	remoteAddr := conn.RemoteAddr().String()
-	connLog := log.With("remote_addr", remoteAddr)
-	connStart := time.Now()
-
-	connLog.Info("New client connection established",
-		"local_addr", conn.LocalAddr().String(),
-		"protocol", "text",
-	)
-
-	// Deferred cleanup: remove subscriptions, rollback transactions, and close connection.
-	defer func() {
-		connDuration := time.Since(connStart)
-
-		// Remove this connection from all subscription lists.
-		s.subMu.Lock()
-		subscriptionCount := 0
-		for _, subs := range s.subscribers {
-			if _, ok := subs[conn]; ok {
-				subscriptionCount++
-				delete(subs, conn)
-			}
-		}
-		// Also remove from schema subscribers
-		if _, ok := s.schemaSubscribers[conn]; ok {
-			subscriptionCount++
-			delete(s.schemaSubscribers, conn)
-		}
-		s.subMu.Unlock()
-
-		// Remove the connection from the authenticated users map.
-		s.connsMu.Lock()
-		username := s.conns[conn]
-		delete(s.conns, conn)
-		s.connsMu.Unlock()
-
-		// Rollback any active transaction for this connection.
-		s.txMu.Lock()
-		hadTransaction := false
-		if tx, ok := s.transactions[conn]; ok && tx != nil && tx.IsActive() {
-			connLog.Info("Rolling back active transaction on disconnect")
-			tx.Rollback()
-			hadTransaction = true
-		}
-		delete(s.transactions, conn)
-		s.txMu.Unlock()
-
-		// Close the TCP connection.
-		connLog.Info("Client connection terminated",
-			"duration", connDuration,
-			"username", username,
-			"subscriptions_cleaned", subscriptionCount,
-			"had_active_transaction", hadTransaction,
-		)
-		conn.Close()
-	}()
-
-	// Create a scanner for reading newline-terminated commands.
-	scanner := bufio.NewScanner(conn)
-
-	// Command processing loop: read and execute commands until disconnect.
-	for scanner.Scan() {
-		// Parse the command line into command and arguments.
-		// Format: <COMMAND> [arguments]
-		line := scanner.Text()
-		parts := strings.SplitN(line, " ", 2)
-		if len(parts) == 0 {
-			continue
-		}
-
-		// Extract and normalize the command (case-insensitive).
-		cmd := strings.ToUpper(parts[0])
-
-		// Create request context for logging (do not log sensitive data)
-		reqCtx := logging.NewRequestContext(remoteAddr, cmd)
-
-		// Process the command and generate a response.
-		var response string
-		var isError bool
-
-		switch cmd {
-		case "PING":
-			// PING: Simple health check command.
-			// Returns "PONG" to confirm the server is responsive.
-			response = "PONG"
-
-		case "AUTH":
-			// AUTH: Authenticate the connection with username and password.
-			// Format: AUTH <username> <password>
-			// On success, associates the connection with the user for permission checks.
-			response = s.handleAuth(conn, parts)
-			isError = strings.HasPrefix(response, "ERROR")
-
-		case "WATCH":
-			// WATCH: Subscribe to data change events on a table or schema changes.
-			// Format: WATCH <table> or WATCH SCHEMA
-			// After subscribing, the client receives "EVENT <type> <table> <json>"
-			// messages whenever data is inserted, updated, or deleted.
-			response = s.handleWatch(conn, parts)
-			isError = strings.HasPrefix(response, "ERROR")
-
-		case "UNWATCH":
-			// UNWATCH: Unsubscribe from events.
-			// Format: UNWATCH <table>, UNWATCH SCHEMA, or UNWATCH ALL
-			response = s.handleUnwatch(conn, parts)
-			isError = strings.HasPrefix(response, "ERROR")
-
-		case "SQL":
-			// SQL: Execute a SQL statement.
-			// Format: SQL <statement>
-			// Supports: SELECT, INSERT, UPDATE, DELETE, CREATE TABLE,
-			//           CREATE USER, GRANT
-			response = s.handleSQL(conn, parts)
-			isError = strings.HasPrefix(response, "ERROR")
-
-		default:
-			// Unknown command - return an error with structured error handling.
-			err := errors.InvalidCommand(cmd)
-			response = err.UserMessage()
-			isError = true
-		}
-
-		// Log the completed request (without sensitive data)
-		if isError {
-			reqCtx.LogError(log, "command failed")
-		} else {
-			reqCtx.LogComplete(log, "success")
-		}
-
-		// Send the response back to the client.
-		// All responses are newline-terminated.
-		conn.Write([]byte(response + "\n"))
-	}
-
-	// Check for scanner errors
-	if err := scanner.Err(); err != nil {
-		connLog.Debug("Connection read error", "error", err)
-	}
-}
-
-// handleAuth processes the AUTH command for user authentication.
-// It supports a hardcoded admin account for bootstrap and database-backed
-// user accounts for regular users.
-//
-// Parameters:
-//   - conn: The client connection to authenticate
-//   - parts: Command parts [command, arguments]
-//
-// Returns the response string to send to the client.
-func (s *Server) handleAuth(conn net.Conn, parts []string) string {
-	remoteAddr := conn.RemoteAddr().String()
-
-	// Validate command format.
-	if len(parts) < 2 {
-		err := errors.NewValidationError("missing credentials")
-		err.Hint = "Usage: AUTH <user> <pass>"
-		log.Debug("AUTH command missing credentials", "remote_addr", remoteAddr)
-		return err.UserMessage()
-	}
-
-	// Parse username and password from arguments.
-	creds := strings.Split(parts[1], " ")
-	if len(creds) != 2 {
-		err := errors.NewValidationError("invalid credentials format")
-		err.Hint = "Usage: AUTH <user> <pass>"
-		log.Debug("AUTH command invalid format", "remote_addr", remoteAddr)
-		return err.UserMessage()
-	}
-
-	user := creds[0]
-	pass := creds[1]
-
-	// Authenticate against the database.
-	// Admin credentials are stored in the database like any other user,
-	// initialized during first-time setup.
-	if s.auth.Authenticate(user, pass) {
-		s.connsMu.Lock()
-		s.conns[conn] = user
-		s.connsMu.Unlock()
-		log.Info("User authenticated", "user", user, "remote_addr", remoteAddr)
-		// Return special message for admin user
-		if auth.IsAdmin(user) {
-			return "AUTH OK (admin)"
-		}
-		return "AUTH OK"
-	}
-
-	log.Warn("Authentication failed", "user", user, "remote_addr", remoteAddr)
-	return errors.AuthenticationFailed().UserMessage()
-}
-
-// handleWatch processes the WATCH command for reactive subscriptions.
-// It adds the connection to the subscribers list for the specified table.
-//
-// Supported formats:
-//   - WATCH <table>: Subscribe to INSERT/UPDATE/DELETE events on a table
-//   - WATCH SCHEMA: Subscribe to schema change events (CREATE/DROP/ALTER TABLE, etc.)
-//
-// Parameters:
-//   - conn: The client connection to subscribe
-//   - parts: Command parts [command, table]
-//
-// Returns the response string to send to the client.
-func (s *Server) handleWatch(conn net.Conn, parts []string) string {
-	// Validate command format.
-	if len(parts) < 2 {
-		return "ERROR: Missing table name. Usage: WATCH <table> or WATCH SCHEMA"
-	}
-
-	target := parts[1]
-
-	s.subMu.Lock()
-	defer s.subMu.Unlock()
-
-	// Check if subscribing to schema changes
-	if strings.ToUpper(target) == "SCHEMA" {
-		s.schemaSubscribers[conn] = struct{}{}
-		return "WATCH SCHEMA OK"
-	}
-
-	// Add the connection to the subscribers map for the table.
-	// Create the table's subscriber set if it doesn't exist.
-	if _, ok := s.subscribers[target]; !ok {
-		s.subscribers[target] = make(map[net.Conn]struct{})
-	}
-	s.subscribers[target][conn] = struct{}{}
-
-	return "WATCH OK"
-}
-
-// handleUnwatch processes the UNWATCH command to remove subscriptions.
-// It removes the connection from the subscribers list for the specified table.
-//
-// Supported formats:
-//   - UNWATCH <table>: Unsubscribe from events on a specific table
-//   - UNWATCH SCHEMA: Unsubscribe from schema change events
-//   - UNWATCH ALL: Unsubscribe from all events
-//
-// Parameters:
-//   - conn: The client connection to unsubscribe
-//   - parts: Command parts [command, table]
-//
-// Returns the response string to send to the client.
-func (s *Server) handleUnwatch(conn net.Conn, parts []string) string {
-	// Validate command format.
-	if len(parts) < 2 {
-		return "ERROR: Missing table name. Usage: UNWATCH <table>, UNWATCH SCHEMA, or UNWATCH ALL"
-	}
-
-	target := strings.ToUpper(parts[1])
-
-	s.subMu.Lock()
-	defer s.subMu.Unlock()
-
-	switch target {
-	case "SCHEMA":
-		delete(s.schemaSubscribers, conn)
-		return "UNWATCH SCHEMA OK"
-
-	case "ALL":
-		// Remove from all table subscriptions
-		for _, subs := range s.subscribers {
-			delete(subs, conn)
-		}
-		// Remove from schema subscriptions
-		delete(s.schemaSubscribers, conn)
-		return "UNWATCH ALL OK"
-
-	default:
-		// Remove from specific table subscription
-		if subs, ok := s.subscribers[parts[1]]; ok {
-			delete(subs, conn)
-		}
-		return "UNWATCH OK"
-	}
-}
-
-// handleSQL processes the SQL command for statement execution.
-// It parses the SQL statement, checks permissions, and executes it.
-//
-// The execution flow is:
-//  1. Tokenize the SQL with the Lexer
-//  2. Parse tokens into an AST with the Parser
-//  3. Set the user context for permission checks
-//  4. Set the transaction context for this connection
-//  5. Execute the AST with the Executor
-//  6. Update transaction state if needed
-//
-// Parameters:
-//   - conn: The client connection (for user context)
-//   - parts: Command parts [command, sql_statement]
-//
-// Returns the response string to send to the client.
-func (s *Server) handleSQL(conn net.Conn, parts []string) string {
-	remoteAddr := conn.RemoteAddr().String()
-
-	// Validate command format.
-	if len(parts) < 2 {
-		err := errors.MissingRequired("SQL statement")
-		err.Hint = "Usage: SQL <statement>"
-		log.Debug("SQL command missing query", "remote_addr", remoteAddr)
-		return err.UserMessage()
-	}
-
-	query := parts[1]
-	log.Debug("Executing SQL", "remote_addr", remoteAddr, "query", query)
-
-	// Parse the SQL statement.
-	// The Lexer tokenizes the input, and the Parser builds an AST.
-	lexer := sql.NewLexer(query)
-	parser := sql.NewParser(lexer)
-	stmt, err := parser.Parse()
-	if err != nil {
-		// Create a structured syntax error
-		syntaxErr := errors.NewSyntaxError(err.Error())
-		syntaxErr.Hint = "Check your SQL syntax and try again"
-		log.Debug("SQL parse error", "remote_addr", remoteAddr, "error", err, "query", query)
-		return syntaxErr.UserMessage()
-	}
-
-	// Get the user context for permission checks.
-	s.connsMu.Lock()
-	user := s.conns[conn]
-	s.connsMu.Unlock()
-
-	// Handle database management statements at the server level
-	switch dbStmt := stmt.(type) {
-	case *sql.UseDatabaseStmt:
-		return s.handleUseDatabase(conn, dbStmt, user)
-	case *sql.CreateDatabaseStmt:
-		return s.handleCreateDatabase(conn, dbStmt, user)
-	case *sql.DropDatabaseStmt:
-		return s.handleDropDatabase(conn, dbStmt, user)
-	case *sql.InspectStmt:
-		if dbStmt.Target == "DATABASES" || dbStmt.Target == "DATABASE" {
-			return s.handleInspectDatabase(conn, dbStmt, user)
-		}
-		if dbStmt.Target == "USERS" {
-			return s.handleInspectUsers(conn, user)
-		}
-		// Handle user-related inspection using system database
-		if dbStmt.Target == "USER" || dbStmt.Target == "USER_ROLES" || dbStmt.Target == "USER_PRIVILEGES" {
-			return s.handleInspectUserInfo(conn, dbStmt, user)
-		}
-		// Handle role-related inspection using system database
-		if dbStmt.Target == "ROLES" || dbStmt.Target == "ROLE" || dbStmt.Target == "PRIVILEGES" {
-			return s.handleInspectRoleInfo(conn, dbStmt, user)
-		}
-	}
-
-	// Get the executor for the current database
-	executor := s.getExecutorForConnection(conn)
-
-	// Set the user context for permission checks.
-	executor.SetUser(user)
-
-	// Set the transaction context for this connection.
-	s.txMu.Lock()
-	tx := s.transactions[conn]
-	s.txMu.Unlock()
-	executor.SetTransaction(tx)
-
-	// Execute the statement and return the result.
-	res, execErr := executor.Execute(stmt)
-	if execErr != nil {
-		// Wrap execution errors with structured error handling
-		var flyErr *errors.FlyDBError
-		if e, ok := execErr.(*errors.FlyDBError); ok {
-			flyErr = e
-		} else {
-			flyErr = errors.NewExecutionError(execErr.Error())
-		}
-		log.Debug("SQL execution error",
-			"remote_addr", remoteAddr,
-			"error", execErr,
-			"query", query,
-			"user", user,
-		)
-		return flyErr.UserMessage()
-	}
-
-	log.Debug("SQL executed successfully", "remote_addr", remoteAddr, "query", query)
-
-	// Update transaction state after execution.
-	// If BEGIN was executed, store the new transaction.
-	// If COMMIT or ROLLBACK was executed, clear the transaction.
-	switch stmt.(type) {
-	case *sql.BeginStmt:
-		s.txMu.Lock()
-		s.transactions[conn] = executor.GetTransaction()
-		s.txMu.Unlock()
-		log.Debug("Transaction started", "remote_addr", remoteAddr)
-	case *sql.CommitStmt, *sql.RollbackStmt:
-		s.txMu.Lock()
-		delete(s.transactions, conn)
-		s.txMu.Unlock()
-		log.Debug("Transaction ended", "remote_addr", remoteAddr)
-	}
-
-	return res
 }
 
 // getExecutorForConnection returns the executor for the connection's current database.
@@ -1661,8 +1196,9 @@ func (s *Server) handleDropDatabase(conn net.Conn, stmt *sql.DropDatabaseStmt, u
 			return err.UserMessage()
 		}
 	}
-	// If this connection is using the database being dropped, switch to default
-	if s.connDatabases[conn] == stmt.DatabaseName {
+	// Track if this connection was using the database being dropped
+	wasUsingDroppedDb := s.connDatabases[conn] == stmt.DatabaseName
+	if wasUsingDroppedDb {
 		s.connDatabases[conn] = storage.DefaultDatabaseName
 	}
 	s.connDbMu.Unlock()
@@ -1674,6 +1210,11 @@ func (s *Server) handleDropDatabase(conn net.Conn, stmt *sql.DropDatabaseStmt, u
 	}
 
 	log.Info("Database dropped", "remote_addr", remoteAddr, "database", stmt.DatabaseName)
+
+	// If the connection was using the dropped database, inform the client
+	if wasUsingDroppedDb {
+		return fmt.Sprintf("DROP DATABASE OK (switched to %s)", storage.DefaultDatabaseName)
+	}
 	return "DROP DATABASE OK"
 }
 

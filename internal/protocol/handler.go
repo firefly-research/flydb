@@ -573,6 +573,17 @@ func (h *BinaryHandler) handleQuery(w *bufio.Writer, payload []byte, remoteAddr 
 		log.Debug("Database changed via USE statement", "remote_addr", remoteAddr, "database", dbName)
 	}
 
+	// Check if this was a DROP DATABASE that switched us to a different database
+	// Result format: "DROP DATABASE OK (switched to <database>)"
+	if strings.HasPrefix(result, "DROP DATABASE OK (switched to ") {
+		// Extract the new database name
+		if idx := strings.Index(result, "switched to "); idx != -1 {
+			newDb := strings.TrimSuffix(result[idx+len("switched to "):], ")")
+			state.currentDatabase = newDb
+			log.Debug("Database changed via DROP DATABASE", "remote_addr", remoteAddr, "database", newDb)
+		}
+	}
+
 	log.Debug("Binary query success", "remote_addr", remoteAddr)
 	resultMsg := &QueryResultMessage{
 		Success: true,
