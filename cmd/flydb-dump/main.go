@@ -117,6 +117,7 @@ import (
 	"flydb/internal/auth"
 	"flydb/internal/sql"
 	"flydb/internal/storage"
+	"flydb/pkg/cli"
 
 	"golang.org/x/term"
 )
@@ -167,15 +168,15 @@ func main() {
 	}
 
 	if *dataDir == "" {
-		fmt.Fprintln(os.Stderr, "Error: data directory (-d) is required")
-		printUsage()
+		fmt.Fprintf(os.Stderr, "%s Data directory (-d) is required\n", cli.ErrorIcon())
+		fmt.Fprintf(os.Stderr, "   %s fdump -d <data_dir> [options]\n", cli.Dimmed("Usage:"))
 		os.Exit(1)
 	}
 
 	// Handle import mode
 	if *importFile != "" {
 		if err := runImport(); err != nil {
-			fmt.Fprintf(os.Stderr, "Import error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%s Import failed: %v\n", cli.ErrorIcon(), err)
 			os.Exit(1)
 		}
 		os.Exit(0)
@@ -183,7 +184,7 @@ func main() {
 
 	// Run export
 	if err := runExport(); err != nil {
-		fmt.Fprintf(os.Stderr, "Export error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%s Export failed: %v\n", cli.ErrorIcon(), err)
 		os.Exit(1)
 	}
 }
@@ -301,12 +302,15 @@ func authenticateIfNeeded(store storage.Engine) error {
 
 // Dumper handles database export operations
 type Dumper struct {
-	store   storage.Engine
-	catalog *sql.Catalog
-	tables  []string
-	format  string
-	writer  io.Writer
-	verbose bool
+	store      storage.Engine
+	catalog    *sql.Catalog
+	tables     []string
+	format     string
+	writer     io.Writer
+	verbose    bool
+	tableCount int
+	rowCount   int
+	startTime  time.Time
 }
 
 // NewDumper creates a new Dumper instance
@@ -321,6 +325,14 @@ func NewDumper(store storage.Engine, catalog *sql.Catalog) *Dumper {
 
 // runExport performs the database export
 func runExport() error {
+	startTime := time.Now()
+
+	// Show what we're doing (only if not outputting to stdout)
+	toStdout := *outputFile == "" || *outputFile == "-"
+	if !toStdout {
+		fmt.Fprintf(os.Stderr, "%s Exporting database '%s'...\n", cli.InfoIcon(), *database)
+	}
+
 	// Open the database
 	dbPath := filepath.Join(*dataDir, *database)
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
@@ -351,6 +363,7 @@ func runExport() error {
 	dumper := NewDumper(store, catalog)
 	dumper.format = *format
 	dumper.verbose = *verbose
+	dumper.startTime = startTime
 
 	// Parse table list
 	if *tables != "" {
@@ -362,7 +375,7 @@ func runExport() error {
 
 	// Set up output writer
 	var output io.WriteCloser
-	if *outputFile == "" || *outputFile == "-" {
+	if toStdout {
 		output = os.Stdout
 	} else {
 		f, err := os.Create(*outputFile)
@@ -383,16 +396,32 @@ func runExport() error {
 	}
 
 	// Perform the dump based on format
+	var dumpErr error
 	switch dumper.format {
 	case "sql":
-		return dumper.dumpSQL()
+		dumpErr = dumper.dumpSQL()
 	case "json":
-		return dumper.dumpJSON()
+		dumpErr = dumper.dumpJSON()
 	case "csv":
-		return dumper.dumpCSV()
+		dumpErr = dumper.dumpCSV()
 	default:
 		return fmt.Errorf("unsupported format: %s", dumper.format)
 	}
+
+	if dumpErr != nil {
+		return dumpErr
+	}
+
+	// Print summary (only if not outputting to stdout)
+	if !toStdout {
+		elapsed := time.Since(startTime)
+		fmt.Fprintf(os.Stderr, "%s Export completed successfully\n", cli.SuccessIcon())
+		fmt.Fprintf(os.Stderr, "   %s %d tables, %d rows\n", cli.Dimmed("Exported:"), dumper.tableCount, dumper.rowCount)
+		fmt.Fprintf(os.Stderr, "   %s %s\n", cli.Dimmed("Output:"), *outputFile)
+		fmt.Fprintf(os.Stderr, "   %s %v\n", cli.Dimmed("Duration:"), elapsed.Round(time.Millisecond))
+	}
+
+	return nil
 }
 
 // getTablesToDump returns the list of tables to dump
@@ -528,6 +557,7 @@ func (d *Dumper) dumpTableData(tableName string) error {
 	}
 
 	if len(rows) == 0 {
+		d.tableCount++
 		return nil
 	}
 
@@ -536,7 +566,7 @@ func (d *Dumper) dumpTableData(tableName string) error {
 		colNames[i] = col.Name
 	}
 
-	rowCount := 0
+	tableRowCount := 0
 	for _, rowData := range rows {
 		var row map[string]interface{}
 		if err := json.Unmarshal(rowData, &row); err != nil {
@@ -555,11 +585,15 @@ func (d *Dumper) dumpTableData(tableName string) error {
 
 		fmt.Fprintf(d.writer, "INSERT INTO %s (%s) VALUES (%s);\n",
 			tableName, strings.Join(colNames, ", "), strings.Join(values, ", "))
-		rowCount++
+		tableRowCount++
 	}
 
+	// Update global counters
+	d.tableCount++
+	d.rowCount += tableRowCount
+
 	if d.verbose {
-		fmt.Fprintf(os.Stderr, "Dumped %d rows from table: %s\n", rowCount, tableName)
+		fmt.Fprintf(os.Stderr, "  %s Dumped %d rows from table: %s\n", cli.SuccessIcon(), tableRowCount, tableName)
 	}
 	return nil
 }
@@ -721,6 +755,11 @@ func (d *Dumper) dumpCSV() error {
 
 // runImport imports data from a SQL dump file
 func runImport() error {
+	startTime := time.Now()
+
+	fmt.Fprintf(os.Stderr, "%s Importing from '%s' into database '%s'...\n",
+		cli.InfoIcon(), *importFile, *database)
+
 	// Open the database
 	dbPath := filepath.Join(*dataDir, *database)
 
@@ -770,6 +809,7 @@ func runImport() error {
 	// Read and execute SQL statements
 	scanner := NewSQLScanner(reader)
 	stmtCount := 0
+	errorCount := 0
 
 	for scanner.Scan() {
 		stmtText := strings.TrimSpace(scanner.Text())
@@ -782,16 +822,18 @@ func runImport() error {
 		parser := sql.NewParser(lexer)
 		stmt, err := parser.Parse()
 		if err != nil {
+			errorCount++
 			if *verbose {
-				fmt.Fprintf(os.Stderr, "Parse error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "  %s Parse error: %v\n", cli.WarningIcon(), err)
 			}
 			continue
 		}
 
 		_, err = executor.Execute(stmt)
 		if err != nil {
+			errorCount++
 			if *verbose {
-				fmt.Fprintf(os.Stderr, "Execute error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "  %s Execute error: %v\n", cli.WarningIcon(), err)
 			}
 			continue
 		}
@@ -802,7 +844,16 @@ func runImport() error {
 		return fmt.Errorf("error reading import file: %w", err)
 	}
 
-	fmt.Printf("Import completed: %d statements executed\n", stmtCount)
+	elapsed := time.Since(startTime)
+
+	// Print summary
+	fmt.Fprintf(os.Stderr, "%s Import completed successfully\n", cli.SuccessIcon())
+	fmt.Fprintf(os.Stderr, "   %s %d statements executed\n", cli.Dimmed("Imported:"), stmtCount)
+	if errorCount > 0 {
+		fmt.Fprintf(os.Stderr, "   %s %d statements skipped (errors)\n", cli.Dimmed("Skipped:"), errorCount)
+	}
+	fmt.Fprintf(os.Stderr, "   %s %v\n", cli.Dimmed("Duration:"), elapsed.Round(time.Millisecond))
+
 	return nil
 }
 
