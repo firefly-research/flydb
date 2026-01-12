@@ -23,8 +23,8 @@ set -euo pipefail
 # Configuration and Defaults
 # =============================================================================
 
-readonly SCRIPT_VERSION="01.26.9"
-readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.9}"
+readonly SCRIPT_VERSION="01.26.12"
+readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.12}"
 readonly GITHUB_REPO="firefly-oss/flydb"
 readonly DOWNLOAD_BASE_URL="https://github.com/${GITHUB_REPO}/releases/download"
 
@@ -57,6 +57,51 @@ INSTALL_STARTED=false
 RESOLVED_INSTALL_MODE=""
 
 # =============================================================================
+# Server Configuration (for interactive wizard)
+# =============================================================================
+
+# Server role: standalone, master, slave, cluster
+SERVER_ROLE="standalone"
+
+# Network ports
+PORT="8889"
+REPL_PORT="9999"
+CLUSTER_PORT="9998"
+
+# Master address for slave mode
+MASTER_ADDR=""
+
+# Cluster configuration
+CLUSTER_PEERS=""
+CLUSTER_BOOTSTRAP="false"  # true = bootstrap new cluster, false = join existing
+REPLICATION_MODE="async"
+HEARTBEAT_INTERVAL="500"
+HEARTBEAT_TIMEOUT="2000"
+ELECTION_TIMEOUT="1000"
+MIN_QUORUM="0"
+ENABLE_PRE_VOTE="true"
+PARTITION_COUNT="256"
+REPLICATION_FACTOR="3"
+SYNC_TIMEOUT="5000"
+MAX_REPLICATION_LAG="10000"
+
+# Storage configuration
+DATA_DIR=""
+BUFFER_POOL_SIZE="0"
+CHECKPOINT_SECS="60"
+
+# Security configuration
+ENCRYPTION_ENABLED="true"
+ENCRYPTION_PASSPHRASE=""
+
+# Logging configuration
+LOG_LEVEL="info"
+LOG_JSON="false"
+
+# Track if advanced configuration was requested
+ADVANCED_CONFIG=false
+
+# =============================================================================
 # Colors and Formatting (matching pkg/cli/colors.go)
 # =============================================================================
 
@@ -78,6 +123,7 @@ if [[ "$COLOR_ENABLED" == true ]]; then
     readonly BLUE='\033[34m'
     readonly MAGENTA='\033[35m'
     readonly CYAN='\033[36m'
+    readonly WHITE='\033[37m'
     readonly BRIGHT_BLACK='\033[90m'
 else
     readonly RESET=''
@@ -89,6 +135,7 @@ else
     readonly BLUE=''
     readonly MAGENTA=''
     readonly CYAN=''
+    readonly WHITE=''
     readonly BRIGHT_BLACK=''
 fi
 
@@ -219,9 +266,35 @@ ensure_clean_prompt() {
 
 print_banner() {
     echo ""
-    echo -e "${CYAN}${BOLD}╔════════════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${CYAN}${BOLD}║              FlyDB Installation Script v${SCRIPT_VERSION}            ║${RESET}"
-    echo -e "${CYAN}${BOLD}╚════════════════════════════════════════════════════════════╝${RESET}"
+    echo -e "${CYAN}${BOLD}       _____.__            .______.${RESET}"
+    echo -e "${CYAN}${BOLD}     _/ ____\\  | ___.__. __| _/\\_ |__${RESET}"
+    echo -e "${CYAN}${BOLD}     \\   __\\|  |<   |  |/ __ |  | __ \\${RESET}"
+    echo -e "${CYAN}${BOLD}      |  |  |  |_\\___  / /_/ |  | \\_\\ \\${RESET}"
+    echo -e "${CYAN}${BOLD}      |__|  |____/ ____\\____ |  |___  /${RESET}"
+    echo -e "${CYAN}${BOLD}                 \\/         \\/      \\/${RESET}"
+    echo ""
+    echo -e "  ${WHITE}High-Performance Embedded SQL Database${RESET}"
+    echo -e "  ${DIM}Installation Script v${SCRIPT_VERSION}${RESET}"
+    echo ""
+}
+
+print_welcome_message() {
+    echo -e "${BOLD}Welcome to FlyDB!${RESET}"
+    echo ""
+    echo "  FlyDB is a high-performance embedded SQL database designed for"
+    echo "  modern applications. It supports multiple deployment modes:"
+    echo ""
+    echo -e "  ${GREEN}●${RESET} ${BOLD}Standalone${RESET}  - Single server for development or small deployments"
+    echo -e "  ${BLUE}●${RESET} ${BOLD}Master${RESET}      - Leader node that accepts writes and replicates to slaves"
+    echo -e "  ${YELLOW}●${RESET} ${BOLD}Slave${RESET}       - Follower node that receives replication from master"
+    echo -e "  ${MAGENTA}●${RESET} ${BOLD}Cluster${RESET}     - Distributed cluster with automatic failover"
+    echo ""
+    echo "  Key Features:"
+    echo -e "    ${ICON_SUCCESS} Full SQL support with ACID transactions"
+    echo -e "    ${ICON_SUCCESS} Data-at-rest encryption (AES-256-GCM)"
+    echo -e "    ${ICON_SUCCESS} Multi-database support (CREATE DATABASE, USE)"
+    echo -e "    ${ICON_SUCCESS} Automatic leader election and failover"
+    echo -e "    ${ICON_SUCCESS} Configurable replication modes (async/semi-sync/sync)"
     echo ""
 }
 
@@ -229,7 +302,7 @@ print_help() {
     echo -e "${BOLD}FlyDB Installation Script${RESET}"
     echo ""
     echo "A best-in-class installation experience for FlyDB - the high-performance"
-    echo "embedded SQL database."
+    echo "embedded SQL database with support for distributed deployments."
     echo ""
     echo -e "${BOLD}USAGE:${RESET}"
     echo "    $0 [OPTIONS]"
@@ -247,84 +320,113 @@ print_help() {
     echo "    - If run from a FlyDB source directory with Go installed: builds from source"
     echo "    - Otherwise: downloads pre-built binaries from GitHub releases"
     echo ""
-    echo -e "${BOLD}OPTIONS:${RESET}"
-    echo -e "    ${BOLD}--prefix <path>${RESET}"
-    echo "        Installation directory for binaries"
-    echo "        Default: /usr/local/bin (root) or ~/.local/bin (user)"
+    echo -e "${BOLD}INSTALLATION OPTIONS:${RESET}"
+    echo -e "    ${BOLD}--prefix <path>${RESET}           Installation directory (default: /usr/local or ~/.local)"
+    echo -e "    ${BOLD}--version <version>${RESET}       Specific FlyDB version (default: ${FLYDB_VERSION})"
+    echo -e "    ${BOLD}--from-source${RESET}             Force building from source (requires Go 1.21+)"
+    echo -e "    ${BOLD}--from-binary${RESET}             Force downloading pre-built binaries"
+    echo -e "    ${BOLD}--no-service${RESET}              Skip system service installation"
+    echo -e "    ${BOLD}--no-config${RESET}               Skip configuration file creation"
+    echo -e "    ${BOLD}--init-db${RESET}                 Initialize a new database during installation"
+    echo -e "    ${BOLD}--yes, -y${RESET}                 Skip all confirmation prompts"
+    echo -e "    ${BOLD}--help, -h${RESET}                Show this help message"
     echo ""
-    echo -e "    ${BOLD}--version <version>${RESET}"
-    echo "        Specific FlyDB version to install"
-    echo "        Default: latest (${FLYDB_VERSION})"
+    echo -e "${BOLD}UNINSTALL:${RESET}"
+    echo -e "    ${BOLD}--uninstall${RESET}               Run the uninstall script"
+    echo -e "                              (passes --yes, --prefix to uninstall.sh)"
     echo ""
-    echo -e "    ${BOLD}--from-source${RESET}"
-    echo "        Force building from source (requires Go 1.21+)"
-    echo "        Must be run from the FlyDB source directory"
+    echo -e "${BOLD}SERVER CONFIGURATION OPTIONS:${RESET}"
+    echo -e "    ${BOLD}--role <role>${RESET}             Server role: standalone, master, slave, cluster"
+    echo -e "    ${BOLD}--port <port>${RESET}             Server port (default: 8889)"
+    echo -e "    ${BOLD}--repl-port <port>${RESET}        Replication port (default: 9999)"
+    echo -e "    ${BOLD}--cluster-port <port>${RESET}     Cluster communication port (default: 9998)"
+    echo -e "    ${BOLD}--master-addr <host:port>${RESET} Master address for slave mode"
+    echo -e "    ${BOLD}--data-dir <path>${RESET}         Data directory for database storage"
     echo ""
-    echo -e "    ${BOLD}--from-binary${RESET}"
-    echo "        Force downloading pre-built binaries from GitHub"
-    echo "        Useful when you want to skip building even in a source directory"
+    echo -e "${BOLD}CLUSTER OPTIONS:${RESET}"
+    echo -e "    ${BOLD}--cluster-bootstrap${RESET}       Bootstrap as first node (becomes leader)"
+    echo -e "    ${BOLD}--cluster-peers <addrs>${RESET}   Comma-separated seed node addresses (host:port)"
+    echo -e "    ${BOLD}--replication-mode <mode>${RESET} Replication mode: async, semi_sync, sync"
+    echo -e "    ${BOLD}--heartbeat-interval <ms>${RESET} Heartbeat interval in milliseconds (default: 500)"
+    echo -e "    ${BOLD}--heartbeat-timeout <ms>${RESET}  Heartbeat timeout in milliseconds (default: 2000)"
+    echo -e "    ${BOLD}--election-timeout <ms>${RESET}   Election timeout in milliseconds (default: 1000)"
+    echo -e "    ${BOLD}--min-quorum <n>${RESET}          Minimum quorum size (0=auto, default: 0)"
+    echo -e "    ${BOLD}--partition-count <n>${RESET}     Number of data partitions (default: 256)"
+    echo -e "    ${BOLD}--replication-factor <n>${RESET}  Number of replicas per partition (default: 3)"
     echo ""
-    echo -e "    ${BOLD}--no-service${RESET}"
-    echo "        Skip system service installation (systemd/launchd)"
+    echo -e "${BOLD}SECURITY OPTIONS:${RESET}"
+    echo -e "    ${BOLD}--encryption${RESET}              Enable data-at-rest encryption (default: enabled)"
+    echo -e "    ${BOLD}--no-encryption${RESET}           Disable data-at-rest encryption"
+    echo -e "    ${BOLD}--encryption-passphrase <p>${RESET} Set encryption passphrase"
     echo ""
-    echo -e "    ${BOLD}--no-config${RESET}"
-    echo "        Skip configuration file creation"
+    echo -e "${BOLD}LOGGING OPTIONS:${RESET}"
+    echo -e "    ${BOLD}--log-level <level>${RESET}       Log level: debug, info, warn, error (default: info)"
+    echo -e "    ${BOLD}--log-json${RESET}                Enable JSON log output"
     echo ""
-    echo -e "    ${BOLD}--init-db${RESET}"
-    echo "        Initialize a new database during installation"
-    echo ""
-    echo -e "    ${BOLD}--yes, -y${RESET}"
-    echo "        Skip all confirmation prompts (non-interactive mode)"
-    echo ""
-    echo -e "    ${BOLD}--uninstall${RESET}"
-    echo "        Remove FlyDB installation"
-    echo ""
-    echo -e "    ${BOLD}--help, -h${RESET}"
-    echo "        Show this help message"
+    echo -e "${BOLD}STORAGE OPTIONS:${RESET}"
+    echo -e "    ${BOLD}--buffer-pool-size <pages>${RESET} Buffer pool size in pages (0=auto)"
+    echo -e "    ${BOLD}--checkpoint-secs <secs>${RESET}  Checkpoint interval in seconds (default: 60)"
     echo ""
     echo -e "${BOLD}EXAMPLES:${RESET}"
-    echo "    # Remote installation (recommended for most users)"
-    echo "    curl -sSL https://get.flydb.dev | bash"
-    echo ""
-    echo "    # Remote installation with options"
-    echo "    curl -sSL https://get.flydb.dev | bash -s -- --prefix ~/.local --yes"
-    echo ""
-    echo "    # Interactive installation from source directory"
+    echo "    # Interactive installation (recommended for first-time users)"
     echo "    ./install.sh"
     echo ""
-    echo "    # Quick install with defaults, no prompts"
+    echo "    # Quick install with defaults"
     echo "    ./install.sh --yes"
     echo ""
-    echo "    # Install to custom location"
-    echo "    ./install.sh --prefix /opt/flydb --yes"
+    echo "    # Install as standalone server"
+    echo "    ./install.sh --role standalone --port 8889 --yes"
     echo ""
-    echo "    # Install specific version without service"
-    echo "    ./install.sh --version 01.26.0 --no-service --yes"
+    echo "    # Install as master node for replication"
+    echo "    ./install.sh --role master --repl-port 9999 --yes"
     echo ""
-    echo "    # Force download binaries even in source directory"
-    echo "    ./install.sh --from-binary --yes"
+    echo "    # Install as slave node"
+    echo "    ./install.sh --role slave --master-addr master.example.com:9999 --yes"
     echo ""
-    echo "    # User-local installation (no sudo required)"
-    echo "    ./install.sh --prefix ~/.local --yes"
+    echo "    # Bootstrap first cluster node (becomes leader)"
+    echo "    ./install.sh --role cluster --cluster-bootstrap --yes"
     echo ""
-    echo "    # Uninstall FlyDB"
-    echo "    ./install.sh --uninstall"
+    echo "    # Join existing cluster via seed nodes"
+    echo "    ./install.sh --role cluster --cluster-peers node1:9998,node2:9998 --yes"
     echo ""
-    echo -e "${BOLD}ENVIRONMENT VARIABLES:${RESET}"
-    echo "    FLYDB_VERSION     Override the default version to install"
-    echo "    NO_COLOR          Disable colored output"
+    echo "    # Install with custom data directory and encryption"
+    echo "    ./install.sh --data-dir /var/lib/flydb --encryption --yes"
+    echo ""
+    echo "    # Remote installation - bootstrap first cluster node"
+    echo "    curl -sSL https://get.flydb.dev | bash -s -- --role cluster \\"
+    echo "         --cluster-bootstrap --yes"
+    echo ""
+    echo "    # Remote installation - join existing cluster"
+    echo "    curl -sSL https://get.flydb.dev | bash -s -- --role cluster \\"
+    echo "         --cluster-peers node1:9998,node2:9998 --yes"
     echo ""
     echo -e "${BOLD}SERVER ROLES:${RESET}"
-    echo "    standalone        Single server mode (default, no replication)"
-    echo "    master            Leader node that accepts writes and replicates to slaves"
-    echo "    slave             Follower node that receives replication from master"
-    echo "    cluster           Automatic failover cluster with leader election"
+    echo -e "    ${GREEN}standalone${RESET}  Single server mode (default, no replication)"
+    echo "              Best for: Development, testing, small single-server deployments"
     echo ""
-    echo -e "${BOLD}CLUSTER CONFIGURATION:${RESET}"
-    echo "    After installation, configure cluster mode via:"
-    echo "    - Configuration file: /etc/flydb/flydb.conf or ~/.config/flydb/flydb.conf"
-    echo "    - Environment variables: FLYDB_ROLE, FLYDB_CLUSTER_PEERS, etc."
-    echo "    - Command-line flags: -role cluster -cluster-peers node2:9998,node3:9998"
+    echo -e "    ${BLUE}master${RESET}      Leader node that accepts writes and replicates to slaves"
+    echo "              Best for: Simple master/slave setups with manual failover"
+    echo ""
+    echo -e "    ${YELLOW}slave${RESET}       Follower node that receives replication from master"
+    echo "              Best for: Read replicas, backup nodes in master/slave setup"
+    echo ""
+    echo -e "    ${MAGENTA}cluster${RESET}     Distributed cluster with automatic failover"
+    echo "              Best for: Production deployments requiring high availability"
+    echo ""
+    echo -e "${BOLD}REPLICATION MODES:${RESET}"
+    echo -e "    ${GREEN}async${RESET}       Best performance, eventual consistency"
+    echo "              Writes return immediately, replicated in background"
+    echo ""
+    echo -e "    ${YELLOW}semi_sync${RESET}   Balanced performance and consistency"
+    echo "              At least one replica must acknowledge before commit"
+    echo ""
+    echo -e "    ${RED}sync${RESET}        Strongest consistency, lower performance"
+    echo "              All replicas must acknowledge before commit"
+    echo ""
+    echo -e "${BOLD}ENVIRONMENT VARIABLES:${RESET}"
+    echo "    FLYDB_VERSION               Override the default version to install"
+    echo "    FLYDB_ENCRYPTION_PASSPHRASE Set encryption passphrase"
+    echo "    NO_COLOR                    Disable colored output"
     echo ""
     echo -e "${BOLD}MORE INFORMATION:${RESET}"
     echo "    Documentation:    https://flydb.dev/docs"
@@ -791,6 +893,15 @@ prompt_yes_no() {
     local default="${2:-y}"
     local result=""
 
+    # In non-interactive mode (--yes), use the default value
+    if [[ "${AUTO_CONFIRM:-false}" == true ]]; then
+        if [[ "$default" == "y" ]]; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+
     # Ensure any spinner is stopped before prompting
     ensure_clean_prompt
 
@@ -811,7 +922,7 @@ prompt_yes_no() {
     # Convert to lowercase using tr for POSIX compatibility (macOS default bash is 3.2)
     local lower_result
     lower_result=$(echo "$result" | tr '[:upper:]' '[:lower:]')
-    
+
     case "$lower_result" in
         y|yes) return 0 ;;
         *) return 1 ;;
@@ -840,9 +951,589 @@ validate_port() {
     return 1
 }
 
-run_interactive_wizard() {
-    echo "Welcome to FlyDB! This wizard will guide you through the installation."
+validate_address() {
+    local addr="$1"
+    # Check for host:port format
+    if [[ "$addr" =~ ^[a-zA-Z0-9._-]+:[0-9]+$ ]]; then
+        local port="${addr##*:}"
+        validate_port "$port"
+        return $?
+    fi
+    return 1
+}
+
+validate_peers() {
+    local peers="$1"
+    if [[ -z "$peers" ]]; then
+        return 0  # Empty is valid (will be configured later)
+    fi
+    # Split by comma and validate each
+    IFS=',' read -ra PEER_ARRAY <<< "$peers"
+    for peer in "${PEER_ARRAY[@]}"; do
+        peer="${peer//[[:space:]]/}"  # Trim whitespace
+        if [[ -n "$peer" ]] && ! validate_address "$peer"; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+prompt_port() {
+    local prompt_text="$1"
+    local default="$2"
+    local result
+
+    while true; do
+        result=$(prompt "$prompt_text" "$default")
+        if validate_port "$result"; then
+            echo "$result"
+            return 0
+        fi
+        print_error "Invalid port number. Please enter a value between 1 and 65535."
+    done
+}
+
+prompt_address() {
+    local prompt_text="$1"
+    local default="$2"
+    local result
+
+    while true; do
+        result=$(prompt "$prompt_text" "$default")
+        if validate_address "$result"; then
+            echo "$result"
+            return 0
+        fi
+        print_error "Invalid address format. Please use host:port format (e.g., localhost:9999)."
+    done
+}
+
+# =============================================================================
+# Interactive Wizard - Step Functions
+# =============================================================================
+
+wizard_step_header() {
+    local step_num="$1"
+    local title="$2"
     echo ""
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${CYAN}${BOLD}  Step ${step_num}: ${title}${RESET}"
+    echo -e "${CYAN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
+}
+
+wizard_step_installation_dir() {
+    wizard_step_header "1" "Installation Directory"
+
+    echo "  Where should FlyDB binaries be installed?"
+    echo ""
+    echo -e "  ${GREEN}[1]${RESET} /usr/local/bin  ${DIM}(system-wide, requires sudo)${RESET}"
+    echo -e "  ${BLUE}[2]${RESET} ~/.local/bin    ${DIM}(user-only, no sudo required)${RESET}"
+    echo -e "  ${YELLOW}[3]${RESET} Custom path     ${DIM}(specify your own location)${RESET}"
+    echo ""
+
+    local choice
+    choice=$(prompt "Select option" "1")
+    choice="${choice//[[:space:]]/}"
+
+    case "$choice" in
+        1) PREFIX="/usr/local" ;;
+        2) PREFIX="$HOME/.local" ;;
+        3)
+            local custom_path
+            custom_path=$(prompt "Enter installation path" "/opt/flydb")
+            PREFIX=$(validate_path "$custom_path")
+            ;;
+        *)
+            print_warning "Invalid selection, using default (/usr/local)"
+            PREFIX="/usr/local"
+            ;;
+    esac
+
+    print_success "Installation directory: ${PREFIX}/bin"
+}
+
+wizard_step_server_role() {
+    wizard_step_header "2" "Server Role"
+
+    echo "  Select the deployment mode for FlyDB:"
+    echo ""
+    echo -e "  ${GREEN}[1]${RESET} ${BOLD}Standalone${RESET}  ${DIM}Single server, no replication${RESET}"
+    echo -e "      ${DIM}Best for: Development, testing, small deployments${RESET}"
+    echo ""
+    echo -e "  ${BLUE}[2]${RESET} ${BOLD}Master${RESET}      ${DIM}Leader node that accepts writes${RESET}"
+    echo -e "      ${DIM}Best for: Simple master/slave setups with manual failover${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}[3]${RESET} ${BOLD}Slave${RESET}       ${DIM}Follower node receiving replication${RESET}"
+    echo -e "      ${DIM}Best for: Read replicas, backup nodes${RESET}"
+    echo ""
+    echo -e "  ${MAGENTA}[4]${RESET} ${BOLD}Cluster${RESET}     ${DIM}Distributed with automatic failover${RESET}"
+    echo -e "      ${DIM}Best for: Production high-availability deployments${RESET}"
+    echo ""
+
+    local choice
+    choice=$(prompt "Select role" "1")
+    choice="${choice//[[:space:]]/}"
+
+    case "$choice" in
+        1) SERVER_ROLE="standalone" ;;
+        2) SERVER_ROLE="master" ;;
+        3) SERVER_ROLE="slave" ;;
+        4) SERVER_ROLE="cluster" ;;
+        *)
+            print_warning "Invalid selection, using standalone mode"
+            SERVER_ROLE="standalone"
+            ;;
+    esac
+
+    print_success "Server role: ${SERVER_ROLE}"
+}
+
+wizard_step_network_ports() {
+    wizard_step_header "3" "Network Configuration"
+
+    echo "  Configure network ports for FlyDB services:"
+    echo ""
+    echo -e "  ${DIM}• Server port: Binary protocol for fsql CLI, JDBC/ODBC drivers${RESET}"
+    if [[ "$SERVER_ROLE" == "master" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+        echo -e "  ${DIM}• Replication port: WAL streaming for data replication to followers${RESET}"
+    fi
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        echo -e "  ${DIM}• Cluster port: Raft consensus and cluster coordination${RESET}"
+    fi
+    echo ""
+
+    PORT=$(prompt_port "Server port" "$PORT")
+
+    if [[ "$SERVER_ROLE" == "master" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+        REPL_PORT=$(prompt_port "Replication port" "$REPL_PORT")
+    fi
+
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        CLUSTER_PORT=$(prompt_port "Cluster port" "$CLUSTER_PORT")
+    fi
+
+    echo ""
+    print_success "Network ports configured"
+}
+
+wizard_step_slave_config() {
+    if [[ "$SERVER_ROLE" != "slave" ]]; then
+        return
+    fi
+
+    wizard_step_header "4" "Master Connection"
+
+    echo "  Configure the master server to replicate from:"
+    echo ""
+    echo -e "  ${DIM}• The master must be running and accessible${RESET}"
+    echo -e "  ${DIM}• Use the master's replication port (default: 9999)${RESET}"
+    echo ""
+
+    MASTER_ADDR=$(prompt_address "Master address (host:port)" "localhost:9999")
+
+    echo ""
+    print_success "Master address: ${MASTER_ADDR}"
+}
+
+wizard_step_cluster_config() {
+    if [[ "$SERVER_ROLE" != "cluster" ]]; then
+        return
+    fi
+
+    wizard_step_header "4" "Cluster Configuration"
+
+    echo "  FlyDB cluster mode provides automatic failover and data distribution."
+    echo ""
+    echo -e "  ${BOLD}Cluster Setup Scenarios:${RESET}"
+    echo ""
+    echo -e "  ${GREEN}[1]${RESET} ${BOLD}Bootstrap First Node${RESET}"
+    echo -e "      ${DIM}Start a new cluster - this node becomes the initial leader${RESET}"
+    echo -e "      ${DIM}Other nodes will join this cluster later${RESET}"
+    echo ""
+    echo -e "  ${BLUE}[2]${RESET} ${BOLD}Join Existing Cluster${RESET}"
+    echo -e "      ${DIM}Connect to an existing cluster via seed nodes${RESET}"
+    echo -e "      ${DIM}This node will sync data from the cluster${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}[3]${RESET} ${BOLD}Rejoin After Restart${RESET}"
+    echo -e "      ${DIM}Reconnect to cluster after maintenance/restart${RESET}"
+    echo -e "      ${DIM}Uses existing data directory and configuration${RESET}"
+    echo ""
+
+    local cluster_scenario
+    cluster_scenario=$(prompt "Select scenario" "1")
+    cluster_scenario="${cluster_scenario//[[:space:]]/}"
+
+    case "$cluster_scenario" in
+        1)
+            # Bootstrap first node
+            CLUSTER_BOOTSTRAP="true"
+            echo ""
+            print_info "Bootstrapping as first cluster node (leader)"
+            echo ""
+            echo -e "  ${DIM}This node will start as a single-node cluster.${RESET}"
+            echo -e "  ${DIM}Other nodes can join using this node's address as a seed.${RESET}"
+            echo ""
+
+            # Get this node's hostname/IP for display
+            local this_host
+            this_host=$(hostname 2>/dev/null || echo "localhost")
+            echo -e "  ${BOLD}Other nodes should use this seed address:${RESET}"
+            echo -e "  ${CYAN}${this_host}:${CLUSTER_PORT}${RESET}"
+            echo ""
+
+            # No peers for bootstrap
+            CLUSTER_PEERS=""
+            ;;
+        2)
+            # Join existing cluster
+            CLUSTER_BOOTSTRAP="false"
+            echo ""
+            print_info "Joining existing cluster"
+            echo ""
+            echo -e "  ${DIM}Enter the addresses of existing cluster nodes (seeds).${RESET}"
+            echo -e "  ${DIM}Format: host:port (comma-separated for multiple)${RESET}"
+            echo -e "  ${DIM}Example: node1:9998,node2:9998${RESET}"
+            echo ""
+
+            local peers_input
+            peers_input=$(prompt "Cluster seed nodes" "$CLUSTER_PEERS")
+
+            # Validate peers - must have at least one for joining
+            while [[ -z "$peers_input" ]] || ! validate_peers "$peers_input"; do
+                if [[ -z "$peers_input" ]]; then
+                    print_error "At least one seed node is required to join a cluster."
+                else
+                    print_error "Invalid peer format. Use host:port,host:port format."
+                fi
+                peers_input=$(prompt "Cluster seed nodes" "$CLUSTER_PEERS")
+            done
+            CLUSTER_PEERS="$peers_input"
+
+            echo ""
+            print_success "Will join cluster via: ${CLUSTER_PEERS}"
+            ;;
+        3)
+            # Rejoin after restart
+            CLUSTER_BOOTSTRAP="false"
+            echo ""
+            print_info "Rejoining cluster after restart"
+            echo ""
+            echo -e "  ${DIM}Enter the addresses of cluster nodes to reconnect.${RESET}"
+            echo -e "  ${DIM}These should be the same peers from your previous configuration.${RESET}"
+            echo ""
+
+            local peers_input
+            peers_input=$(prompt "Cluster peer nodes" "$CLUSTER_PEERS")
+
+            if [[ -n "$peers_input" ]] && validate_peers "$peers_input"; then
+                CLUSTER_PEERS="$peers_input"
+                print_success "Will rejoin cluster via: ${CLUSTER_PEERS}"
+            else
+                print_warning "No valid peers specified - will bootstrap as single node"
+                CLUSTER_BOOTSTRAP="true"
+                CLUSTER_PEERS=""
+            fi
+            ;;
+        *)
+            print_warning "Invalid selection, defaulting to bootstrap mode"
+            CLUSTER_BOOTSTRAP="true"
+            CLUSTER_PEERS=""
+            ;;
+    esac
+
+    echo ""
+    echo "  Select replication mode:"
+    echo ""
+    echo -e "  ${GREEN}[1]${RESET} ${BOLD}Async${RESET}      ${DIM}Best performance, eventual consistency${RESET}"
+    echo -e "      ${DIM}Writes return immediately, replicated in background${RESET}"
+    echo ""
+    echo -e "  ${YELLOW}[2]${RESET} ${BOLD}Semi-sync${RESET}  ${DIM}Balanced performance and consistency${RESET}"
+    echo -e "      ${DIM}At least one replica must acknowledge before commit${RESET}"
+    echo ""
+    echo -e "  ${RED}[3]${RESET} ${BOLD}Sync${RESET}       ${DIM}Strongest consistency, lower performance${RESET}"
+    echo -e "      ${DIM}All replicas must acknowledge before commit${RESET}"
+    echo ""
+
+    local repl_choice
+    repl_choice=$(prompt "Select replication mode" "1")
+    case "$repl_choice" in
+        1) REPLICATION_MODE="async" ;;
+        2) REPLICATION_MODE="semi_sync" ;;
+        3) REPLICATION_MODE="sync" ;;
+        *) REPLICATION_MODE="async" ;;
+    esac
+
+    echo ""
+    print_success "Cluster configuration complete"
+
+    # Ask about advanced cluster settings
+    echo ""
+    if prompt_yes_no "Configure advanced cluster settings?" "n"; then
+        wizard_step_cluster_advanced
+    fi
+}
+
+wizard_step_cluster_advanced() {
+    echo ""
+    echo -e "  ${BOLD}Advanced Cluster Settings${RESET}"
+    echo -e "  ${DIM}Press Enter to accept defaults (recommended for most deployments)${RESET}"
+    echo ""
+
+    # Heartbeat interval
+    echo -e "  ${DIM}Heartbeat interval: How often nodes send heartbeats${RESET}"
+    local hb_input
+    hb_input=$(prompt "Heartbeat interval (ms)" "$HEARTBEAT_INTERVAL")
+    if [[ "$hb_input" =~ ^[0-9]+$ ]] && [[ "$hb_input" -ge 100 ]]; then
+        HEARTBEAT_INTERVAL="$hb_input"
+    fi
+
+    # Heartbeat timeout
+    echo -e "  ${DIM}Heartbeat timeout: When to consider a node dead${RESET}"
+    local ht_input
+    ht_input=$(prompt "Heartbeat timeout (ms)" "$HEARTBEAT_TIMEOUT")
+    if [[ "$ht_input" =~ ^[0-9]+$ ]] && [[ "$ht_input" -ge "$HEARTBEAT_INTERVAL" ]]; then
+        HEARTBEAT_TIMEOUT="$ht_input"
+    fi
+
+    # Election timeout
+    echo -e "  ${DIM}Election timeout: When to start a new leader election${RESET}"
+    local et_input
+    et_input=$(prompt "Election timeout (ms)" "$ELECTION_TIMEOUT")
+    if [[ "$et_input" =~ ^[0-9]+$ ]] && [[ "$et_input" -ge 500 ]]; then
+        ELECTION_TIMEOUT="$et_input"
+    fi
+
+    # Min quorum
+    echo -e "  ${DIM}Min quorum: Minimum nodes for cluster decisions (0=auto)${RESET}"
+    local mq_input
+    mq_input=$(prompt "Min quorum (0=auto)" "$MIN_QUORUM")
+    if [[ "$mq_input" =~ ^[0-9]+$ ]]; then
+        MIN_QUORUM="$mq_input"
+    fi
+
+    # Partition count
+    echo -e "  ${DIM}Partition count: Number of data partitions (power of 2)${RESET}"
+    local pc_input
+    pc_input=$(prompt "Partition count" "$PARTITION_COUNT")
+    if [[ "$pc_input" =~ ^[0-9]+$ ]] && [[ "$pc_input" -ge 16 ]] && [[ "$pc_input" -le 4096 ]]; then
+        # Check if power of 2
+        if (( (pc_input & (pc_input - 1)) == 0 )); then
+            PARTITION_COUNT="$pc_input"
+        fi
+    fi
+
+    # Replication factor
+    echo -e "  ${DIM}Replication factor: Number of replicas per partition${RESET}"
+    local rf_input
+    rf_input=$(prompt "Replication factor (1-5)" "$REPLICATION_FACTOR")
+    if [[ "$rf_input" =~ ^[0-9]+$ ]] && [[ "$rf_input" -ge 1 ]] && [[ "$rf_input" -le 5 ]]; then
+        REPLICATION_FACTOR="$rf_input"
+    fi
+
+    # Pre-vote
+    echo -e "  ${DIM}Pre-vote: Prevents disruptions from partitioned nodes${RESET}"
+    if prompt_yes_no "Enable pre-vote protocol?" "y"; then
+        ENABLE_PRE_VOTE="true"
+    else
+        ENABLE_PRE_VOTE="false"
+    fi
+
+    echo ""
+    print_success "Advanced cluster settings configured"
+}
+
+wizard_step_storage() {
+    # Step number depends on role: standalone=4, master=4, slave=5, cluster=5
+    local step_num="4"
+    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+        step_num="5"
+    fi
+
+    wizard_step_header "$step_num" "Storage Configuration"
+
+    echo "  Configure data storage settings:"
+    echo ""
+    echo -e "  ${DIM}• FlyDB stores each database in a separate directory${RESET}"
+    echo -e "  ${DIM}• Supports CREATE DATABASE, DROP DATABASE, USE commands${RESET}"
+    echo ""
+
+    # Set default data directory based on installation type
+    if [[ -z "$DATA_DIR" ]]; then
+        if [[ $EUID -eq 0 ]] || [[ "$PREFIX" == "/usr/local" ]]; then
+            DATA_DIR="/var/lib/flydb"
+        else
+            DATA_DIR="$HOME/.local/share/flydb"
+        fi
+    fi
+
+    DATA_DIR=$(prompt "Data directory" "$DATA_DIR")
+    DATA_DIR=$(validate_path "$DATA_DIR")
+
+    echo ""
+    echo -e "  ${DIM}Buffer pool size: Memory for caching data pages (0=auto)${RESET}"
+    local bp_input
+    bp_input=$(prompt "Buffer pool size (pages, 0=auto)" "$BUFFER_POOL_SIZE")
+    if [[ "$bp_input" =~ ^[0-9]+$ ]]; then
+        BUFFER_POOL_SIZE="$bp_input"
+    fi
+
+    echo ""
+    print_success "Storage configuration complete"
+}
+
+wizard_step_security() {
+    # Step number depends on role: standalone=5, master=5, slave=6, cluster=6
+    local step_num="5"
+    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+        step_num="6"
+    fi
+
+    wizard_step_header "$step_num" "Security Configuration"
+
+    echo "  Configure data-at-rest encryption:"
+    echo ""
+    echo -e "  ${DIM}• Encrypts WAL data on disk using AES-256-GCM${RESET}"
+    echo -e "  ${YELLOW}${ICON_WARNING}${RESET} ${YELLOW}Encryption is enabled by default for security${RESET}"
+    echo -e "  ${YELLOW}${ICON_WARNING}${RESET} ${YELLOW}Keep your passphrase safe - data cannot be recovered without it!${RESET}"
+    echo ""
+
+    if prompt_yes_no "Enable data-at-rest encryption?" "y"; then
+        ENCRYPTION_ENABLED="true"
+
+        echo ""
+        echo -e "  ${DIM}Enter a passphrase or leave empty for auto-generated${RESET}"
+
+        # Check for environment variable
+        if [[ -n "${FLYDB_ENCRYPTION_PASSPHRASE:-}" ]]; then
+            ENCRYPTION_PASSPHRASE="$FLYDB_ENCRYPTION_PASSPHRASE"
+            print_success "Using passphrase from FLYDB_ENCRYPTION_PASSPHRASE environment variable"
+        else
+            local passphrase_input
+            passphrase_input=$(prompt "Encryption passphrase (Enter for auto)" "")
+            if [[ -n "$passphrase_input" ]]; then
+                ENCRYPTION_PASSPHRASE="$passphrase_input"
+            else
+                # Generate a random passphrase
+                ENCRYPTION_PASSPHRASE=$(openssl rand -base64 24 2>/dev/null || head -c 24 /dev/urandom | base64)
+                echo ""
+                echo -e "  ${GREEN}${ICON_SUCCESS}${RESET} Auto-generated passphrase:"
+                echo -e "  ${BOLD}${ENCRYPTION_PASSPHRASE}${RESET}"
+                echo ""
+                echo -e "  ${YELLOW}${ICON_WARNING}${RESET} ${YELLOW}Save this passphrase securely! You will need it to access your data.${RESET}"
+            fi
+        fi
+    else
+        ENCRYPTION_ENABLED="false"
+        print_warning "Encryption disabled - data will be stored unencrypted"
+    fi
+
+    echo ""
+    print_success "Security configuration complete"
+}
+
+wizard_step_logging() {
+    # Step number depends on role: standalone=6, master=6, slave=7, cluster=7
+    local step_num="6"
+    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+        step_num="7"
+    fi
+
+    wizard_step_header "$step_num" "Logging Configuration"
+
+    echo "  Configure logging settings:"
+    echo ""
+    echo -e "  ${DIM}Available log levels:${RESET}"
+    echo -e "    ${GREEN}debug${RESET} - Verbose debugging information"
+    echo -e "    ${CYAN}info${RESET}  - General operational information"
+    echo -e "    ${YELLOW}warn${RESET}  - Warning messages"
+    echo -e "    ${RED}error${RESET} - Error messages only"
+    echo ""
+
+    local log_input
+    log_input=$(prompt "Log level" "$LOG_LEVEL")
+    case "$log_input" in
+        debug|info|warn|error) LOG_LEVEL="$log_input" ;;
+        *) LOG_LEVEL="info" ;;
+    esac
+
+    echo ""
+    echo -e "  ${DIM}JSON output is useful for log aggregation systems${RESET}"
+    if prompt_yes_no "Enable JSON log output?" "n"; then
+        LOG_JSON="true"
+    else
+        LOG_JSON="false"
+    fi
+
+    echo ""
+    print_success "Logging configuration complete"
+}
+
+wizard_step_service() {
+    # Step number depends on role: standalone=7, master=7, slave=8, cluster=8
+    local step_num="7"
+    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+        step_num="8"
+    fi
+
+    wizard_step_header "$step_num" "System Service"
+
+    if [[ "$INIT_SYSTEM" != "none" ]]; then
+        echo "  FlyDB can be installed as a system service ($INIT_SYSTEM)"
+        echo ""
+        echo -e "  ${DIM}• Starts FlyDB automatically on system boot${RESET}"
+        echo -e "  ${DIM}• Manages FlyDB as a background service${RESET}"
+        echo -e "  ${DIM}• Provides systemctl/launchctl commands for control${RESET}"
+        echo ""
+
+        if prompt_yes_no "Install as system service?"; then
+            INSTALL_SERVICE=true
+        else
+            INSTALL_SERVICE=false
+        fi
+    else
+        print_warning "No supported init system detected, skipping service installation"
+        INSTALL_SERVICE=false
+    fi
+
+    echo ""
+}
+
+wizard_step_init_database() {
+    # Step number depends on role: standalone=8, master=8, slave=9, cluster=9
+    local step_num="8"
+    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+        step_num="9"
+    fi
+
+    wizard_step_header "$step_num" "Database Initialization"
+
+    echo "  FlyDB can initialize a default database during installation:"
+    echo ""
+    echo -e "  ${DIM}• Creates a 'default' database ready for use${RESET}"
+    echo -e "  ${DIM}• You can create additional databases later with CREATE DATABASE${RESET}"
+    echo -e "  ${DIM}• Skip this if you want to start with an empty data directory${RESET}"
+    echo ""
+
+    if prompt_yes_no "Initialize a default database?" "n"; then
+        INIT_DATABASE=true
+        print_success "Will initialize default database"
+    else
+        INIT_DATABASE=false
+        print_info "Skipping database initialization"
+    fi
+
+    echo ""
+}
+
+# =============================================================================
+# Main Interactive Wizard
+# =============================================================================
+
+run_interactive_wizard() {
+    # Print welcome message
+    print_welcome_message
+
     echo -e "Press ${CYAN}Enter${RESET} to accept default values shown in [brackets]."
     echo -e "Press ${CYAN}Ctrl+C${RESET} to cancel at any time."
     echo ""
@@ -867,85 +1558,29 @@ run_interactive_wizard() {
         echo ""
     fi
 
-    # Step 1: Installation Directory
-    echo -e "${CYAN}${BOLD}Step 1: Installation Directory${RESET}"
-    separator 60
-    echo ""
-    echo "  Where should FlyDB be installed?"
-    echo ""
-    echo -e "  ${GREEN}1${RESET}) /usr/local/bin  (system-wide, requires sudo)"
-    echo -e "  ${GREEN}2${RESET}) ~/.local/bin    (user-only, no sudo required)"
-    echo -e "  ${GREEN}3${RESET}) Custom path"
-    echo ""
+    # Run wizard steps
+    wizard_step_installation_dir
+    wizard_step_server_role
+    wizard_step_network_ports
 
-    local choice
-    choice=$(prompt "Select option [1-3]" "1")
-    # Trim any whitespace
-    choice="${choice//[[:space:]]/}"
+    # Role-specific configuration
+    wizard_step_slave_config
+    wizard_step_cluster_config
 
-    case "$choice" in
-        1) PREFIX="/usr/local" ;;
-        2) PREFIX="$HOME/.local" ;;
-        3)
-            local custom_path
-            custom_path=$(prompt "Enter installation path" "/opt/flydb")
-            PREFIX=$(validate_path "$custom_path")
-            ;;
-        *)
-            print_warning "Invalid selection, using default"
-            PREFIX="/usr/local"
-            ;;
-    esac
+    # Common configuration
+    wizard_step_storage
+    wizard_step_security
+    wizard_step_logging
+    wizard_step_service
+    wizard_step_init_database
+
+    # Configuration file
     echo ""
-
-    # Step 2: System Service
-    echo -e "${CYAN}${BOLD}Step 2: System Service${RESET}"
-    separator 60
-    echo ""
-
-    if [[ "$INIT_SYSTEM" != "none" ]]; then
-        echo "  FlyDB can be installed as a system service ($INIT_SYSTEM)"
-        echo "  This allows FlyDB to start automatically on boot."
-        echo ""
-
-        if prompt_yes_no "Install as system service?"; then
-            INSTALL_SERVICE=true
-        else
-            INSTALL_SERVICE=false
-        fi
-    else
-        print_warning "No supported init system detected, skipping service installation"
-        INSTALL_SERVICE=false
-    fi
-    echo ""
-
-    # Step 3: Configuration
-    echo -e "${CYAN}${BOLD}Step 3: Configuration${RESET}"
-    separator 60
-    echo ""
-    echo "  FlyDB can create a default configuration file."
-    echo ""
-
-    if prompt_yes_no "Create default configuration file?"; then
+    if prompt_yes_no "Create configuration file with these settings?" "y"; then
         CREATE_CONFIG=true
     else
         CREATE_CONFIG=false
     fi
-    echo ""
-
-    # Step 4: Initialize Database
-    echo -e "${CYAN}${BOLD}Step 4: Database Initialization${RESET}"
-    separator 60
-    echo ""
-    echo "  FlyDB can initialize a new database during installation."
-    echo ""
-
-    if prompt_yes_no "Initialize a new database?" "n"; then
-        INIT_DATABASE=true
-    else
-        INIT_DATABASE=false
-    fi
-    echo ""
 
     # Summary
     print_installation_summary
@@ -963,41 +1598,158 @@ run_interactive_wizard() {
 print_installation_summary() {
     echo ""
     echo -e "${CYAN}${BOLD}Installation Summary${RESET}"
-    double_separator 60
+    separator 60
     echo ""
 
     local version="${SPECIFIC_VERSION:-$FLYDB_VERSION}"
     version="${version#v}"
+
+    # System Information
+    echo -e "  ${BOLD}System Information${RESET}"
+    separator 60
     print_kv "FlyDB Version" "$version"
     print_kv "Operating System" "$OS ($DISTRO)"
     print_kv "Architecture" "$ARCH"
     print_kv "Install Directory" "${PREFIX}/bin"
-
-    # Show installation mode
     if [[ "$RESOLVED_INSTALL_MODE" == "source" ]]; then
         print_kv "Install Method" "${CYAN}Build from source${RESET}"
     else
         print_kv "Install Method" "${CYAN}Download binaries${RESET}"
     fi
+    echo ""
 
+    # Server Configuration
+    echo -e "  ${BOLD}Server Configuration${RESET}"
+    separator 60
+
+    # Role with color coding
+    local role_display
+    case "$SERVER_ROLE" in
+        standalone) role_display="${GREEN}Standalone${RESET}" ;;
+        master) role_display="${BLUE}Master${RESET}" ;;
+        slave) role_display="${YELLOW}Slave${RESET}" ;;
+        cluster) role_display="${MAGENTA}Cluster${RESET}" ;;
+        *) role_display="$SERVER_ROLE" ;;
+    esac
+    print_kv "Server Role" "$role_display"
+
+    # Network ports
+    print_kv "Server Port" "$PORT"
+    if [[ "$SERVER_ROLE" == "master" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+        print_kv "Replication Port" "$REPL_PORT"
+    fi
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        print_kv "Cluster Port" "$CLUSTER_PORT"
+    fi
+
+    # Role-specific settings
+    if [[ "$SERVER_ROLE" == "slave" ]]; then
+        print_kv "Master Address" "$MASTER_ADDR"
+    fi
+    echo ""
+
+    # Cluster Configuration (if applicable)
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        echo -e "  ${BOLD}Cluster Configuration${RESET}"
+        separator 60
+
+        # Show cluster mode (bootstrap vs join)
+        if [[ "$CLUSTER_BOOTSTRAP" == "true" ]] || [[ -z "$CLUSTER_PEERS" ]]; then
+            print_kv "Cluster Mode" "${GREEN}Bootstrap${RESET} (first node, becomes leader)"
+        else
+            print_kv "Cluster Mode" "${BLUE}Join${RESET} (connecting to existing cluster)"
+        fi
+
+        if [[ -n "$CLUSTER_PEERS" ]]; then
+            print_kv "Seed Nodes" "$CLUSTER_PEERS"
+        else
+            print_kv "Seed Nodes" "${DIM}None (single-node bootstrap)${RESET}"
+        fi
+
+        local repl_mode_display
+        case "$REPLICATION_MODE" in
+            async) repl_mode_display="${GREEN}Async${RESET} (best performance)" ;;
+            semi_sync) repl_mode_display="${YELLOW}Semi-sync${RESET} (balanced)" ;;
+            sync) repl_mode_display="${RED}Sync${RESET} (strongest consistency)" ;;
+            *) repl_mode_display="$REPLICATION_MODE" ;;
+        esac
+        print_kv "Replication Mode" "$repl_mode_display"
+        print_kv "Heartbeat Interval" "${HEARTBEAT_INTERVAL}ms"
+        print_kv "Heartbeat Timeout" "${HEARTBEAT_TIMEOUT}ms"
+        print_kv "Election Timeout" "${ELECTION_TIMEOUT}ms"
+        if [[ "$MIN_QUORUM" == "0" ]]; then
+            print_kv "Min Quorum" "Auto"
+        else
+            print_kv "Min Quorum" "$MIN_QUORUM"
+        fi
+        print_kv "Partition Count" "$PARTITION_COUNT"
+        print_kv "Replication Factor" "$REPLICATION_FACTOR"
+        echo ""
+    fi
+
+    # Storage Configuration
+    echo -e "  ${BOLD}Storage Configuration${RESET}"
+    separator 60
+    print_kv "Data Directory" "$DATA_DIR"
+    if [[ "$BUFFER_POOL_SIZE" == "0" ]]; then
+        print_kv "Buffer Pool Size" "Auto"
+    else
+        print_kv "Buffer Pool Size" "${BUFFER_POOL_SIZE} pages"
+    fi
+    echo ""
+
+    # Security Configuration
+    echo -e "  ${BOLD}Security Configuration${RESET}"
+    separator 60
+    if [[ "$ENCRYPTION_ENABLED" == "true" ]]; then
+        print_kv "Encryption" "${GREEN}Enabled${RESET} (AES-256-GCM)"
+        if [[ -n "$ENCRYPTION_PASSPHRASE" ]]; then
+            print_kv "Passphrase" "${GREEN}Set${RESET}"
+        else
+            print_kv "Passphrase" "${YELLOW}Not set${RESET}"
+        fi
+    else
+        print_kv "Encryption" "${YELLOW}Disabled${RESET}"
+    fi
+    echo ""
+
+    # Logging Configuration
+    echo -e "  ${BOLD}Logging Configuration${RESET}"
+    separator 60
+    local log_level_display
+    case "$LOG_LEVEL" in
+        debug) log_level_display="${GREEN}Debug${RESET}" ;;
+        info) log_level_display="${CYAN}Info${RESET}" ;;
+        warn) log_level_display="${YELLOW}Warn${RESET}" ;;
+        error) log_level_display="${RED}Error${RESET}" ;;
+        *) log_level_display="$LOG_LEVEL" ;;
+    esac
+    print_kv "Log Level" "$log_level_display"
+    if [[ "$LOG_JSON" == "true" ]]; then
+        print_kv "JSON Output" "${GREEN}Enabled${RESET}"
+    else
+        print_kv "JSON Output" "${DIM}Disabled${RESET}"
+    fi
+    echo ""
+
+    # Installation Options
+    echo -e "  ${BOLD}Installation Options${RESET}"
+    separator 60
     if [[ "$INSTALL_SERVICE" == true ]]; then
         print_kv "System Service" "${GREEN}Yes${RESET} ($INIT_SYSTEM)"
     else
         print_kv "System Service" "${DIM}No${RESET}"
     fi
-
     if [[ "$CREATE_CONFIG" == true ]]; then
         print_kv "Create Config" "${GREEN}Yes${RESET}"
     else
         print_kv "Create Config" "${DIM}No${RESET}"
     fi
-
     if [[ "$INIT_DATABASE" == true ]]; then
         print_kv "Init Database" "${GREEN}Yes${RESET}"
     else
         print_kv "Init Database" "${DIM}No${RESET}"
     fi
-
     echo ""
 }
 
@@ -1231,25 +1983,31 @@ create_config_file() {
     print_step "Creating configuration file..."
 
     local config_dir
-    local data_dir
     local sudo_cmd
 
     if [[ $EUID -eq 0 ]] || [[ "$PREFIX" == "/usr/local" ]]; then
         config_dir="/etc/flydb"
-        data_dir="/var/lib/flydb"
         sudo_cmd=$(get_sudo_cmd "$config_dir")
     else
         config_dir="$HOME/.config/flydb"
-        data_dir="$HOME/.local/share/flydb"
         sudo_cmd=""
     fi
 
+    # Use configured data directory or set default
+    if [[ -z "$DATA_DIR" ]]; then
+        if [[ $EUID -eq 0 ]] || [[ "$PREFIX" == "/usr/local" ]]; then
+            DATA_DIR="/var/lib/flydb"
+        else
+            DATA_DIR="$HOME/.local/share/flydb"
+        fi
+    fi
+
     # Create data directory if it doesn't exist
-    if [[ ! -d "$data_dir" ]]; then
+    if [[ ! -d "$DATA_DIR" ]]; then
         spinner_start "Creating data directory"
-        if $sudo_cmd mkdir -p "$data_dir" 2>/dev/null; then
-            spinner_success "Created $data_dir"
-            CREATED_DIRS+=("$data_dir")
+        if $sudo_cmd mkdir -p "$DATA_DIR" 2>/dev/null; then
+            spinner_success "Created $DATA_DIR"
+            CREATED_DIRS+=("$DATA_DIR")
         else
             spinner_error "Failed to create data directory"
             return 1
@@ -1271,14 +2029,51 @@ create_config_file() {
 
     if [[ -f "$config_file" ]]; then
         print_warning "Configuration file already exists: $config_file"
-        print_substep "Skipping config creation to preserve existing settings"
-        return 0
+        if [[ "$AUTO_CONFIRM" != true ]]; then
+            if prompt_yes_no "Overwrite existing configuration?" "n"; then
+                print_info "Backing up existing config to ${config_file}.bak"
+                $sudo_cmd cp "$config_file" "${config_file}.bak" 2>/dev/null || true
+            else
+                print_substep "Skipping config creation to preserve existing settings"
+                return 0
+            fi
+        else
+            print_substep "Skipping config creation to preserve existing settings"
+            return 0
+        fi
     fi
 
     spinner_start "Writing configuration file"
 
+    # Build cluster peers array for TOML
+    local cluster_peers_toml="[]"
+    if [[ -n "$CLUSTER_PEERS" ]]; then
+        local peers_array=""
+        IFS=',' read -ra PEER_ARRAY <<< "$CLUSTER_PEERS"
+        for peer in "${PEER_ARRAY[@]}"; do
+            peer="${peer//[[:space:]]/}"
+            if [[ -n "$peer" ]]; then
+                if [[ -n "$peers_array" ]]; then
+                    peers_array="${peers_array}, \"${peer}\""
+                else
+                    peers_array="\"${peer}\""
+                fi
+            fi
+        done
+        cluster_peers_toml="[${peers_array}]"
+    fi
+
+    # Build master_addr line
+    local master_addr_line=""
+    if [[ "$SERVER_ROLE" == "slave" ]] && [[ -n "$MASTER_ADDR" ]]; then
+        master_addr_line="master_addr = \"${MASTER_ADDR}\""
+    else
+        master_addr_line="# master_addr = \"localhost:9999\""
+    fi
+
     local config_content="# FlyDB Configuration File
 # Generated by install.sh on $(date)
+# Installation type: ${SERVER_ROLE} mode
 #
 # Configuration Precedence (highest to lowest):
 #   1. Command-line flags
@@ -1286,102 +2081,111 @@ create_config_file() {
 #   3. This configuration file
 #   4. Default values
 #
-# Environment Variables:
-#   FLYDB_PORT          - Server port for text protocol
-#   FLYDB_BINARY_PORT   - Server port for binary protocol
-#   FLYDB_REPL_PORT     - Replication port
-#   FLYDB_ROLE          - Server role (standalone, master, slave, cluster)
-#   FLYDB_MASTER_ADDR   - Master address for slave mode
-#   FLYDB_DATA_DIR      - Data directory for database storage
-#   FLYDB_LOG_LEVEL     - Log level (debug, info, warn, error)
-#   FLYDB_LOG_JSON      - Enable JSON logging (true/false)
-#   FLYDB_ADMIN_PASSWORD - Initial admin password (first-time setup only)
-#   FLYDB_ENCRYPTION_PASSPHRASE - Encryption passphrase (required if encryption enabled)
-#   FLYDB_CONFIG_FILE   - Path to this configuration file
-#
-# Cluster Environment Variables:
-#   FLYDB_CLUSTER_PORT        - Port for cluster communication (default: 9998)
-#   FLYDB_CLUSTER_PEERS       - Comma-separated list of peer addresses
-#   FLYDB_REPLICATION_MODE    - Replication mode: async, semi_sync, sync
-#   FLYDB_HEARTBEAT_INTERVAL_MS - Heartbeat interval in milliseconds
-#   FLYDB_HEARTBEAT_TIMEOUT_MS  - Heartbeat timeout in milliseconds
-#   FLYDB_ELECTION_TIMEOUT_MS   - Election timeout in milliseconds
-#   FLYDB_MIN_QUORUM          - Minimum quorum size for cluster decisions
+# For full documentation, see: https://flydb.dev/docs/configuration
+
+# =============================================================================
+# Server Configuration
+# =============================================================================
 
 # Server role: standalone, master, slave, or cluster
 # - standalone: Single server mode (no replication)
 # - master: Leader node that accepts writes and replicates to slaves
 # - slave: Follower node that receives replication from master
 # - cluster: Automatic failover cluster with leader election
-role = \"standalone\"
+role = \"${SERVER_ROLE}\"
 
-# Network ports
-# Text protocol port (for nc/telnet connections)
-port = 8888
-# Binary protocol port (for fsql connections)
-binary_port = 8889
-# Replication port (master mode only)
-replication_port = 9999
+# =============================================================================
+# Network Configuration
+# =============================================================================
+
+# Server port (binary protocol for fsql client connections)
+port = ${PORT}
+
+# Replication port (for master/cluster modes)
+replication_port = ${REPL_PORT}
+
+# Cluster communication port (for cluster mode)
+cluster_port = ${CLUSTER_PORT}
 
 # Master address for slave mode (format: host:port)
-# Uncomment and set when running in slave mode
-# master_addr = \"localhost:9999\"
+${master_addr_line}
 
-# Storage
+# =============================================================================
+# Storage Configuration
+# =============================================================================
+
 # Data directory for multi-database storage
-# User installations: ~/.local/share/flydb
-# System installations: /var/lib/flydb
-data_dir = \"$data_dir\"
+# Each database is stored in a separate subdirectory
+data_dir = \"${DATA_DIR}\"
 
-# Logging
-# Available levels: debug, info, warn, error
-log_level = \"info\"
+# Buffer pool size in pages (0 = auto-size based on available memory)
+# Each page is 4KB, so 1000 pages = 4MB
+buffer_pool_size = ${BUFFER_POOL_SIZE}
+
+# Checkpoint interval in seconds (0 = disabled)
+checkpoint_secs = ${CHECKPOINT_SECS}
+
+# =============================================================================
+# Security Configuration
+# =============================================================================
+
+# Enable data-at-rest encryption (AES-256-GCM)
+# When enabled, set FLYDB_ENCRYPTION_PASSPHRASE environment variable
+encryption_enabled = ${ENCRYPTION_ENABLED}
+
+# Note: Encryption passphrase should be set via environment variable
+# for security reasons, not in this file:
+#   export FLYDB_ENCRYPTION_PASSPHRASE=\"your-secure-passphrase\"
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+
+# Log level: debug, info, warn, error
+log_level = \"${LOG_LEVEL}\"
+
 # Enable JSON-formatted log output (useful for log aggregation)
-log_json = false
-
-# Authentication
-# Note: Admin password is set on first run via:
-#   - FLYDB_ADMIN_PASSWORD environment variable, or
-#   - Interactive wizard (if no env var set)
+log_json = ${LOG_JSON}
 
 # =============================================================================
 # Cluster Configuration (for role = \"cluster\")
 # =============================================================================
 
-# Cluster communication port
-# cluster_port = 9998
-
 # Comma-separated list of peer node addresses (host:port)
-# Example: cluster_peers = [\"node2:9998\", \"node3:9998\"]
-# cluster_peers = []
+cluster_peers = ${cluster_peers_toml}
 
 # Replication mode: async, semi_sync, or sync
 # - async: Best performance, eventual consistency
 # - semi_sync: At least one replica acknowledges before commit
 # - sync: All replicas must acknowledge (strongest consistency)
-replication_mode = \"async\"
+replication_mode = \"${REPLICATION_MODE}\"
 
 # Heartbeat interval in milliseconds (how often to send heartbeats)
-heartbeat_interval_ms = 1000
+heartbeat_interval_ms = ${HEARTBEAT_INTERVAL}
 
 # Heartbeat timeout in milliseconds (when to consider a node dead)
-heartbeat_timeout_ms = 5000
+heartbeat_timeout_ms = ${HEARTBEAT_TIMEOUT}
 
-# Election timeout in milliseconds (when to start a new election)
-election_timeout_ms = 10000
+# Election timeout in milliseconds (when to start a new leader election)
+election_timeout_ms = ${ELECTION_TIMEOUT}
 
-# Minimum quorum size for cluster decisions
-# Set to 0 for automatic calculation (majority of nodes)
-min_quorum = 0
+# Minimum quorum size for cluster decisions (0 = auto-calculate majority)
+min_quorum = ${MIN_QUORUM}
 
 # Enable pre-vote protocol to prevent disruptions from partitioned nodes
-enable_pre_vote = true
+enable_pre_vote = ${ENABLE_PRE_VOTE}
+
+# Number of data partitions (must be power of 2, range: 16-4096)
+partition_count = ${PARTITION_COUNT}
+
+# Number of replicas per partition (range: 1-5)
+replication_factor = ${REPLICATION_FACTOR}
 
 # Sync timeout in milliseconds (for sync replication mode)
-sync_timeout_ms = 5000
+sync_timeout_ms = ${SYNC_TIMEOUT}
 
-# Maximum replication lag in bytes before a replica is considered unhealthy
-max_replication_lag = 10485760
+# Maximum replication lag in milliseconds before replica is unhealthy
+max_replication_lag_ms = ${MAX_REPLICATION_LAG}
 "
 
     if echo "$config_content" | $sudo_cmd tee "$config_file" >/dev/null 2>&1; then
@@ -1619,149 +2423,45 @@ verify_installation() {
 }
 
 # =============================================================================
-# Uninstallation
+# Uninstallation (delegates to standalone uninstall.sh)
 # =============================================================================
 
 run_uninstall() {
-    print_step "Uninstalling FlyDB..."
-    echo ""
+    # Build arguments to pass to uninstall.sh
+    local uninstall_args=()
+    [[ "$AUTO_CONFIRM" == true ]] && uninstall_args+=("--yes")
+    [[ -n "$PREFIX" ]] && uninstall_args+=("--prefix" "$PREFIX")
 
-    local found=false
+    # Try to find uninstall.sh in common locations
+    local uninstall_script=""
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-    # Find installation locations
-    local locations=("/usr/local/bin" "/usr/bin" "$HOME/.local/bin")
-    if [[ -n "$PREFIX" ]]; then
-        locations=("${PREFIX}/bin" "${locations[@]}")
-    fi
-
-    for dir in "${locations[@]}"; do
-        if [[ -x "$dir/flydb" ]] || [[ -x "$dir/flydb-shell" ]] || [[ -x "$dir/flydb-dump" ]]; then
-            print_info "Found FlyDB installation in $dir"
-            found=true
-
-            if [[ "$AUTO_CONFIRM" != true ]]; then
-                if ! prompt_yes_no "Remove files from $dir?"; then
-                    continue
-                fi
-            fi
-
-            local sudo_cmd
-            sudo_cmd=$(get_sudo_cmd "$dir")
-
-            if [[ -x "$dir/flydb" ]]; then
-                spinner_start "Removing flydb"
-                if $sudo_cmd rm -f "$dir/flydb" 2>/dev/null; then
-                    spinner_success "Removed $dir/flydb"
-                else
-                    spinner_error "Failed to remove $dir/flydb"
-                fi
-            fi
-
-            if [[ -x "$dir/flydb-shell" ]]; then
-                spinner_start "Removing flydb-shell"
-                if $sudo_cmd rm -f "$dir/flydb-shell" 2>/dev/null; then
-                    spinner_success "Removed $dir/flydb-shell"
-                else
-                    spinner_error "Failed to remove $dir/flydb-shell"
-                fi
-            fi
-
-            if [[ -x "$dir/flydb-dump" ]]; then
-                spinner_start "Removing flydb-dump"
-                if $sudo_cmd rm -f "$dir/flydb-dump" 2>/dev/null; then
-                    spinner_success "Removed $dir/flydb-dump"
-                else
-                    spinner_error "Failed to remove $dir/flydb-dump"
-                fi
-            fi
-
-            if [[ -L "$dir/fsql" ]] || [[ -x "$dir/fsql" ]]; then
-                spinner_start "Removing fsql symlink"
-                if $sudo_cmd rm -f "$dir/fsql" 2>/dev/null; then
-                    spinner_success "Removed $dir/fsql"
-                else
-                    spinner_error "Failed to remove $dir/fsql"
-                fi
-            fi
-
-            if [[ -L "$dir/fdump" ]] || [[ -x "$dir/fdump" ]]; then
-                spinner_start "Removing fdump symlink"
-                if $sudo_cmd rm -f "$dir/fdump" 2>/dev/null; then
-                    spinner_success "Removed $dir/fdump"
-                else
-                    spinner_error "Failed to remove $dir/fdump"
-                fi
-            fi
+    for path in "$script_dir/uninstall.sh" "/usr/local/share/flydb/uninstall.sh" "$HOME/.local/share/flydb/uninstall.sh"; do
+        if [[ -f "$path" ]]; then
+            uninstall_script="$path"
+            break
         fi
     done
 
-    # Remove systemd service
-    if [[ -f "/etc/systemd/system/flydb.service" ]]; then
-        print_info "Found systemd service"
+    if [[ -z "$uninstall_script" ]]; then
+        # Download uninstall.sh
+        print_info "Downloading uninstall script..."
+        local temp_uninstall
+        temp_uninstall=$(mktemp)
 
-        if [[ "$AUTO_CONFIRM" != true ]]; then
-            if prompt_yes_no "Remove systemd service?"; then
-                local sudo_cmd
-                sudo_cmd=$(get_sudo_cmd "/etc/systemd/system")
-                $sudo_cmd systemctl stop flydb 2>/dev/null || true
-                $sudo_cmd systemctl disable flydb 2>/dev/null || true
-                $sudo_cmd rm -f /etc/systemd/system/flydb.service
-                $sudo_cmd systemctl daemon-reload 2>/dev/null || true
-                print_success "Removed systemd service"
-            fi
+        if curl -fsSL "https://raw.githubusercontent.com/${GITHUB_REPO}/main/uninstall.sh" -o "$temp_uninstall" 2>/dev/null ||
+           wget -qO "$temp_uninstall" "https://raw.githubusercontent.com/${GITHUB_REPO}/main/uninstall.sh" 2>/dev/null; then
+            chmod +x "$temp_uninstall"
+            uninstall_script="$temp_uninstall"
+        else
+            print_error "Could not find or download uninstall.sh"
+            echo -e "  ${DIM}Run manually: curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/uninstall.sh | bash${RESET}"
+            return 1
         fi
     fi
 
-    # Remove launchd service
-    local plist_files=(
-        "/Library/LaunchDaemons/io.flydb.flydb.plist"
-        "$HOME/Library/LaunchAgents/io.flydb.flydb.plist"
-    )
-
-    for plist in "${plist_files[@]}"; do
-        if [[ -f "$plist" ]]; then
-            print_info "Found launchd service: $plist"
-
-            if [[ "$AUTO_CONFIRM" != true ]]; then
-                if prompt_yes_no "Remove launchd service?"; then
-                    launchctl unload "$plist" 2>/dev/null || true
-                    rm -f "$plist"
-                    print_success "Removed launchd service"
-                fi
-            fi
-        fi
-    done
-
-    # Remove config files
-    local config_dirs=("/etc/flydb" "$HOME/.config/flydb")
-    for config_dir in "${config_dirs[@]}"; do
-        if [[ -d "$config_dir" ]]; then
-            print_info "Found configuration in $config_dir"
-
-            if [[ "$AUTO_CONFIRM" != true ]]; then
-                if prompt_yes_no "Remove configuration files?"; then
-                    local sudo_cmd
-                    sudo_cmd=$(get_sudo_cmd "$config_dir")
-                    $sudo_cmd rm -rf "$config_dir"
-                    print_success "Removed $config_dir"
-                fi
-            fi
-        fi
-    done
-
-    if [[ "$found" == false ]]; then
-        print_warning "No FlyDB installation found"
-    else
-        echo ""
-        print_success "FlyDB uninstallation complete"
-    fi
-
-    # Note about data
-    if [[ -d "/var/lib/flydb" ]]; then
-        echo ""
-        print_warning "Data directory /var/lib/flydb was preserved"
-        print_dim "  Remove manually if no longer needed: sudo rm -rf /var/lib/flydb"
-    fi
+    exec bash "$uninstall_script" "${uninstall_args[@]}"
 }
 
 # =============================================================================
@@ -1803,9 +2503,8 @@ rollback() {
 
 print_post_install() {
     echo ""
-    echo -e "${GREEN}${BOLD}╔════════════════════════════════════════════════════════════╗${RESET}"
-    echo -e "${GREEN}${BOLD}║              Installation Complete!                        ║${RESET}"
-    echo -e "${GREEN}${BOLD}╚════════════════════════════════════════════════════════════╝${RESET}"
+    echo -e "${GREEN}${BOLD}${ICON_SUCCESS} Installation Complete!${RESET}"
+    separator 60
     echo ""
 
     local bin_dir="${PREFIX}/bin"
@@ -1843,9 +2542,9 @@ print_post_install() {
     echo ""
     echo -e "     ${DIM}# Or with command-line options:${RESET}"
     if [[ "$in_path" == true ]]; then
-        echo -e "     ${CYAN}flydb -port 8888 -role standalone${RESET}"
+        echo -e "     ${CYAN}flydb -port 8889 -role standalone${RESET}"
     else
-        echo -e "     ${CYAN}${bin_dir}/flydb -port 8888 -role standalone${RESET}"
+        echo -e "     ${CYAN}${bin_dir}/flydb -port 8889 -role standalone${RESET}"
     fi
     ((step_num++))
 
@@ -1880,19 +2579,69 @@ print_post_install() {
     fi
     ((step_num++))
 
-    # Step: Cluster mode (optional)
-    echo ""
-    echo -e "  ${YELLOW}${step_num}. Set up a cluster (optional):${RESET}"
-    echo ""
-    echo -e "     ${DIM}# Start a 3-node cluster with automatic failover:${RESET}"
-    if [[ "$in_path" == true ]]; then
-        echo -e "     ${CYAN}flydb -role cluster -cluster-peers node2:9998,node3:9998${RESET}"
+    # Step: Cluster-specific instructions
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        echo ""
+        echo -e "  ${YELLOW}${step_num}. Cluster Setup:${RESET}"
+        echo ""
+
+        if [[ "$CLUSTER_BOOTSTRAP" == "true" ]] || [[ -z "$CLUSTER_PEERS" ]]; then
+            # Bootstrap mode - this is the first node
+            local this_host
+            this_host=$(hostname 2>/dev/null || echo "localhost")
+            echo -e "     ${GREEN}This node is bootstrapped as the cluster leader.${RESET}"
+            echo ""
+            echo -e "     ${DIM}To add more nodes to this cluster, run on other machines:${RESET}"
+            echo ""
+            if [[ "$in_path" == true ]]; then
+                echo -e "     ${CYAN}flydb -role cluster -cluster-peers ${this_host}:${CLUSTER_PORT}${RESET}"
+            else
+                echo -e "     ${CYAN}${bin_dir}/flydb -role cluster -cluster-peers ${this_host}:${CLUSTER_PORT}${RESET}"
+            fi
+            echo ""
+            echo -e "     ${DIM}Or install with:${RESET}"
+            echo -e "     ${CYAN}curl -sSL https://get.flydb.dev | bash -s -- --role cluster \\${RESET}"
+            echo -e "     ${CYAN}     --cluster-peers ${this_host}:${CLUSTER_PORT} --yes${RESET}"
+        else
+            # Join mode - connecting to existing cluster
+            echo -e "     ${BLUE}This node will join the cluster via: ${CLUSTER_PEERS}${RESET}"
+            echo ""
+            echo -e "     ${DIM}The node will automatically:${RESET}"
+            echo -e "     ${DIM}• Discover other cluster members${RESET}"
+            echo -e "     ${DIM}• Sync data from the cluster${RESET}"
+            echo -e "     ${DIM}• Participate in leader elections${RESET}"
+        fi
+        ((step_num++))
+
+        echo ""
+        echo -e "  ${YELLOW}${step_num}. Monitor cluster status:${RESET}"
+        echo ""
+        if [[ "$in_path" == true ]]; then
+            echo -e "     ${CYAN}fsql -c \"SHOW CLUSTER STATUS\"${RESET}"
+        else
+            echo -e "     ${CYAN}${bin_dir}/fsql -c \"SHOW CLUSTER STATUS\"${RESET}"
+        fi
+        ((step_num++))
     else
-        echo -e "     ${CYAN}${bin_dir}/flydb -role cluster -cluster-peers node2:9998,node3:9998${RESET}"
+        # Non-cluster mode - show cluster setup as optional
+        echo ""
+        echo -e "  ${YELLOW}${step_num}. Set up a cluster (optional):${RESET}"
+        echo ""
+        echo -e "     ${DIM}# Bootstrap first cluster node:${RESET}"
+        if [[ "$in_path" == true ]]; then
+            echo -e "     ${CYAN}flydb -role cluster${RESET}  ${DIM}# Becomes leader${RESET}"
+        else
+            echo -e "     ${CYAN}${bin_dir}/flydb -role cluster${RESET}  ${DIM}# Becomes leader${RESET}"
+        fi
+        echo ""
+        echo -e "     ${DIM}# Join existing cluster:${RESET}"
+        if [[ "$in_path" == true ]]; then
+            echo -e "     ${CYAN}flydb -role cluster -cluster-peers node1:9998${RESET}"
+        else
+            echo -e "     ${CYAN}${bin_dir}/flydb -role cluster -cluster-peers node1:9998${RESET}"
+        fi
+        ((step_num++))
     fi
-    echo ""
-    echo -e "     ${DIM}# Or use environment variables:${RESET}"
-    echo -e "     ${CYAN}FLYDB_ROLE=cluster FLYDB_CLUSTER_PEERS=node2:9998,node3:9998 flydb${RESET}"
 
     echo ""
     separator 60
@@ -1965,6 +2714,382 @@ parse_args() {
                 UNINSTALL=true
                 shift
                 ;;
+            # Server configuration options
+            --role)
+                if [[ -n "${2:-}" ]]; then
+                    case "$2" in
+                        standalone|master|slave|cluster)
+                            SERVER_ROLE="$2"
+                            ;;
+                        *)
+                            print_error "Invalid role: $2. Must be standalone, master, slave, or cluster"
+                            exit 1
+                            ;;
+                    esac
+                    shift 2
+                else
+                    print_error "--role requires an argument"
+                    exit 1
+                fi
+                ;;
+            --role=*)
+                local role="${1#*=}"
+                case "$role" in
+                    standalone|master|slave|cluster)
+                        SERVER_ROLE="$role"
+                        ;;
+                    *)
+                        print_error "Invalid role: $role. Must be standalone, master, slave, or cluster"
+                        exit 1
+                        ;;
+                esac
+                shift
+                ;;
+            --port)
+                if [[ -n "${2:-}" ]] && validate_port "$2"; then
+                    PORT="$2"
+                    shift 2
+                else
+                    print_error "--port requires a valid port number (1-65535)"
+                    exit 1
+                fi
+                ;;
+            --port=*)
+                local port="${1#*=}"
+                if validate_port "$port"; then
+                    PORT="$port"
+                else
+                    print_error "--port requires a valid port number (1-65535)"
+                    exit 1
+                fi
+                shift
+                ;;
+            --repl-port)
+                if [[ -n "${2:-}" ]] && validate_port "$2"; then
+                    REPL_PORT="$2"
+                    shift 2
+                else
+                    print_error "--repl-port requires a valid port number (1-65535)"
+                    exit 1
+                fi
+                ;;
+            --repl-port=*)
+                local port="${1#*=}"
+                if validate_port "$port"; then
+                    REPL_PORT="$port"
+                else
+                    print_error "--repl-port requires a valid port number (1-65535)"
+                    exit 1
+                fi
+                shift
+                ;;
+            --cluster-port)
+                if [[ -n "${2:-}" ]] && validate_port "$2"; then
+                    CLUSTER_PORT="$2"
+                    shift 2
+                else
+                    print_error "--cluster-port requires a valid port number (1-65535)"
+                    exit 1
+                fi
+                ;;
+            --cluster-port=*)
+                local port="${1#*=}"
+                if validate_port "$port"; then
+                    CLUSTER_PORT="$port"
+                else
+                    print_error "--cluster-port requires a valid port number (1-65535)"
+                    exit 1
+                fi
+                shift
+                ;;
+            --master-addr)
+                if [[ -n "${2:-}" ]]; then
+                    MASTER_ADDR="$2"
+                    shift 2
+                else
+                    print_error "--master-addr requires a host:port argument"
+                    exit 1
+                fi
+                ;;
+            --master-addr=*)
+                MASTER_ADDR="${1#*=}"
+                shift
+                ;;
+            --data-dir)
+                if [[ -n "${2:-}" ]]; then
+                    DATA_DIR=$(validate_path "$2")
+                    shift 2
+                else
+                    print_error "--data-dir requires a path argument"
+                    exit 1
+                fi
+                ;;
+            --data-dir=*)
+                DATA_DIR=$(validate_path "${1#*=}")
+                shift
+                ;;
+            # Cluster options
+            --cluster-bootstrap)
+                CLUSTER_BOOTSTRAP="true"
+                shift
+                ;;
+            --cluster-peers)
+                if [[ -n "${2:-}" ]]; then
+                    CLUSTER_PEERS="$2"
+                    CLUSTER_BOOTSTRAP="false"  # Joining existing cluster
+                    shift 2
+                else
+                    print_error "--cluster-peers requires a comma-separated list of addresses"
+                    exit 1
+                fi
+                ;;
+            --cluster-peers=*)
+                CLUSTER_PEERS="${1#*=}"
+                CLUSTER_BOOTSTRAP="false"  # Joining existing cluster
+                shift
+                ;;
+            --replication-mode)
+                if [[ -n "${2:-}" ]]; then
+                    case "$2" in
+                        async|semi_sync|sync)
+                            REPLICATION_MODE="$2"
+                            ;;
+                        *)
+                            print_error "Invalid replication mode: $2. Must be async, semi_sync, or sync"
+                            exit 1
+                            ;;
+                    esac
+                    shift 2
+                else
+                    print_error "--replication-mode requires an argument"
+                    exit 1
+                fi
+                ;;
+            --replication-mode=*)
+                local mode="${1#*=}"
+                case "$mode" in
+                    async|semi_sync|sync)
+                        REPLICATION_MODE="$mode"
+                        ;;
+                    *)
+                        print_error "Invalid replication mode: $mode. Must be async, semi_sync, or sync"
+                        exit 1
+                        ;;
+                esac
+                shift
+                ;;
+            --heartbeat-interval)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    HEARTBEAT_INTERVAL="$2"
+                    shift 2
+                else
+                    print_error "--heartbeat-interval requires a number in milliseconds"
+                    exit 1
+                fi
+                ;;
+            --heartbeat-interval=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    HEARTBEAT_INTERVAL="$val"
+                else
+                    print_error "--heartbeat-interval requires a number in milliseconds"
+                    exit 1
+                fi
+                shift
+                ;;
+            --heartbeat-timeout)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    HEARTBEAT_TIMEOUT="$2"
+                    shift 2
+                else
+                    print_error "--heartbeat-timeout requires a number in milliseconds"
+                    exit 1
+                fi
+                ;;
+            --heartbeat-timeout=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    HEARTBEAT_TIMEOUT="$val"
+                else
+                    print_error "--heartbeat-timeout requires a number in milliseconds"
+                    exit 1
+                fi
+                shift
+                ;;
+            --election-timeout)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    ELECTION_TIMEOUT="$2"
+                    shift 2
+                else
+                    print_error "--election-timeout requires a number in milliseconds"
+                    exit 1
+                fi
+                ;;
+            --election-timeout=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    ELECTION_TIMEOUT="$val"
+                else
+                    print_error "--election-timeout requires a number in milliseconds"
+                    exit 1
+                fi
+                shift
+                ;;
+            --min-quorum)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    MIN_QUORUM="$2"
+                    shift 2
+                else
+                    print_error "--min-quorum requires a number"
+                    exit 1
+                fi
+                ;;
+            --min-quorum=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    MIN_QUORUM="$val"
+                else
+                    print_error "--min-quorum requires a number"
+                    exit 1
+                fi
+                shift
+                ;;
+            --partition-count)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    PARTITION_COUNT="$2"
+                    shift 2
+                else
+                    print_error "--partition-count requires a number"
+                    exit 1
+                fi
+                ;;
+            --partition-count=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    PARTITION_COUNT="$val"
+                else
+                    print_error "--partition-count requires a number"
+                    exit 1
+                fi
+                shift
+                ;;
+            --replication-factor)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    REPLICATION_FACTOR="$2"
+                    shift 2
+                else
+                    print_error "--replication-factor requires a number"
+                    exit 1
+                fi
+                ;;
+            --replication-factor=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    REPLICATION_FACTOR="$val"
+                else
+                    print_error "--replication-factor requires a number"
+                    exit 1
+                fi
+                shift
+                ;;
+            # Security options
+            --encryption)
+                ENCRYPTION_ENABLED="true"
+                shift
+                ;;
+            --no-encryption)
+                ENCRYPTION_ENABLED="false"
+                shift
+                ;;
+            --encryption-passphrase)
+                if [[ -n "${2:-}" ]]; then
+                    ENCRYPTION_PASSPHRASE="$2"
+                    ENCRYPTION_ENABLED="true"
+                    shift 2
+                else
+                    print_error "--encryption-passphrase requires an argument"
+                    exit 1
+                fi
+                ;;
+            --encryption-passphrase=*)
+                ENCRYPTION_PASSPHRASE="${1#*=}"
+                ENCRYPTION_ENABLED="true"
+                shift
+                ;;
+            # Logging options
+            --log-level)
+                if [[ -n "${2:-}" ]]; then
+                    case "$2" in
+                        debug|info|warn|error)
+                            LOG_LEVEL="$2"
+                            ;;
+                        *)
+                            print_error "Invalid log level: $2. Must be debug, info, warn, or error"
+                            exit 1
+                            ;;
+                    esac
+                    shift 2
+                else
+                    print_error "--log-level requires an argument"
+                    exit 1
+                fi
+                ;;
+            --log-level=*)
+                local level="${1#*=}"
+                case "$level" in
+                    debug|info|warn|error)
+                        LOG_LEVEL="$level"
+                        ;;
+                    *)
+                        print_error "Invalid log level: $level. Must be debug, info, warn, or error"
+                        exit 1
+                        ;;
+                esac
+                shift
+                ;;
+            --log-json)
+                LOG_JSON="true"
+                shift
+                ;;
+            # Storage options
+            --buffer-pool-size)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    BUFFER_POOL_SIZE="$2"
+                    shift 2
+                else
+                    print_error "--buffer-pool-size requires a number"
+                    exit 1
+                fi
+                ;;
+            --buffer-pool-size=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    BUFFER_POOL_SIZE="$val"
+                else
+                    print_error "--buffer-pool-size requires a number"
+                    exit 1
+                fi
+                shift
+                ;;
+            --checkpoint-secs)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    CHECKPOINT_SECS="$2"
+                    shift 2
+                else
+                    print_error "--checkpoint-secs requires a number"
+                    exit 1
+                fi
+                ;;
+            --checkpoint-secs=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    CHECKPOINT_SECS="$val"
+                else
+                    print_error "--checkpoint-secs requires a number"
+                    exit 1
+                fi
+                shift
+                ;;
             --help|-h)
                 print_help
                 exit 0
@@ -1982,7 +3107,7 @@ parse_args() {
     if [[ -n "$PREFIX" ]] || [[ -n "$SPECIFIC_VERSION" ]] || \
        [[ "$INSTALL_SERVICE" == false ]] || [[ "$CREATE_CONFIG" == false ]] || \
        [[ "$INIT_DATABASE" == true ]] || [[ "$AUTO_CONFIRM" == true ]] || \
-       [[ "$INSTALL_MODE" != "auto" ]]; then
+       [[ "$INSTALL_MODE" != "auto" ]] || [[ "$SERVER_ROLE" != "standalone" ]]; then
         INTERACTIVE=false
     fi
 }
