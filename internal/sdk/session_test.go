@@ -93,10 +93,10 @@ func TestParseODBCConnectionString(t *testing.T) {
 		},
 		{
 			name:    "ODBC with driver",
-			connStr: "Driver={FlyDB};Server=localhost;Port=8888;Database=testdb;Uid=admin;Pwd=secret",
+			connStr: "Driver={FlyDB};Server=localhost;Port=8889;Database=testdb;Uid=admin;Pwd=secret",
 			expected: &ConnectionConfig{
 				Host:     "localhost",
-				Port:     8888,
+				Port:     8889,
 				Database: "testdb",
 				Username: "admin",
 				Password: "secret",
@@ -183,10 +183,10 @@ func TestParseJDBCConnectionString(t *testing.T) {
 		},
 		{
 			name:    "JDBC with options",
-			connStr: "jdbc:flydb://host:8888/db?user=u&password=p&readonly=true&autocommit=false",
+			connStr: "jdbc:flydb://host:8889/db?user=u&password=p&readonly=true&autocommit=false",
 			expected: &ConnectionConfig{
 				Host:       "host",
-				Port:       8888,
+				Port:       8889,
 				Database:   "db",
 				Username:   "u",
 				Password:   "p",

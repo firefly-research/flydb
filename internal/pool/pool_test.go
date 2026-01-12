@@ -22,10 +22,10 @@ import (
 )
 
 func TestDefaultConfig(t *testing.T) {
-	config := DefaultConfig("localhost:8888")
+	config := DefaultConfig("localhost:8889")
 
-	if config.Address != "localhost:8888" {
-		t.Errorf("Expected address 'localhost:8888', got '%s'", config.Address)
+	if config.Address != "localhost:8889" {
+		t.Errorf("Expected address 'localhost:8889', got '%s'", config.Address)
 	}
 	if config.MinConns != 2 {
 		t.Errorf("Expected MinConns 2, got %d", config.MinConns)
@@ -44,7 +44,7 @@ func TestDefaultConfig(t *testing.T) {
 func TestPoolConfigValidation(t *testing.T) {
 	// Test that invalid configs are corrected
 	config := Config{
-		Address:  "localhost:8888",
+		Address:  "localhost:8889",
 		MinConns: -1,
 		MaxConns: 0,
 	}
@@ -91,7 +91,7 @@ func TestPoolStats(t *testing.T) {
 
 func TestConfigWithDatabase(t *testing.T) {
 	config := Config{
-		Address:  "localhost:8888",
+		Address:  "localhost:8889",
 		MinConns: 1,
 		MaxConns: 5,
 		Database: "mydb",
@@ -104,7 +104,7 @@ func TestConfigWithDatabase(t *testing.T) {
 
 func TestConfigDatabaseDefault(t *testing.T) {
 	// Test that empty database defaults to "default" in DefaultConfig
-	config := DefaultConfig("localhost:8888")
+	config := DefaultConfig("localhost:8889")
 
 	if config.Database != "default" {
 		t.Errorf("Expected default Database 'default', got '%s'", config.Database)

@@ -109,7 +109,7 @@ const (
 // These constants are used in the banner display and can be
 // referenced elsewhere in the application for version reporting.
 const (
-	Version   = "01.26.11"
+	Version   = "01.26.12"
 	Copyright = "(c)2026 Firefly Software Solutions Inc"
 	License   = "Licensed under Apache 2.0"
 )

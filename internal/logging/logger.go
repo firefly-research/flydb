@@ -28,7 +28,7 @@ The logging package implements a production-ready logging system with:
 Usage:
 
 	logger := logging.NewLogger("server")
-	logger.Info("Server started", "port", 8888, "role", "master")
+	logger.Info("Server started", "port", 8889, "role", "master")
 	logger.Error("Connection failed", "error", err, "client", clientAddr)
 */
 package logging

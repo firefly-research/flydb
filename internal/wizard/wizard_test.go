@@ -27,11 +27,8 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
-	if cfg.Port != "8888" {
-		t.Errorf("Expected default port '8888', got '%s'", cfg.Port)
-	}
-	if cfg.BinaryPort != "8889" {
-		t.Errorf("Expected default binary port '8889', got '%s'", cfg.BinaryPort)
+	if cfg.Port != "8889" {
+		t.Errorf("Expected default port '8889', got '%s'", cfg.Port)
 	}
 	if cfg.ReplPort != "9999" {
 		t.Errorf("Expected default replication port '9999', got '%s'", cfg.ReplPort)
@@ -57,7 +54,6 @@ func TestDefaultConfig(t *testing.T) {
 func TestFromConfig(t *testing.T) {
 	cfg := &config.Config{
 		Port:              9000,
-		BinaryPort:        9001,
 		ReplPort:          9002,
 		Role:              "master",
 		MasterAddr:        "localhost:9999",
@@ -72,9 +68,6 @@ func TestFromConfig(t *testing.T) {
 
 	if wizardCfg.Port != "9000" {
 		t.Errorf("Expected port '9000', got '%s'", wizardCfg.Port)
-	}
-	if wizardCfg.BinaryPort != "9001" {
-		t.Errorf("Expected binary port '9001', got '%s'", wizardCfg.BinaryPort)
 	}
 	if wizardCfg.ReplPort != "9002" {
 		t.Errorf("Expected replication port '9002', got '%s'", wizardCfg.ReplPort)
@@ -105,7 +98,6 @@ func TestFromConfig(t *testing.T) {
 func TestToConfig(t *testing.T) {
 	wizardCfg := &Config{
 		Port:              "9000",
-		BinaryPort:        "9001",
 		ReplPort:          "9002",
 		Role:              "slave",
 		MasterAddr:        "master.example.com:9999",
@@ -120,9 +112,6 @@ func TestToConfig(t *testing.T) {
 
 	if cfg.Port != 9000 {
 		t.Errorf("Expected port 9000, got %d", cfg.Port)
-	}
-	if cfg.BinaryPort != 9001 {
-		t.Errorf("Expected binary port 9001, got %d", cfg.BinaryPort)
 	}
 	if cfg.ReplPort != 9002 {
 		t.Errorf("Expected replication port 9002, got %d", cfg.ReplPort)
@@ -182,7 +171,6 @@ func TestSaveConfigToFile(t *testing.T) {
 
 	wizardCfg := &Config{
 		Port:       "7777",
-		BinaryPort: "7778",
 		ReplPort:   "7779",
 		Role:       "master",
 		MasterAddr: "",
@@ -230,7 +218,6 @@ func TestLoadExistingConfig(t *testing.T) {
 
 	configContent := `role = "master"
 port = 9000
-binary_port = 9001
 replication_port = 9002
 db_path = "/tmp/test.fdb"
 log_level = "debug"
@@ -266,8 +253,7 @@ log_level = "debug"
 func TestRoundTrip(t *testing.T) {
 	// Test that FromConfig -> ToConfig preserves values
 	original := &config.Config{
-		Port:              8888,
-		BinaryPort:        8889,
+		Port:              8889,
 		ReplPort:          9999,
 		Role:              "standalone",
 		MasterAddr:        "",
@@ -282,9 +268,6 @@ func TestRoundTrip(t *testing.T) {
 
 	if result.Port != original.Port {
 		t.Errorf("Port mismatch: got %d, want %d", result.Port, original.Port)
-	}
-	if result.BinaryPort != original.BinaryPort {
-		t.Errorf("BinaryPort mismatch: got %d, want %d", result.BinaryPort, original.BinaryPort)
 	}
 	if result.ReplPort != original.ReplPort {
 		t.Errorf("ReplPort mismatch: got %d, want %d", result.ReplPort, original.ReplPort)

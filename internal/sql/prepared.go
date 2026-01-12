@@ -196,7 +196,7 @@ func (m *PreparedStatementManager) Clear() {
 }
 
 // ExecuteWithStringParams runs a prepared statement with string parameters.
-// This is a convenience method for the text protocol.
+// This is a convenience method for string-based parameter passing.
 func (m *PreparedStatementManager) ExecuteWithStringParams(name string, params []string) (string, error) {
 	// Convert string params to interface{}
 	iparams := make([]interface{}, len(params))

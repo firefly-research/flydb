@@ -79,8 +79,7 @@ const (
 
 // Config holds the configuration collected by the wizard.
 type Config struct {
-	Port                 string
-	BinaryPort           string
+	Port                 string // Server port for client connections (binary protocol)
 	ReplPort             string
 	ClusterPort          string
 	Role                 string
@@ -119,8 +118,7 @@ type Config struct {
 // via the FLYDB_ENCRYPTION_PASSPHRASE environment variable.
 func DefaultConfig() Config {
 	return Config{
-		Port:              "8888",
-		BinaryPort:        "8889",
+		Port:              "8889", // Default port for binary protocol
 		ReplPort:          "9999",
 		ClusterPort:       "9998",
 		Role:              "standalone",
@@ -157,7 +155,6 @@ func DefaultConfig() Config {
 func FromConfig(cfg *config.Config) Config {
 	return Config{
 		Port:                 strconv.Itoa(cfg.Port),
-		BinaryPort:           strconv.Itoa(cfg.BinaryPort),
 		ReplPort:             strconv.Itoa(cfg.ReplPort),
 		ClusterPort:          strconv.Itoa(cfg.ClusterPort),
 		Role:                 cfg.Role,
@@ -194,7 +191,6 @@ func FromConfig(cfg *config.Config) Config {
 // ToConfig converts a wizard Config to a config.Config.
 func (c *Config) ToConfig() *config.Config {
 	port, _ := strconv.Atoi(c.Port)
-	binaryPort, _ := strconv.Atoi(c.BinaryPort)
 	replPort, _ := strconv.Atoi(c.ReplPort)
 	clusterPort, _ := strconv.Atoi(c.ClusterPort)
 
@@ -205,7 +201,6 @@ func (c *Config) ToConfig() *config.Config {
 
 	return &config.Config{
 		Port:                 port,
-		BinaryPort:           binaryPort,
 		ReplPort:             replPort,
 		ClusterPort:          clusterPort,
 		Role:                 c.Role,
@@ -301,8 +296,7 @@ func DisplayExistingConfig(cfg *config.Config, configPath string) {
 	}
 
 	fmt.Printf("    %-16s %s %s\n", cli.Dimmed("Role:"), roleDisplay, cli.Dimmed(getRoleDescription(cfg.Role)))
-	fmt.Printf("    %-16s %d\n", cli.Dimmed("Text Port:"), cfg.Port)
-	fmt.Printf("    %-16s %d\n", cli.Dimmed("Binary Port:"), cfg.BinaryPort)
+	fmt.Printf("    %-16s %d\n", cli.Dimmed("Port:"), cfg.Port)
 	if cfg.Role == "master" || cfg.Role == "cluster" {
 		fmt.Printf("    %-16s %d\n", cli.Dimmed("Repl Port:"), cfg.ReplPort)
 	}
@@ -684,8 +678,7 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 	printStepHeader(2, "Network Ports")
 	fmt.Println()
 
-	cfg.Port = promptPortWithValidation(reader, "  Text protocol port", cfg.Port)
-	cfg.BinaryPort = promptPortWithValidation(reader, "  Binary protocol port", cfg.BinaryPort)
+	cfg.Port = promptPortWithValidation(reader, "  Server port (binary protocol)", cfg.Port)
 
 	if cfg.Role == "master" || cfg.Role == "cluster" {
 		cfg.ReplPort = promptPortWithValidation(reader, "  Replication port", cfg.ReplPort)
@@ -1012,8 +1005,7 @@ func printSummary(cfg *Config) {
 	fmt.Printf("    %-16s %s %s\n", cli.Dimmed("Role:"), roleDisplay, cli.Dimmed(roleDesc))
 
 	// Ports
-	fmt.Printf("    %-16s %s\n", cli.Dimmed("Text Port:"), cfg.Port)
-	fmt.Printf("    %-16s %s\n", cli.Dimmed("Binary Port:"), cfg.BinaryPort)
+	fmt.Printf("    %-16s %s\n", cli.Dimmed("Port:"), cfg.Port)
 	if cfg.Role == "master" || cfg.Role == "cluster" {
 		fmt.Printf("    %-16s %s\n", cli.Dimmed("Repl Port:"), cfg.ReplPort)
 	}

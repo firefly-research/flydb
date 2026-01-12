@@ -38,7 +38,7 @@ Usage Example:
 ==============
 
 	pool, err := pool.New(pool.Config{
-		Address:     "localhost:8888",
+		Address:     "localhost:8889",
 		MinConns:    2,
 		MaxConns:    10,
 		IdleTimeout: 5 * time.Minute,
@@ -75,7 +75,7 @@ var log = logging.NewLogger("pool")
 
 // Config holds the configuration for a connection pool.
 type Config struct {
-	// Address is the FlyDB server address (e.g., "localhost:8888").
+	// Address is the FlyDB server address (e.g., "localhost:8889").
 	Address string
 
 	// MinConns is the minimum number of connections to maintain.
