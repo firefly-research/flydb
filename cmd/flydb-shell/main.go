@@ -125,13 +125,15 @@ const (
 // This struct encapsulates all connection parameters, making it easy
 // to pass configuration between functions and extend in the future.
 type CLIConfig struct {
-	Host     string           // Server hostname or IP address
+	Host     string           // Server hostname or IP address (supports comma-separated for HA)
+	Hosts    []string         // Parsed list of hosts for HA cluster connections
 	Port     string           // Server port number (binary protocol)
 	Database string           // Database to connect to (empty = use server default)
 	Verbose  bool             // Enable verbose output
 	Debug    bool             // Enable debug mode
 	Format   cli.OutputFormat // Output format (table, json, plain)
 	Execute  string           // Command to execute and exit
+	TargetPrimary bool        // When true, always connect to primary/leader (for writes)
 }
 
 // REPLState holds the runtime state for the REPL session.
@@ -385,6 +387,165 @@ func NewBinaryClient(conn net.Conn, serverAddr string) *BinaryClient {
 	}
 }
 
+// HAClient wraps BinaryClient with HA/cluster failover support.
+// Similar to PostgreSQL's libpq multi-host connection, it tries multiple
+// hosts and automatically fails over when the current connection fails.
+type HAClient struct {
+	*BinaryClient
+	hosts           []string      // List of host:port addresses to try
+	currentHostIdx  int           // Index of currently connected host
+	targetPrimary   bool          // If true, only connect to primary/leader
+	authUsername    string        // Cached auth credentials for reconnection
+	authPassword    string        // Cached auth credentials for reconnection
+	lastAuth        bool          // Whether we successfully authenticated
+}
+
+// NewHAClient creates a new HA-aware client that can fail over between hosts.
+// hosts is a list of "host:port" addresses to try in order.
+func NewHAClient(hosts []string, targetPrimary bool) *HAClient {
+	return &HAClient{
+		hosts:         hosts,
+		targetPrimary: targetPrimary,
+	}
+}
+
+// Connect establishes connection to one of the configured hosts.
+// It tries each host in order until one succeeds.
+func (h *HAClient) Connect() error {
+	var lastErr error
+
+	for i, host := range h.hosts {
+		conn, err := net.DialTimeout("tcp", host, ConnectionTimeout)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Create the binary protocol client
+		h.BinaryClient = NewBinaryClient(conn, host)
+		h.currentHostIdx = i
+
+		// Validate connection with a PING
+		if err := h.Ping(); err != nil {
+			h.BinaryClient.Close()
+			lastErr = fmt.Errorf("server not responding to PING: %w", err)
+			continue
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf("failed to connect to any host: %w", lastErr)
+}
+
+// Reconnect attempts to reconnect to the cluster, trying alternate hosts.
+// It starts from the next host in the list after the current one.
+func (h *HAClient) Reconnect() error {
+	if h.BinaryClient != nil {
+		h.BinaryClient.Close()
+	}
+
+	// Rotate hosts: try from next host onwards, then wrap around
+	hostsToTry := make([]string, 0, len(h.hosts))
+	for i := 1; i <= len(h.hosts); i++ {
+		idx := (h.currentHostIdx + i) % len(h.hosts)
+		hostsToTry = append(hostsToTry, h.hosts[idx])
+	}
+
+	var lastErr error
+	for _, host := range hostsToTry {
+		conn, err := net.DialTimeout("tcp", host, ConnectionTimeout)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Create the binary protocol client
+		h.BinaryClient = NewBinaryClient(conn, host)
+		// Update current host index
+		for i, hst := range h.hosts {
+			if hst == host {
+				h.currentHostIdx = i
+				break
+			}
+		}
+
+		// Validate connection with a PING
+		if err := h.Ping(); err != nil {
+			h.BinaryClient.Close()
+			lastErr = fmt.Errorf("server not responding to PING: %w", err)
+			continue
+		}
+
+		// Re-authenticate if we had previously authenticated
+		if h.lastAuth && h.authUsername != "" {
+			_, err := h.BinaryClient.Auth(h.authUsername, h.authPassword)
+			if err != nil {
+				// Authentication failed on new host - continue to next
+				h.BinaryClient.Close()
+				lastErr = fmt.Errorf("re-authentication failed: %w", err)
+				continue
+			}
+		}
+
+		return nil
+	}
+
+	return fmt.Errorf("failed to reconnect to any host: %w", lastErr)
+}
+
+// Auth authenticates with the server and caches credentials for reconnection.
+func (h *HAClient) Auth(username, password string) (string, error) {
+	result, err := h.BinaryClient.Auth(username, password)
+	if err != nil {
+		return result, err
+	}
+	// Cache credentials for reconnection
+	h.authUsername = username
+	h.authPassword = password
+	h.lastAuth = true
+	return result, nil
+}
+
+// QueryWithFailover executes a query with automatic failover on connection errors.
+func (h *HAClient) QueryWithFailover(query string) (string, error) {
+	result, err := h.BinaryClient.Query(query)
+	if err == nil {
+		return result, nil
+	}
+
+	// Check if this is a connection error that warrants failover
+	if !isConnectionError(err) {
+		return result, err
+	}
+
+	// Only attempt failover if we have multiple hosts
+	if len(h.hosts) <= 1 {
+		return result, err
+	}
+
+	// Attempt failover
+	if reconnErr := h.Reconnect(); reconnErr != nil {
+		return "", fmt.Errorf("query failed and reconnection failed: %w (original error: %v)", reconnErr, err)
+	}
+
+	// Retry the query on the new connection
+	return h.BinaryClient.Query(query)
+}
+
+// CurrentHost returns the currently connected host address.
+func (h *HAClient) CurrentHost() string {
+	if h.BinaryClient != nil {
+		return h.serverAddr
+	}
+	return ""
+}
+
+// AllHosts returns the list of all configured hosts.
+func (h *HAClient) AllHosts() []string {
+	return h.hosts
+}
+
 // Ping sends a ping message and waits for pong with timeout.
 func (c *BinaryClient) Ping() error {
 	// Set read deadline for ping response
@@ -529,25 +690,26 @@ func (c *BinaryClient) Close() error {
 
 // CLIFlags holds all command-line flags for the CLI.
 type CLIFlags struct {
-	Host       string
-	Port       string
-	Database   string
-	Version    bool
-	Help       bool
-	Verbose    bool
-	Debug      bool
-	Format     string
-	NoColor    bool
-	Execute    string
-	ConfigFile string
+	Host          string
+	Port          string
+	Database      string
+	Version       bool
+	Help          bool
+	Verbose       bool
+	Debug         bool
+	Format        string
+	NoColor       bool
+	Execute       string
+	ConfigFile    string
+	TargetPrimary bool // When true, prefer connecting to primary/leader
 }
 
 // parseFlags parses command-line flags and returns the configuration.
 func parseFlags() CLIFlags {
 	flags := CLIFlags{}
 
-	flag.StringVar(&flags.Host, "host", "localhost", "Server hostname or IP address")
-	flag.StringVar(&flags.Host, "H", "localhost", "Server hostname or IP address (shorthand)")
+	flag.StringVar(&flags.Host, "host", "localhost", "Server hostname(s) - comma-separated for HA cluster")
+	flag.StringVar(&flags.Host, "H", "localhost", "Server hostname(s) (shorthand)")
 	flag.StringVar(&flags.Port, "port", "8889", "Server port number (binary protocol)")
 	flag.StringVar(&flags.Port, "p", "8889", "Server port number (shorthand)")
 	flag.StringVar(&flags.Database, "database", "", "Database to connect to (default: 'default')")
@@ -564,6 +726,7 @@ func parseFlags() CLIFlags {
 	flag.StringVar(&flags.Execute, "e", "", "Execute a command and exit (shorthand)")
 	flag.StringVar(&flags.ConfigFile, "config", "", "Path to configuration file")
 	flag.StringVar(&flags.ConfigFile, "c", "", "Path to configuration file (shorthand)")
+	flag.BoolVar(&flags.TargetPrimary, "target-primary", false, "Prefer connecting to primary/leader in cluster")
 
 	// Custom usage function
 	flag.Usage = printUsage
@@ -584,9 +747,9 @@ func printUsage() {
 	fmt.Println("    fsql -e \"<command>\"")
 	fmt.Println()
 
-	fmt.Println("  " + cli.Highlight("Flags"))
+fmt.Println("  " + cli.Highlight("Flags"))
 	fmt.Println()
-	fmt.Printf("    %s, %s <host>      Server hostname or IP (default: localhost)\n", cli.Info("-H"), cli.Info("--host"))
+	fmt.Printf("    %s, %s <host>      Server hostname(s), comma-separated for HA cluster\n", cli.Info("-H"), cli.Info("--host"))
 	fmt.Printf("    %s, %s <port>      Server port number (default: 8889)\n", cli.Info("-p"), cli.Info("--port"))
 	fmt.Printf("    %s, %s <name>  Database to connect to (default: 'default')\n", cli.Info("-d"), cli.Info("--database"))
 	fmt.Printf("    %s, %s          Print version information and exit\n", cli.Info("-v"), cli.Info("--version"))
@@ -597,6 +760,7 @@ func printUsage() {
 	fmt.Printf("        %s         Disable colored output\n", cli.Info("--no-color"))
 	fmt.Printf("    %s, %s <cmd>    Execute a command and exit\n", cli.Info("-e"), cli.Info("--execute"))
 	fmt.Printf("    %s, %s <file>    Path to configuration file\n", cli.Info("-c"), cli.Info("--config"))
+	fmt.Printf("        %s    Prefer connecting to primary in cluster\n", cli.Info("--target-primary"))
 	fmt.Println()
 
 	fmt.Println("  " + cli.Highlight("Examples"))
@@ -609,6 +773,9 @@ func printUsage() {
 	fmt.Println()
 	fmt.Println("    " + cli.Dimmed("# Connect to remote server"))
 	fmt.Println("    " + cli.Success("fsql -H 192.168.1.100 -p 8889"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("# Connect to HA cluster (multiple hosts)"))
+	fmt.Println("    " + cli.Success("fsql -H node1,node2,node3 -p 8889"))
 	fmt.Println()
 	fmt.Println("    " + cli.Dimmed("# Execute a query and exit"))
 	fmt.Println("    " + cli.Success("fsql -e \"SELECT * FROM users\""))
@@ -680,18 +847,57 @@ func main() {
 		flags.Database = envDB
 	}
 
+	// Parse hosts list for HA cluster support (comma-separated)
+	hosts := parseHosts(flags.Host, flags.Port)
+
 	// Create configuration struct and start the REPL.
 	config := CLIConfig{
-		Host:     flags.Host,
-		Port:     flags.Port,
-		Database: flags.Database,
-		Verbose:  flags.Verbose,
-		Debug:    flags.Debug,
-		Format:   cli.ParseOutputFormat(flags.Format),
-		Execute:  flags.Execute,
+		Host:          flags.Host,
+		Hosts:         hosts,
+		Port:          flags.Port,
+		Database:      flags.Database,
+		Verbose:       flags.Verbose,
+		Debug:         flags.Debug,
+		Format:        cli.ParseOutputFormat(flags.Format),
+		Execute:       flags.Execute,
+		TargetPrimary: flags.TargetPrimary,
 	}
 
 	startREPL(config)
+}
+
+// parseHosts parses the host string (possibly comma-separated) and returns a list of host:port addresses.
+// Supports formats:
+//   - "host1,host2,host3" - comma-separated hosts, all use the same port
+//   - "host1:8889,host2:8890" - comma-separated with individual ports
+func parseHosts(hostStr, defaultPort string) []string {
+	hostStr = strings.TrimSpace(hostStr)
+	if hostStr == "" {
+		return []string{"localhost:" + defaultPort}
+	}
+
+	parts := strings.Split(hostStr, ",")
+	hosts := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+
+		// Check if host already has a port
+		if strings.Contains(part, ":") {
+			hosts = append(hosts, part)
+		} else {
+			hosts = append(hosts, part+":"+defaultPort)
+		}
+	}
+
+	if len(hosts) == 0 {
+		return []string{"localhost:" + defaultPort}
+	}
+
+	return hosts
 }
 
 // loadConfigFile loads CLI configuration from a file.
@@ -722,7 +928,7 @@ func loadConfigFile(path string, flags *CLIFlags) error {
 		value = strings.Trim(value, "\"'")
 
 		switch key {
-		case "host":
+		case "host", "hosts":
 			flags.Host = value
 		case "port":
 			flags.Port = value
@@ -736,6 +942,8 @@ func loadConfigFile(path string, flags *CLIFlags) error {
 			flags.Debug = value == "true"
 		case "no_color":
 			flags.NoColor = value == "true"
+		case "target_primary":
+			flags.TargetPrimary = value == "true"
 		}
 	}
 
@@ -802,31 +1010,65 @@ func startREPL(config CLIConfig) {
 		banner.Print()
 	}
 
-	// Construct the server address
-	addr := config.Host + ":" + config.Port
+	// Use HA cluster connection if multiple hosts are configured
+	isHAMode := len(config.Hosts) > 1
+	var client *BinaryClient
+	var haClient *HAClient
+	var addr string
 
-	// Show connection spinner
-	var spinner *cli.Spinner
-	if config.Execute == "" {
-		spinner = cli.NewSpinner(fmt.Sprintf("Connecting to %s...", addr))
-		spinner.Start()
-	} else if config.Verbose {
-		fmt.Printf("Connecting to %s...\n", addr)
-	}
-
-	// Connect with retry logic
-	client, err := connectWithRetry(addr)
-	if err != nil {
-		if spinner != nil {
-			spinner.StopWithError("Connection failed")
+	if isHAMode {
+		// HA mode: use HAClient for multi-host failover
+		var spinner *cli.Spinner
+		if config.Execute == "" {
+			hostList := strings.Join(config.Hosts, ", ")
+			spinner = cli.NewSpinner(fmt.Sprintf("Connecting to cluster (%s)...", hostList))
+			spinner.Start()
+		} else if config.Verbose {
+			fmt.Printf("Connecting to cluster (%s)...\n", strings.Join(config.Hosts, ", "))
 		}
-		cli.ErrConnectionFailed(config.Host, config.Port, err).Exit()
+
+		haClient = NewHAClient(config.Hosts, config.TargetPrimary)
+		if err := haClient.Connect(); err != nil {
+			if spinner != nil {
+				spinner.StopWithError("Connection failed")
+			}
+			cli.PrintError("Failed to connect to any cluster node: %v", err)
+			os.Exit(1)
+		}
+
+		addr = haClient.CurrentHost()
+		client = haClient.BinaryClient
+
+		if spinner != nil {
+			spinner.StopWithSuccess(fmt.Sprintf("Connected to %s (cluster mode: %d nodes)", addr, len(config.Hosts)))
+		}
+	} else {
+		// Single host mode: use direct connection
+		addr = config.Hosts[0]
+
+		// Show connection spinner
+		var spinner *cli.Spinner
+		if config.Execute == "" {
+			spinner = cli.NewSpinner(fmt.Sprintf("Connecting to %s...", addr))
+			spinner.Start()
+		} else if config.Verbose {
+			fmt.Printf("Connecting to %s...\n", addr)
+		}
+
+		var err error
+		client, err = connectWithRetry(addr)
+		if err != nil {
+			if spinner != nil {
+				spinner.StopWithError("Connection failed")
+			}
+			cli.ErrConnectionFailed(config.Host, config.Port, err).Exit()
+		}
+
+		if spinner != nil {
+			spinner.StopWithSuccess(fmt.Sprintf("Connected to %s", addr))
+		}
 	}
 	defer client.Close()
-
-	if spinner != nil {
-		spinner.StopWithSuccess(fmt.Sprintf("Connected to %s", addr))
-	}
 
 	// Set up signal handling for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
@@ -1013,7 +1255,7 @@ func startREPL(config CLIConfig) {
 				rl.SaveHistory(sanitized)
 			}
 
-			response, err := handleAuthCommand(rl, client, input, config)
+			response, err := handleAuthCommand(rl, client, haClient, input, config)
 			if err != nil {
 				printErrorMessage(err.Error())
 				continue
@@ -1033,14 +1275,31 @@ func startREPL(config CLIConfig) {
 				// Try to reconnect with spinner
 				spinner := cli.NewSpinner("Reconnecting...")
 				spinner.Start()
-				newClient, reconnErr := connectWithRetry(addr)
-				if reconnErr != nil {
-					spinner.StopWithError("Failed to reconnect")
-					cli.PrintError("Exiting...")
-					os.Exit(1)
+
+				if isHAMode && haClient != nil {
+					// HA mode: use haClient.Reconnect() to try other nodes
+					reconnErr := haClient.Reconnect()
+					if reconnErr != nil {
+						spinner.StopWithError("Failed to reconnect to any cluster node")
+						cli.PrintError("Exiting...")
+						os.Exit(1)
+					}
+					// Update client reference to new connection
+					client = haClient.BinaryClient
+					addr = haClient.CurrentHost()
+					spinner.StopWithSuccess(fmt.Sprintf("Reconnected to %s", addr))
+				} else {
+					// Single host mode: retry the same address
+					newClient, reconnErr := connectWithRetry(addr)
+					if reconnErr != nil {
+						spinner.StopWithError("Failed to reconnect")
+						cli.PrintError("Exiting...")
+						os.Exit(1)
+					}
+					client = newClient
+					spinner.StopWithSuccess("Reconnected successfully!")
 				}
-				client = newClient
-				spinner.StopWithSuccess("Reconnected successfully!")
+
 				// Retry the command
 				response, err = processCommand(client, input, config)
 				if err != nil {
@@ -1068,7 +1327,8 @@ func isAuthCommand(input string) bool {
 // 1. "AUTH" - prompts for both username and password
 // 2. "AUTH username" - prompts for password only
 // 3. "AUTH username password" - warns about security and proceeds
-func handleAuthCommand(rl *readline.Instance, client *BinaryClient, input string, config CLIConfig) (string, error) {
+// When haClient is non-nil (HA mode), credentials are cached for reconnection.
+func handleAuthCommand(rl *readline.Instance, client *BinaryClient, haClient *HAClient, input string, config CLIConfig) (string, error) {
 	parts := strings.Fields(input)
 
 	var username, password string
@@ -1119,7 +1379,17 @@ func handleAuthCommand(rl *readline.Instance, client *BinaryClient, input string
 	}
 
 	// Perform authentication
-	result, err := client.Auth(username, password)
+	var result string
+	var err error
+
+	if haClient != nil {
+		// HA mode: use haClient.Auth() to cache credentials for reconnection
+		result, err = haClient.Auth(username, password)
+	} else {
+		// Single host mode: use direct client
+		result, err = client.Auth(username, password)
+	}
+
 	if err != nil {
 		return "", err
 	}
@@ -1782,8 +2052,20 @@ func printStatus(config CLIConfig, client *BinaryClient) {
 		dbName = "default"
 	}
 
+	// Check if we're in HA/cluster mode
+	isClusterMode := len(config.Hosts) > 1
+
 	fmt.Printf("    %s %s %s\n", cli.Dimmed("Status:"), statusIcon, statusText)
-	fmt.Printf("    %s %s\n", cli.Dimmed("Server:"), config.Host+":"+config.Port)
+	fmt.Printf("    %s %s\n", cli.Dimmed("Server:"), client.serverAddr)
+	if isClusterMode {
+		fmt.Printf("    %s %s (%d nodes)\n", cli.Dimmed("Mode:"), cli.Info("Cluster/HA"), len(config.Hosts))
+		fmt.Printf("    %s %s\n", cli.Dimmed("Nodes:"), strings.Join(config.Hosts, ", "))
+		if config.TargetPrimary {
+			fmt.Printf("    %s %s\n", cli.Dimmed("Target:"), cli.Success("Primary/Leader"))
+		}
+	} else {
+		fmt.Printf("    %s %s\n", cli.Dimmed("Mode:"), "Single node")
+	}
 	fmt.Printf("    %s %s\n", cli.Dimmed("Database:"), cli.Success(dbName))
 	fmt.Printf("    %s %s\n", cli.Dimmed("Protocol:"), "Binary")
 	fmt.Printf("    %s %s\n", cli.Dimmed("Format:"), string(config.Format))
