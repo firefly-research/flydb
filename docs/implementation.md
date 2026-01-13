@@ -2313,7 +2313,10 @@ FlyDB's approach is similar to PostgreSQL and MySQL in framing, but uses JSON pa
 
 ### Overview
 
-The `flydb-dump` utility provides database export and import functionality, supporting multiple output formats for different use cases.
+The `flydb-dump` utility provides database export and import functionality, supporting multiple output formats for different use cases. It operates in two modes:
+
+- **Local Mode**: Direct file system access to FlyDB data directories (for offline backups)
+- **Remote Mode**: Network connection to running FlyDB servers (for live backups and cluster support)
 
 ### Architecture
 
@@ -2321,8 +2324,15 @@ The `flydb-dump` utility provides database export and import functionality, supp
 ┌─────────────────────────────────────────────────────────────────┐
 │                      flydb-dump                                  │
 │  ┌─────────────────────────────────────────────────────────────┐ │
+│  │                    Connection Layer                         │ │
+│  │  - Local: Direct storage access via SDK                    │ │
+│  │  - Remote: Binary protocol over TCP                        │ │
+│  │  - HAClient: Cluster failover and leader discovery         │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│  ┌─────────────────────────────────────────────────────────────┐ │
 │  │                    Dumper                                   │ │
-│  │  - Connects to FlyDB server via SDK                        │ │
+│  │  - LocalDumper: Direct storage access                      │ │
+│  │  - RemoteDumper: SQL queries over network                  │ │
 │  │  - Retrieves schema and data                               │ │
 │  │  - Formats output based on selected format                 │ │
 │  └─────────────────────────────────────────────────────────────┘ │
@@ -2337,9 +2347,76 @@ The `flydb-dump` utility provides database export and import functionality, supp
 │  │  - Parses SQL dump files                                   │ │
 │  │  - Executes statements in order                            │ │
 │  │  - Handles errors gracefully                               │ │
+│  │  - Remote: Automatic leader discovery for writes           │ │
 │  └─────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Connection Modes
+
+#### Local Mode (`-d`)
+
+Local mode provides direct file system access to FlyDB data directories. This is useful for:
+- Offline backups when the server is not running
+- Accessing encrypted databases with passphrase
+- Maximum performance for large exports
+
+```bash
+# Local mode export
+fdump -d /var/lib/flydb -db mydb -o backup.sql
+
+# Local mode with encryption
+fdump -d /var/lib/flydb --passphrase secret -o backup.sql
+
+# Local mode import
+fdump -d /var/lib/flydb --import backup.sql
+```
+
+#### Remote Mode (`--host`)
+
+Remote mode connects to running FlyDB servers over the network. This is useful for:
+- Live backups without stopping the server
+- Cluster-aware exports with automatic failover
+- Remote database administration
+
+```bash
+# Remote mode export
+fdump --host localhost --port 8889 -U admin -P -o backup.sql
+
+# Remote mode with cluster (comma-separated hosts)
+fdump --host node1,node2,node3 -U admin -P -o backup.sql
+
+# Remote mode import (discovers leader for writes)
+fdump --host node1,node2,node3 -U admin -P --import backup.sql
+```
+
+### Cluster Support
+
+The remote mode includes full cluster support with:
+
+- **Multi-host connections**: Specify multiple hosts for automatic failover
+- **Leader discovery**: Automatically finds the cluster leader for write operations
+- **Connection retry**: Configurable retry logic with exponential backoff
+- **Credential caching**: Re-authenticates automatically after failover
+
+```bash
+# Connect to any available node in a 3-node cluster
+fdump --host node1.example.com,node2.example.com,node3.example.com \
+      --port 8889 -U admin -P -o backup.sql
+
+# Hosts with individual ports
+fdump --host node1:8889,node2:8890,node3:8891 -U admin -P -o backup.sql
+```
+
+### Connection Options
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-d <path>` | Data directory (local mode) | - |
+| `--host <hosts>` | Server hostname(s), comma-separated | - |
+| `--port <port>` | Server port | 8889 |
+| `--connect-timeout` | Connection timeout | 10s |
+| `--query-timeout` | Query timeout | 30s |
 
 ### Output Formats
 
