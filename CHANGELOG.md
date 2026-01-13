@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Cluster Mode Fixes and HA Client Support
 
-This release fixes several critical issues with cluster mode operation and adds High-Availability client connection support to the CLI tools.
+This release fixes several critical issues with cluster mode operation and adds High-Availability client connection support to the CLI tools, including full remote connection support for the `flydb-dump` utility.
 
 ### Fixed
 
@@ -31,22 +31,44 @@ This release fixes several critical issues with cluster mode operation and adds 
 - **Cluster status display**: `\status` and `\conninfo` now show cluster connection information
 - **Config file support**: Configure HA hosts via config file with `hosts` and `target_primary` options
 
+#### Remote Connection Support (flydb-dump)
+- **Remote mode**: Export and import databases over the network using `--host` and `--port` flags
+- **Cluster support**: Connect to multiple cluster nodes with comma-separated hosts for automatic failover
+- **Leader discovery**: Automatic leader discovery for write operations during import
+- **Connection retry**: Configurable retry logic with exponential backoff on connection failures
+- **All export formats**: Remote mode supports SQL, CSV, and JSON export formats
+- **Remote import**: Import SQL dump files to remote servers with progress tracking
+- **Timeout configuration**: `--connect-timeout` and `--query-timeout` flags for network operations
+
 ### Changed
 
 - **Connection display**: Status commands now show actual connected server address instead of config host
 - **Flag descriptions**: Updated `-H`/`--host` flag description to indicate HA cluster support
+- **flydb-dump modes**: Now supports both local mode (`-d`) and remote mode (`--host`)
 
 ### Usage Examples
 
 ```bash
-# Connect to a 3-node cluster
+# fsql: Connect to a 3-node cluster
 fsql -H node1,node2,node3 -p 8889
 
-# Hosts with individual ports
+# fsql: Hosts with individual ports
 fsql -H node1:8889,node2:8890,node3:8891
 
-# Prefer connecting to primary/leader
+# fsql: Prefer connecting to primary/leader
 fsql -H node1,node2,node3 -p 8889 --target-primary
+
+# flydb-dump: Remote export from server
+fdump --host localhost --port 8889 -U admin -P -o backup.sql
+
+# flydb-dump: Cluster export (connects to any available node)
+fdump --host node1,node2,node3 -U admin -P -o backup.sql
+
+# flydb-dump: Remote import to cluster (discovers leader)
+fdump --host node1,node2,node3 -U admin -P --import backup.sql
+
+# flydb-dump: Export specific tables as JSON
+fdump --host localhost -t users,orders -f json -o data.json
 ```
 
 ---
