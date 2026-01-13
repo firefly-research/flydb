@@ -155,6 +155,20 @@ type Config struct {
 	SyncTimeout       int    `toml:"sync_timeout_ms" json:"sync_timeout_ms"`               // Timeout for sync replication in ms
 	MaxReplicationLag int    `toml:"max_replication_lag_ms" json:"max_replication_lag_ms"` // Max acceptable replication lag in ms
 
+	// Raft consensus configuration
+	EnableRaft           bool `toml:"enable_raft" json:"enable_raft"`                         // Enable Raft-based consensus (replaces Bully)
+	RaftElectionTimeout  int  `toml:"raft_election_timeout_ms" json:"raft_election_timeout_ms"` // Raft election timeout in ms
+	RaftHeartbeatInterval int `toml:"raft_heartbeat_interval_ms" json:"raft_heartbeat_interval_ms"` // Raft heartbeat interval in ms
+
+	// Compression configuration
+	EnableCompression      bool   `toml:"enable_compression" json:"enable_compression"`           // Enable compression for WAL and replication
+	CompressionAlgorithm   string `toml:"compression_algorithm" json:"compression_algorithm"`     // gzip, lz4, snappy, or zstd
+	CompressionMinSize     int    `toml:"compression_min_size" json:"compression_min_size"`       // Minimum size to compress (bytes)
+
+	// Performance configuration
+	EnableZeroCopy         bool `toml:"enable_zero_copy" json:"enable_zero_copy"`               // Enable zero-copy buffer pooling
+	BufferPoolSizeBytes    int  `toml:"buffer_pool_size_bytes" json:"buffer_pool_size_bytes"`   // Buffer pool size in bytes (0 = auto)
+
 	// Storage configuration
 	DBPath         string `toml:"db_path" json:"db_path"`
 	DataDir        string `toml:"data_dir" json:"data_dir"`               // Directory for multi-database storage
@@ -210,6 +224,20 @@ func DefaultConfig() *Config {
 		ReplicationMode:   "async",
 		SyncTimeout:       5000,  // 5s
 		MaxReplicationLag: 10000, // 10s
+
+		// Raft consensus
+		EnableRaft:            true,  // Enable Raft by default for cluster mode
+		RaftElectionTimeout:   1000,  // 1s
+		RaftHeartbeatInterval: 150,   // 150ms
+
+		// Compression
+		EnableCompression:    false,  // Disabled by default for compatibility
+		CompressionAlgorithm: "gzip", // Default to gzip
+		CompressionMinSize:   256,    // Minimum 256 bytes to compress
+
+		// Performance
+		EnableZeroCopy:      true, // Enable zero-copy by default
+		BufferPoolSizeBytes: 0,    // 0 = auto-size
 
 		// Storage
 		DBPath:         "flydb.fdb",
@@ -807,6 +835,31 @@ func (c *Config) ToTOML() string {
 	sb.WriteString(fmt.Sprintf("replication_mode = \"%s\"\n", c.ReplicationMode))
 	sb.WriteString(fmt.Sprintf("sync_timeout_ms = %d\n", c.SyncTimeout))
 	sb.WriteString(fmt.Sprintf("max_replication_lag_ms = %d\n\n", c.MaxReplicationLag))
+
+	// Raft consensus configuration (01.26.13+)
+	sb.WriteString("# Raft Consensus Configuration (01.26.13+)\n")
+	sb.WriteString("# Enable Raft consensus for leader election (replaces legacy Bully algorithm)\n")
+	sb.WriteString("# Raft provides stronger consistency guarantees and pre-vote protocol\n")
+	sb.WriteString(fmt.Sprintf("enable_raft = %v\n", c.EnableRaft))
+	sb.WriteString(fmt.Sprintf("raft_election_timeout_ms = %d\n", c.RaftElectionTimeout))
+	sb.WriteString(fmt.Sprintf("raft_heartbeat_interval_ms = %d\n\n", c.RaftHeartbeatInterval))
+
+	// Compression configuration (01.26.13+)
+	sb.WriteString("# Compression Configuration (01.26.13+)\n")
+	sb.WriteString("# Enable compression for WAL entries and replication traffic\n")
+	sb.WriteString("# Reduces disk I/O and network bandwidth at the cost of CPU\n")
+	sb.WriteString(fmt.Sprintf("enable_compression = %v\n", c.EnableCompression))
+	sb.WriteString("# Compression algorithm: gzip, lz4, snappy, or zstd\n")
+	sb.WriteString(fmt.Sprintf("compression_algorithm = \"%s\"\n", c.CompressionAlgorithm))
+	sb.WriteString("# Minimum payload size in bytes to compress (smaller payloads skip compression)\n")
+	sb.WriteString(fmt.Sprintf("compression_min_size = %d\n\n", c.CompressionMinSize))
+
+	// Performance configuration (01.26.13+)
+	sb.WriteString("# Performance Configuration (01.26.13+)\n")
+	sb.WriteString("# Enable zero-copy buffer pooling for reduced memory allocations\n")
+	sb.WriteString(fmt.Sprintf("enable_zero_copy = %v\n", c.EnableZeroCopy))
+	sb.WriteString("# Buffer pool size in bytes for zero-copy operations (0 = auto-size)\n")
+	sb.WriteString(fmt.Sprintf("buffer_pool_size_bytes = %d\n\n", c.BufferPoolSizeBytes))
 
 	sb.WriteString("# Storage\n")
 	sb.WriteString(fmt.Sprintf("data_dir = \"%s\"\n", c.DataDir))

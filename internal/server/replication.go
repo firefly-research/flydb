@@ -162,17 +162,25 @@ type ReplicationConfig struct {
 
 	// EnableCompression enables compression for replication traffic
 	EnableCompression bool
+
+	// CompressionAlgorithm specifies the compression algorithm ("gzip", "lz4", "snappy", "zstd")
+	CompressionAlgorithm string
+
+	// CompressionMinSize is the minimum payload size to compress (default 256)
+	CompressionMinSize int
 }
 
 // DefaultReplicationConfig returns sensible defaults
 func DefaultReplicationConfig() ReplicationConfig {
 	return ReplicationConfig{
-		Mode:              ReplicationAsync,
-		SyncTimeout:       5 * time.Second,
-		MaxLagThreshold:   10 * time.Second,
-		PollInterval:      100 * time.Millisecond,
-		ReconnectInterval: 3 * time.Second,
-		EnableCompression: false,
+		Mode:                 ReplicationAsync,
+		SyncTimeout:          5 * time.Second,
+		MaxLagThreshold:      10 * time.Second,
+		PollInterval:         100 * time.Millisecond,
+		ReconnectInterval:    3 * time.Second,
+		EnableCompression:    false,
+		CompressionAlgorithm: "gzip",
+		CompressionMinSize:   256,
 	}
 }
 

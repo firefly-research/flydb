@@ -111,6 +111,20 @@ type Config struct {
 	ReplicationMode   string // async, semi_sync, or sync
 	SyncTimeout       int    // Timeout for sync replication in ms
 	MaxReplicationLag int    // Max acceptable replication lag in ms
+
+	// Raft consensus configuration (01.26.13+)
+	EnableRaft            bool // Enable Raft consensus (replaces Bully)
+	RaftElectionTimeout   int  // Raft election timeout in ms
+	RaftHeartbeatInterval int  // Raft heartbeat interval in ms
+
+	// Compression configuration (01.26.13+)
+	EnableCompression    bool   // Enable compression for WAL and replication
+	CompressionAlgorithm string // gzip, lz4, snappy, or zstd
+	CompressionMinSize   int    // Minimum size to compress (bytes)
+
+	// Performance configuration (01.26.13+)
+	EnableZeroCopy      bool // Enable zero-copy buffer pooling
+	BufferPoolSizeBytes int  // Buffer pool size in bytes (0 = auto)
 }
 
 // DefaultConfig returns the default configuration values.
@@ -148,6 +162,20 @@ func DefaultConfig() Config {
 		ReplicationMode:   "async",
 		SyncTimeout:       5000,  // 5s
 		MaxReplicationLag: 10000, // 10s
+
+		// Raft consensus defaults (01.26.13+)
+		EnableRaft:            true, // Enable Raft by default
+		RaftElectionTimeout:   1000, // 1s
+		RaftHeartbeatInterval: 150,  // 150ms
+
+		// Compression defaults (01.26.13+)
+		EnableCompression:    false,  // Disabled by default
+		CompressionAlgorithm: "gzip", // Default to gzip
+		CompressionMinSize:   256,    // 256 bytes minimum
+
+		// Performance defaults (01.26.13+)
+		EnableZeroCopy:      true, // Enabled by default
+		BufferPoolSizeBytes: 0,    // Auto-size
 	}
 }
 
@@ -185,6 +213,20 @@ func FromConfig(cfg *config.Config) Config {
 		ReplicationMode:   cfg.ReplicationMode,
 		SyncTimeout:       cfg.SyncTimeout,
 		MaxReplicationLag: cfg.MaxReplicationLag,
+
+		// Raft consensus configuration (01.26.13+)
+		EnableRaft:            cfg.EnableRaft,
+		RaftElectionTimeout:   cfg.RaftElectionTimeout,
+		RaftHeartbeatInterval: cfg.RaftHeartbeatInterval,
+
+		// Compression configuration (01.26.13+)
+		EnableCompression:    cfg.EnableCompression,
+		CompressionAlgorithm: cfg.CompressionAlgorithm,
+		CompressionMinSize:   cfg.CompressionMinSize,
+
+		// Performance configuration (01.26.13+)
+		EnableZeroCopy:      cfg.EnableZeroCopy,
+		BufferPoolSizeBytes: cfg.BufferPoolSizeBytes,
 	}
 }
 
@@ -228,6 +270,20 @@ func (c *Config) ToConfig() *config.Config {
 		ReplicationMode:   c.ReplicationMode,
 		SyncTimeout:       c.SyncTimeout,
 		MaxReplicationLag: c.MaxReplicationLag,
+
+		// Raft consensus configuration (01.26.13+)
+		EnableRaft:            c.EnableRaft,
+		RaftElectionTimeout:   c.RaftElectionTimeout,
+		RaftHeartbeatInterval: c.RaftHeartbeatInterval,
+
+		// Compression configuration (01.26.13+)
+		EnableCompression:    c.EnableCompression,
+		CompressionAlgorithm: c.CompressionAlgorithm,
+		CompressionMinSize:   c.CompressionMinSize,
+
+		// Performance configuration (01.26.13+)
+		EnableZeroCopy:      c.EnableZeroCopy,
+		BufferPoolSizeBytes: c.BufferPoolSizeBytes,
 	}
 }
 
@@ -894,6 +950,87 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 		}
 	}
 
+	// Configure performance options (01.26.13+)
+	stepNum++
+	printStepHeader(stepNum, "Performance Options (01.26.13+)")
+	fmt.Println()
+	fmt.Printf("    %s These features are new in FlyDB 01.26.13\n", cli.Dimmed("•"))
+	fmt.Println()
+
+	// Raft consensus (for cluster mode)
+	if cfg.Role == "cluster" {
+		fmt.Printf("    %s\n", cli.Highlight("Consensus Algorithm"))
+		fmt.Printf("    %s Raft provides stronger consistency than Bully\n", cli.Dimmed("•"))
+		fmt.Println()
+		fmt.Printf("    %s  Raft   %s\n", cli.Success("[1]"), cli.Dimmed("(recommended) - Strong consistency, pre-vote protocol"))
+		fmt.Printf("    %s  Bully  %s\n", cli.Highlight("[2]"), cli.Dimmed("(legacy) - Simple leader election based on node ID"))
+		fmt.Println()
+
+		defaultConsensus := "1"
+		if !cfg.EnableRaft {
+			defaultConsensus = "2"
+		}
+		consensusChoice := promptWithDefault(reader, "  Select consensus algorithm", defaultConsensus)
+		cfg.EnableRaft = consensusChoice != "2"
+		fmt.Println()
+	}
+
+	// Compression
+	fmt.Printf("    %s\n", cli.Highlight("Compression"))
+	fmt.Printf("    %s Compress WAL entries and replication traffic\n", cli.Dimmed("•"))
+	fmt.Println()
+
+	defaultCompression := "n"
+	if cfg.EnableCompression {
+		defaultCompression = "y"
+	}
+	compressionChoice := promptWithDefault(reader, "  Enable compression? (y/n)", defaultCompression)
+	cfg.EnableCompression = strings.ToLower(compressionChoice) == "y" || strings.ToLower(compressionChoice) == "yes"
+
+	if cfg.EnableCompression {
+		fmt.Println()
+		fmt.Printf("    %s  gzip   %s\n", cli.Success("[1]"), cli.Dimmed("Good compression ratio, moderate speed"))
+		fmt.Printf("    %s  lz4    %s\n", cli.Highlight("[2]"), cli.Dimmed("Very fast, lower compression ratio"))
+		fmt.Printf("    %s  snappy %s\n", cli.Highlight("[3]"), cli.Dimmed("Fast, balanced for real-time use"))
+		fmt.Printf("    %s  zstd   %s\n", cli.Highlight("[4]"), cli.Dimmed("Best compression ratio"))
+		fmt.Println()
+
+		defaultAlg := "1"
+		switch cfg.CompressionAlgorithm {
+		case "lz4":
+			defaultAlg = "2"
+		case "snappy":
+			defaultAlg = "3"
+		case "zstd":
+			defaultAlg = "4"
+		}
+		algChoice := promptWithDefault(reader, "  Select algorithm", defaultAlg)
+		switch algChoice {
+		case "2":
+			cfg.CompressionAlgorithm = "lz4"
+		case "3":
+			cfg.CompressionAlgorithm = "snappy"
+		case "4":
+			cfg.CompressionAlgorithm = "zstd"
+		default:
+			cfg.CompressionAlgorithm = "gzip"
+		}
+	}
+	fmt.Println()
+
+	// Zero-copy buffer pooling
+	fmt.Printf("    %s\n", cli.Highlight("Zero-Copy Buffer Pooling"))
+	fmt.Printf("    %s Reduces memory allocations and GC pressure\n", cli.Dimmed("•"))
+	fmt.Println()
+
+	defaultZeroCopy := "y"
+	if !cfg.EnableZeroCopy {
+		defaultZeroCopy = "n"
+	}
+	zeroCopyChoice := promptWithDefault(reader, "  Enable zero-copy? (y/n)", defaultZeroCopy)
+	cfg.EnableZeroCopy = strings.ToLower(zeroCopyChoice) == "y" || strings.ToLower(zeroCopyChoice) == "yes"
+	fmt.Println()
+
 	// Configure logging
 	stepNum++
 	printStepHeader(stepNum, "Logging")
@@ -1065,7 +1202,34 @@ func printSummary(cfg *Config) {
 		fmt.Println("  " + cli.Warning("═══════════════════════════════════════════════════════"))
 	}
 
+	// Performance options (01.26.13+)
+	fmt.Println()
+	fmt.Println("  " + cli.Highlight("Performance (01.26.13+)"))
+	fmt.Println("  " + cli.Separator(56))
+	fmt.Println()
+
+	if cfg.Role == "cluster" {
+		consensusAlg := "Raft"
+		if !cfg.EnableRaft {
+			consensusAlg = "Bully (legacy)"
+		}
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Consensus:"), consensusAlg)
+	}
+
+	if cfg.EnableCompression {
+		fmt.Printf("    %-16s %s (%s)\n", cli.Dimmed("Compression:"), cli.Success("enabled"), cfg.CompressionAlgorithm)
+	} else {
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Compression:"), cli.Dimmed("disabled"))
+	}
+
+	if cfg.EnableZeroCopy {
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Zero-Copy:"), cli.Success("enabled"))
+	} else {
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Zero-Copy:"), cli.Dimmed("disabled"))
+	}
+
 	// Logging
+	fmt.Println()
 	fmt.Printf("    %-16s %s%s\n", cli.Dimmed("Log Level:"), cfg.LogLevel, formatJSONLogging(cfg.LogJSON))
 
 	// Admin password

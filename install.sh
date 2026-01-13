@@ -23,8 +23,8 @@ set -euo pipefail
 # Configuration and Defaults
 # =============================================================================
 
-readonly SCRIPT_VERSION="01.26.12"
-readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.12}"
+readonly SCRIPT_VERSION="01.26.13"
+readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.13}"
 readonly GITHUB_REPO="firefly-oss/flydb"
 readonly DOWNLOAD_BASE_URL="https://github.com/${GITHUB_REPO}/releases/download"
 
@@ -97,6 +97,20 @@ ENCRYPTION_PASSPHRASE=""
 # Logging configuration
 LOG_LEVEL="info"
 LOG_JSON="false"
+
+# Raft consensus configuration (01.26.13+)
+ENABLE_RAFT="true"
+RAFT_ELECTION_TIMEOUT="1000"
+RAFT_HEARTBEAT_INTERVAL="150"
+
+# Compression configuration (01.26.13+)
+ENABLE_COMPRESSION="false"
+COMPRESSION_ALGORITHM="gzip"
+COMPRESSION_MIN_SIZE="256"
+
+# Performance configuration (01.26.13+)
+ENABLE_ZERO_COPY="true"
+BUFFER_POOL_SIZE_BYTES="0"
 
 # Track if advanced configuration was requested
 ADVANCED_CONFIG=false
@@ -366,6 +380,22 @@ print_help() {
     echo -e "${BOLD}STORAGE OPTIONS:${RESET}"
     echo -e "    ${BOLD}--buffer-pool-size <pages>${RESET} Buffer pool size in pages (0=auto)"
     echo -e "    ${BOLD}--checkpoint-secs <secs>${RESET}  Checkpoint interval in seconds (default: 60)"
+    echo ""
+    echo -e "${BOLD}CONSENSUS OPTIONS (01.26.13+):${RESET}"
+    echo -e "    ${BOLD}--enable-raft${RESET}             Use Raft consensus for leader election (default: enabled)"
+    echo -e "    ${BOLD}--disable-raft${RESET}            Use legacy Bully algorithm for leader election"
+    echo -e "    ${BOLD}--raft-election-timeout <ms>${RESET} Raft election timeout (default: 1000)"
+    echo -e "    ${BOLD}--raft-heartbeat-interval <ms>${RESET} Raft heartbeat interval (default: 150)"
+    echo ""
+    echo -e "${BOLD}COMPRESSION OPTIONS (01.26.13+):${RESET}"
+    echo -e "    ${BOLD}--enable-compression${RESET}      Enable compression for WAL and replication"
+    echo -e "    ${BOLD}--compression-algorithm <alg>${RESET} Algorithm: gzip, lz4, snappy, zstd (default: gzip)"
+    echo -e "    ${BOLD}--compression-min-size <bytes>${RESET} Minimum size to compress (default: 256)"
+    echo ""
+    echo -e "${BOLD}PERFORMANCE OPTIONS (01.26.13+):${RESET}"
+    echo -e "    ${BOLD}--enable-zero-copy${RESET}        Enable zero-copy buffer pooling (default: enabled)"
+    echo -e "    ${BOLD}--disable-zero-copy${RESET}       Disable zero-copy buffer pooling"
+    echo -e "    ${BOLD}--buffer-pool-bytes <bytes>${RESET} Buffer pool size in bytes (0=auto)"
     echo ""
     echo -e "${BOLD}EXAMPLES:${RESET}"
     echo "    # Interactive installation (recommended for first-time users)"
@@ -1446,11 +1476,96 @@ wizard_step_security() {
     print_success "Security configuration complete"
 }
 
-wizard_step_logging() {
+wizard_step_performance() {
     # Step number depends on role: standalone=6, master=6, slave=7, cluster=7
     local step_num="6"
     if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
         step_num="7"
+    fi
+
+    wizard_step_header "$step_num" "Performance Options (01.26.13+)"
+
+    echo "  Configure performance optimizations:"
+    echo ""
+    echo -e "  ${DIM}These features are new in FlyDB 01.26.13 and can improve${RESET}"
+    echo -e "  ${DIM}throughput and reduce memory usage.${RESET}"
+    echo ""
+
+    # Raft consensus (for cluster mode)
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        echo -e "  ${BOLD}Consensus Algorithm${RESET}"
+        echo -e "  ${DIM}Raft provides stronger consistency guarantees than Bully.${RESET}"
+        echo ""
+        echo -e "  ${GREEN}[1]${RESET} ${BOLD}Raft${RESET}   ${DIM}(recommended) - Strong consistency, pre-vote protocol${RESET}"
+        echo -e "  ${YELLOW}[2]${RESET} ${BOLD}Bully${RESET}  ${DIM}(legacy) - Simple leader election based on node ID${RESET}"
+        echo ""
+
+        local consensus_choice
+        consensus_choice=$(prompt "Select consensus algorithm" "1")
+        case "$consensus_choice" in
+            1) ENABLE_RAFT="true" ;;
+            2) ENABLE_RAFT="false" ;;
+            *) ENABLE_RAFT="true" ;;
+        esac
+        echo ""
+    fi
+
+    # Compression
+    echo -e "  ${BOLD}Compression${RESET}"
+    echo -e "  ${DIM}Compress WAL entries and replication traffic to reduce I/O.${RESET}"
+    echo ""
+
+    if prompt_yes_no "Enable compression?" "n"; then
+        ENABLE_COMPRESSION="true"
+        echo ""
+        echo -e "  ${DIM}Select compression algorithm:${RESET}"
+        echo ""
+        echo -e "  ${GREEN}[1]${RESET} ${BOLD}gzip${RESET}   ${DIM}Good compression ratio, moderate speed${RESET}"
+        echo -e "  ${CYAN}[2]${RESET} ${BOLD}lz4${RESET}    ${DIM}Very fast, lower compression ratio${RESET}"
+        echo -e "  ${BLUE}[3]${RESET} ${BOLD}snappy${RESET} ${DIM}Fast, balanced for real-time use${RESET}"
+        echo -e "  ${MAGENTA}[4]${RESET} ${BOLD}zstd${RESET}   ${DIM}Best compression ratio, configurable speed${RESET}"
+        echo ""
+
+        local alg_choice
+        alg_choice=$(prompt "Select algorithm" "1")
+        case "$alg_choice" in
+            1) COMPRESSION_ALGORITHM="gzip" ;;
+            2) COMPRESSION_ALGORITHM="lz4" ;;
+            3) COMPRESSION_ALGORITHM="snappy" ;;
+            4) COMPRESSION_ALGORITHM="zstd" ;;
+            *) COMPRESSION_ALGORITHM="gzip" ;;
+        esac
+
+        local min_size
+        min_size=$(prompt "Minimum size to compress (bytes)" "$COMPRESSION_MIN_SIZE")
+        if [[ "$min_size" =~ ^[0-9]+$ ]]; then
+            COMPRESSION_MIN_SIZE="$min_size"
+        fi
+    else
+        ENABLE_COMPRESSION="false"
+    fi
+    echo ""
+
+    # Zero-copy buffer pooling
+    echo -e "  ${BOLD}Zero-Copy Buffer Pooling${RESET}"
+    echo -e "  ${DIM}Reduces memory allocations and GC pressure for better throughput.${RESET}"
+    echo ""
+
+    if prompt_yes_no "Enable zero-copy buffer pooling?" "y"; then
+        ENABLE_ZERO_COPY="true"
+    else
+        ENABLE_ZERO_COPY="false"
+    fi
+
+    echo ""
+    print_success "Performance options configured"
+}
+
+wizard_step_logging() {
+    # Step number depends on role: standalone=7, master=7, slave=8, cluster=8
+    local step_num="7"
+    if [[ "$SERVER_ROLE" == "slave" ]] || [[ "$SERVER_ROLE" == "cluster" ]]; then
+        step_num="8"
     fi
 
     wizard_step_header "$step_num" "Logging Configuration"
@@ -1584,6 +1699,7 @@ run_interactive_wizard() {
     # Common configuration
     wizard_step_storage
     wizard_step_security
+    wizard_step_performance
     wizard_step_logging
     wizard_step_service
     wizard_step_init_database
@@ -1724,6 +1840,29 @@ print_installation_summary() {
         fi
     else
         print_kv "Encryption" "${YELLOW}Disabled${RESET}"
+    fi
+    echo ""
+
+    # Performance Configuration (01.26.13+)
+    echo -e "  ${BOLD}Performance Options (01.26.13+)${RESET}"
+    separator 60
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        if [[ "$ENABLE_RAFT" == "true" ]]; then
+            print_kv "Consensus" "${GREEN}Raft${RESET} (recommended)"
+        else
+            print_kv "Consensus" "${YELLOW}Bully${RESET} (legacy)"
+        fi
+    fi
+    if [[ "$ENABLE_COMPRESSION" == "true" ]]; then
+        print_kv "Compression" "${GREEN}Enabled${RESET} (${COMPRESSION_ALGORITHM})"
+        print_kv "Min Size" "${COMPRESSION_MIN_SIZE} bytes"
+    else
+        print_kv "Compression" "${DIM}Disabled${RESET}"
+    fi
+    if [[ "$ENABLE_ZERO_COPY" == "true" ]]; then
+        print_kv "Zero-Copy" "${GREEN}Enabled${RESET}"
+    else
+        print_kv "Zero-Copy" "${DIM}Disabled${RESET}"
     fi
     echo ""
 
@@ -2200,6 +2339,51 @@ sync_timeout_ms = ${SYNC_TIMEOUT}
 
 # Maximum replication lag in milliseconds before replica is unhealthy
 max_replication_lag_ms = ${MAX_REPLICATION_LAG}
+
+# =============================================================================
+# Raft Consensus Configuration (01.26.13+)
+# =============================================================================
+
+# Enable Raft consensus for leader election (replaces legacy Bully algorithm)
+# Raft provides stronger consistency guarantees and pre-vote protocol
+enable_raft = ${ENABLE_RAFT}
+
+# Raft election timeout in milliseconds
+# Randomized between 1x and 2x this value to prevent split votes
+raft_election_timeout_ms = ${RAFT_ELECTION_TIMEOUT}
+
+# Raft heartbeat interval in milliseconds
+# Leader sends heartbeats at this interval to maintain authority
+raft_heartbeat_interval_ms = ${RAFT_HEARTBEAT_INTERVAL}
+
+# =============================================================================
+# Compression Configuration (01.26.13+)
+# =============================================================================
+
+# Enable compression for WAL entries and replication traffic
+# Reduces disk I/O and network bandwidth at the cost of CPU
+enable_compression = ${ENABLE_COMPRESSION}
+
+# Compression algorithm: gzip, lz4, snappy, or zstd
+# - gzip: Good compression ratio, moderate speed
+# - lz4: Very fast, lower compression ratio
+# - snappy: Fast, balanced for real-time use
+# - zstd: Best compression ratio, configurable speed
+compression_algorithm = \"${COMPRESSION_ALGORITHM}\"
+
+# Minimum payload size in bytes to compress (smaller payloads skip compression)
+compression_min_size = ${COMPRESSION_MIN_SIZE}
+
+# =============================================================================
+# Performance Configuration (01.26.13+)
+# =============================================================================
+
+# Enable zero-copy buffer pooling for reduced memory allocations
+# Improves throughput and reduces GC pressure
+enable_zero_copy = ${ENABLE_ZERO_COPY}
+
+# Buffer pool size in bytes for zero-copy operations (0 = auto-size)
+buffer_pool_size_bytes = ${BUFFER_POOL_SIZE_BYTES}
 "
 
     if echo "$config_content" | $sudo_cmd tee "$config_file" >/dev/null 2>&1; then
@@ -3100,6 +3284,139 @@ parse_args() {
                     CHECKPOINT_SECS="$val"
                 else
                     print_error "--checkpoint-secs requires a number"
+                    exit 1
+                fi
+                shift
+                ;;
+            # Raft consensus options (01.26.13+)
+            --enable-raft)
+                ENABLE_RAFT="true"
+                shift
+                ;;
+            --disable-raft)
+                ENABLE_RAFT="false"
+                shift
+                ;;
+            --raft-election-timeout)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    RAFT_ELECTION_TIMEOUT="$2"
+                    shift 2
+                else
+                    print_error "--raft-election-timeout requires a number (milliseconds)"
+                    exit 1
+                fi
+                ;;
+            --raft-election-timeout=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    RAFT_ELECTION_TIMEOUT="$val"
+                else
+                    print_error "--raft-election-timeout requires a number"
+                    exit 1
+                fi
+                shift
+                ;;
+            --raft-heartbeat-interval)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    RAFT_HEARTBEAT_INTERVAL="$2"
+                    shift 2
+                else
+                    print_error "--raft-heartbeat-interval requires a number (milliseconds)"
+                    exit 1
+                fi
+                ;;
+            --raft-heartbeat-interval=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    RAFT_HEARTBEAT_INTERVAL="$val"
+                else
+                    print_error "--raft-heartbeat-interval requires a number"
+                    exit 1
+                fi
+                shift
+                ;;
+            # Compression options (01.26.13+)
+            --enable-compression)
+                ENABLE_COMPRESSION="true"
+                shift
+                ;;
+            --disable-compression)
+                ENABLE_COMPRESSION="false"
+                shift
+                ;;
+            --compression-algorithm)
+                if [[ -n "${2:-}" ]]; then
+                    case "$2" in
+                        gzip|lz4|snappy|zstd)
+                            COMPRESSION_ALGORITHM="$2"
+                            shift 2
+                            ;;
+                        *)
+                            print_error "Invalid compression algorithm: $2 (valid: gzip, lz4, snappy, zstd)"
+                            exit 1
+                            ;;
+                    esac
+                else
+                    print_error "--compression-algorithm requires an argument"
+                    exit 1
+                fi
+                ;;
+            --compression-algorithm=*)
+                local val="${1#*=}"
+                case "$val" in
+                    gzip|lz4|snappy|zstd)
+                        COMPRESSION_ALGORITHM="$val"
+                        ;;
+                    *)
+                        print_error "Invalid compression algorithm: $val (valid: gzip, lz4, snappy, zstd)"
+                        exit 1
+                        ;;
+                esac
+                shift
+                ;;
+            --compression-min-size)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    COMPRESSION_MIN_SIZE="$2"
+                    shift 2
+                else
+                    print_error "--compression-min-size requires a number (bytes)"
+                    exit 1
+                fi
+                ;;
+            --compression-min-size=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    COMPRESSION_MIN_SIZE="$val"
+                else
+                    print_error "--compression-min-size requires a number"
+                    exit 1
+                fi
+                shift
+                ;;
+            # Performance options (01.26.13+)
+            --enable-zero-copy)
+                ENABLE_ZERO_COPY="true"
+                shift
+                ;;
+            --disable-zero-copy)
+                ENABLE_ZERO_COPY="false"
+                shift
+                ;;
+            --buffer-pool-bytes)
+                if [[ -n "${2:-}" ]] && [[ "$2" =~ ^[0-9]+$ ]]; then
+                    BUFFER_POOL_SIZE_BYTES="$2"
+                    shift 2
+                else
+                    print_error "--buffer-pool-bytes requires a number"
+                    exit 1
+                fi
+                ;;
+            --buffer-pool-bytes=*)
+                local val="${1#*=}"
+                if [[ "$val" =~ ^[0-9]+$ ]]; then
+                    BUFFER_POOL_SIZE_BYTES="$val"
+                else
+                    print_error "--buffer-pool-bytes requires a number"
                     exit 1
                 fi
                 shift
