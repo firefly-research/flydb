@@ -109,6 +109,8 @@ SELECT * FROM users WHERE name LIKE 'A%';
   - [Start a Follower](#start-a-follower)
   - [Consistency Levels](#consistency-levels)
   - [Cluster Features](#cluster-features)
+  - [HA Client Connections](#ha-client-connections)
+  - [Database Dump Utility](#database-dump-utility)
 - [Documentation](#documentation)
 - [Development](#development)
   - [Running Tests](#running-tests)
@@ -480,6 +482,8 @@ The installation creates:
 | `flydb` | The database server daemon |
 | `flydb-shell` | The interactive SQL client |
 | `fsql` | Symlink to `flydb-shell` for convenience |
+| `flydb-dump` | Database export/import utility |
+| `fdump` | Symlink to `flydb-dump` for convenience |
 
 Default locations:
 - **Binaries**: `/usr/local/bin` (system) or `~/.local/bin` (user)
@@ -1067,6 +1071,58 @@ hosts = node1,node2,node3
 port = 8889
 target_primary = true
 ```
+
+### Database Dump Utility
+
+The `flydb-dump` utility (command: `fdump`) provides database export and import functionality with support for both local and remote modes.
+
+**Local Mode** (direct file access):
+```bash
+# Export database to SQL
+fdump -d /var/lib/flydb -db mydb -o backup.sql
+
+# Export with encryption passphrase
+fdump -d /var/lib/flydb --passphrase secret -o backup.sql
+
+# Import from SQL dump
+fdump -d /var/lib/flydb --import backup.sql
+```
+
+**Remote Mode** (network connection):
+```bash
+# Export from remote server
+fdump --host localhost --port 8889 -U admin -P -o backup.sql
+
+# Export from cluster (connects to any available node)
+fdump --host node1,node2,node3 -U admin -P -o backup.sql
+
+# Import to cluster (discovers leader for writes)
+fdump --host node1,node2,node3 -U admin -P --import backup.sql
+```
+
+**Export Formats:**
+| Format | Flag | Description |
+|--------|------|-------------|
+| SQL | `-f sql` | Standard INSERT statements (default) |
+| CSV | `-f csv` | RFC 4180 compliant with headers |
+| JSON | `-f json` | Structured with metadata |
+
+**Common Options:**
+| Option | Description |
+|--------|-------------|
+| `-d <path>` | Data directory (local mode) |
+| `--host <hosts>` | Server hostname(s), comma-separated for cluster |
+| `--port <port>` | Server port (default: 8889) |
+| `-db <name>` | Database name (default: default) |
+| `-o <file>` | Output file (default: stdout) |
+| `-f <format>` | Output format: sql, csv, json |
+| `-t <tables>` | Comma-separated list of tables |
+| `--schema-only` | Export schema only, no data |
+| `--data-only` | Export data only, no schema |
+| `-z` | Compress output with gzip |
+| `--import <file>` | Import from SQL dump file |
+| `-U <user>` | Username for authentication |
+| `-P` | Prompt for password |
 
 ---
 
