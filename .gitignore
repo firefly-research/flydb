@@ -16,6 +16,7 @@
 
 # Test binary, built with `go test -c`
 *.test
+flydb-dump-test
 
 # Output of the go coverage tool
 *.out
