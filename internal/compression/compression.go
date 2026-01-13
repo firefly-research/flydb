@@ -162,3 +162,217 @@ func NewCompressor(config Config) *Compressor {
 	}
 }
 
+// Compress compresses data using the configured algorithm
+func (c *Compressor) Compress(data []byte) ([]byte, error) {
+	if len(data) < c.config.MinSize {
+		return data, ErrDataTooSmall
+	}
+
+	switch c.config.Algorithm {
+	case AlgorithmNone:
+		return data, nil
+	case AlgorithmGzip:
+		return c.compressGzip(data)
+	case AlgorithmLZ4:
+		return c.compressLZ4(data)
+	case AlgorithmSnappy:
+		return c.compressSnappy(data)
+	case AlgorithmZstd:
+		return c.compressZstd(data)
+	default:
+		return nil, ErrUnsupportedAlgo
+	}
+}
+
+// Decompress decompresses data
+func (c *Compressor) Decompress(data []byte, algorithm Algorithm) ([]byte, error) {
+	switch algorithm {
+	case AlgorithmNone:
+		return data, nil
+	case AlgorithmGzip:
+		return c.decompressGzip(data)
+	case AlgorithmLZ4:
+		return c.decompressLZ4(data)
+	case AlgorithmSnappy:
+		return c.decompressSnappy(data)
+	case AlgorithmZstd:
+		return c.decompressZstd(data)
+	default:
+		return nil, ErrUnsupportedAlgo
+	}
+}
+
+// compressGzip compresses using gzip
+func (c *Compressor) compressGzip(data []byte) ([]byte, error) {
+	buf := c.bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer c.bufferPool.Put(buf)
+
+	w := c.gzipPool.Get().(*gzip.Writer)
+	w.Reset(buf)
+	defer c.gzipPool.Put(w)
+
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	return result, nil
+}
+
+// decompressGzip decompresses gzip data
+func (c *Compressor) decompressGzip(data []byte) ([]byte, error) {
+	r, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+
+	return io.ReadAll(r)
+}
+
+// compressLZ4 compresses using LZ4 (placeholder - uses gzip for now)
+func (c *Compressor) compressLZ4(data []byte) ([]byte, error) {
+	// TODO: Implement LZ4 compression when lz4 package is added
+	return c.compressGzip(data)
+}
+
+// decompressLZ4 decompresses LZ4 data
+func (c *Compressor) decompressLZ4(data []byte) ([]byte, error) {
+	// TODO: Implement LZ4 decompression when lz4 package is added
+	return c.decompressGzip(data)
+}
+
+// compressSnappy compresses using Snappy (placeholder - uses gzip for now)
+func (c *Compressor) compressSnappy(data []byte) ([]byte, error) {
+	// TODO: Implement Snappy compression when snappy package is added
+	return c.compressGzip(data)
+}
+
+// decompressSnappy decompresses Snappy data
+func (c *Compressor) decompressSnappy(data []byte) ([]byte, error) {
+	// TODO: Implement Snappy decompression when snappy package is added
+	return c.decompressGzip(data)
+}
+
+// compressZstd compresses using Zstd (placeholder - uses gzip for now)
+func (c *Compressor) compressZstd(data []byte) ([]byte, error) {
+	// TODO: Implement Zstd compression when zstd package is added
+	return c.compressGzip(data)
+}
+
+// decompressZstd decompresses Zstd data
+func (c *Compressor) decompressZstd(data []byte) ([]byte, error) {
+	// TODO: Implement Zstd decompression when zstd package is added
+	return c.decompressGzip(data)
+}
+
+// BatchCompressor handles batch compression for better ratios
+type BatchCompressor struct {
+	compressor *Compressor
+	mu         sync.Mutex
+	entries    [][]byte
+	totalSize  int
+}
+
+// NewBatchCompressor creates a new batch compressor
+func NewBatchCompressor(config Config) *BatchCompressor {
+	return &BatchCompressor{
+		compressor: NewCompressor(config),
+		entries:    make([][]byte, 0, config.BatchSize),
+	}
+}
+
+// Add adds an entry to the batch
+func (bc *BatchCompressor) Add(entry []byte) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	bc.entries = append(bc.entries, entry)
+	bc.totalSize += len(entry)
+}
+
+// Flush compresses and returns the batch
+func (bc *BatchCompressor) Flush() ([]byte, error) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	if len(bc.entries) == 0 {
+		return nil, nil
+	}
+
+	// Encode batch: [count][len1][data1][len2][data2]...
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, uint32(len(bc.entries)))
+
+	for _, entry := range bc.entries {
+		binary.Write(buf, binary.BigEndian, uint32(len(entry)))
+		buf.Write(entry)
+	}
+
+	// Compress the batch
+	compressed, err := bc.compressor.Compress(buf.Bytes())
+	if err != nil && err != ErrDataTooSmall {
+		return nil, err
+	}
+	if err == ErrDataTooSmall {
+		compressed = buf.Bytes()
+	}
+
+	// Reset batch
+	bc.entries = bc.entries[:0]
+	bc.totalSize = 0
+
+	return compressed, nil
+}
+
+// DecompressBatch decompresses a batch and returns individual entries
+func (bc *BatchCompressor) DecompressBatch(data []byte, algorithm Algorithm) ([][]byte, error) {
+	// Decompress
+	decompressed, err := bc.compressor.Decompress(data, algorithm)
+	if err != nil {
+		return nil, err
+	}
+
+	// Decode batch
+	r := bytes.NewReader(decompressed)
+	var count uint32
+	if err := binary.Read(r, binary.BigEndian, &count); err != nil {
+		return nil, ErrInvalidHeader
+	}
+
+	entries := make([][]byte, 0, count)
+	for i := uint32(0); i < count; i++ {
+		var length uint32
+		if err := binary.Read(r, binary.BigEndian, &length); err != nil {
+			return nil, err
+		}
+
+		entry := make([]byte, length)
+		if _, err := io.ReadFull(r, entry); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+
+	return entries, nil
+}
+
+// Size returns the current batch size
+func (bc *BatchCompressor) Size() int {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	return len(bc.entries)
+}
+
+// TotalBytes returns the total uncompressed bytes in the batch
+func (bc *BatchCompressor) TotalBytes() int {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	return bc.totalSize
+}
+

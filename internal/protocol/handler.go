@@ -219,6 +219,10 @@ type BinaryHandler struct {
 	dbMgr       DatabaseManager
 	mu          sync.RWMutex
 	connections map[net.Conn]*connectionState
+
+	// Zero-copy buffer pool for efficient memory management
+	bufferPool    *BufferPool
+	useZeroCopy   bool
 }
 
 // NewBinaryHandler creates a new binary protocol handler.
@@ -228,7 +232,24 @@ func NewBinaryHandler(executor QueryExecutor, prepMgr PreparedStatementManager, 
 		prepMgr:     prepMgr,
 		auth:        auth,
 		connections: make(map[net.Conn]*connectionState),
+		bufferPool:  NewBufferPool(),
+		useZeroCopy: true, // Enable zero-copy by default
 	}
+}
+
+// SetBufferPool sets a custom buffer pool for zero-copy operations.
+func (h *BinaryHandler) SetBufferPool(pool *BufferPool) {
+	h.bufferPool = pool
+}
+
+// EnableZeroCopy enables or disables zero-copy message handling.
+func (h *BinaryHandler) EnableZeroCopy(enable bool) {
+	h.useZeroCopy = enable
+}
+
+// GetBufferPool returns the buffer pool for external use.
+func (h *BinaryHandler) GetBufferPool() *BufferPool {
+	return h.bufferPool
 }
 
 // SetMetadataProvider sets the metadata provider for driver support.
@@ -299,10 +320,32 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 
+	// Create zero-copy reader if enabled
+	var zcReader *ZeroCopyReader
+	if h.useZeroCopy && h.bufferPool != nil {
+		zcReader = NewZeroCopyReader(reader, h.bufferPool)
+		defer zcReader.Release()
+	}
+
 	authenticated := false
 
 	for {
-		msg, err := ReadMessage(reader)
+		var header *Header
+		var payload []byte
+		var err error
+
+		// Use zero-copy reading if enabled
+		if zcReader != nil {
+			header, payload, err = zcReader.ReadMessage()
+		} else {
+			var msg *Message
+			msg, err = ReadMessage(reader)
+			if msg != nil {
+				header = &msg.Header
+				payload = msg.Payload
+			}
+		}
+
 		if err != nil {
 			if err != io.EOF {
 				log.Debug("Binary read error", "remote_addr", remoteAddr, "error", err)
@@ -312,35 +355,35 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 		}
 
 		// Get command name for logging (without sensitive data)
-		cmdName := msgTypeToString(msg.Header.Type)
+		cmdName := msgTypeToString(header.Type)
 
 		// Create request context for logging
 		reqCtx := logging.NewRequestContext(remoteAddr, cmdName)
 
 		// Handle authentication first
-		if !authenticated && msg.Header.Type != MsgAuth && msg.Header.Type != MsgPing {
+		if !authenticated && header.Type != MsgAuth && header.Type != MsgPing {
 			reqCtx.LogError(log, "authentication required")
 			h.sendError(writer, 401, "authentication required")
 			continue
 		}
 
 		var success bool
-		switch msg.Header.Type {
+		switch header.Type {
 		case MsgAuth:
-			authenticated = h.handleAuth(writer, msg.Payload, remoteAddr, connState)
+			authenticated = h.handleAuth(writer, payload, remoteAddr, connState)
 			success = authenticated
 
 		case MsgQuery:
-			success = h.handleQuery(writer, msg.Payload, remoteAddr, connState)
+			success = h.handleQuery(writer, payload, remoteAddr, connState)
 
 		case MsgPrepare:
-			success = h.handlePrepare(writer, msg.Payload, remoteAddr)
+			success = h.handlePrepare(writer, payload, remoteAddr)
 
 		case MsgExecute:
-			success = h.handleExecute(writer, msg.Payload, remoteAddr)
+			success = h.handleExecute(writer, payload, remoteAddr)
 
 		case MsgDeallocate:
-			success = h.handleDeallocate(writer, msg.Payload, remoteAddr)
+			success = h.handleDeallocate(writer, payload, remoteAddr)
 
 		case MsgPing:
 			h.handlePing(writer)
@@ -348,36 +391,36 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 
 		// Cursor operations for ODBC/JDBC driver support
 		case MsgCursorOpen:
-			success = h.handleCursorOpen(writer, msg.Payload, remoteAddr)
+			success = h.handleCursorOpen(writer, payload, remoteAddr)
 
 		case MsgCursorFetch:
-			success = h.handleCursorFetch(writer, msg.Payload, remoteAddr)
+			success = h.handleCursorFetch(writer, payload, remoteAddr)
 
 		case MsgCursorClose:
-			success = h.handleCursorClose(writer, msg.Payload, remoteAddr)
+			success = h.handleCursorClose(writer, payload, remoteAddr)
 
 		// Metadata operations for ODBC/JDBC driver support
 		case MsgGetTables:
-			success = h.handleGetTables(writer, msg.Payload, remoteAddr)
+			success = h.handleGetTables(writer, payload, remoteAddr)
 
 		case MsgGetColumns:
-			success = h.handleGetColumns(writer, msg.Payload, remoteAddr)
+			success = h.handleGetColumns(writer, payload, remoteAddr)
 
 		case MsgGetPrimaryKeys:
-			success = h.handleGetPrimaryKeys(writer, msg.Payload, remoteAddr)
+			success = h.handleGetPrimaryKeys(writer, payload, remoteAddr)
 
 		case MsgGetForeignKeys:
-			success = h.handleGetForeignKeys(writer, msg.Payload, remoteAddr)
+			success = h.handleGetForeignKeys(writer, payload, remoteAddr)
 
 		case MsgGetIndexes:
-			success = h.handleGetIndexes(writer, msg.Payload, remoteAddr)
+			success = h.handleGetIndexes(writer, payload, remoteAddr)
 
 		case MsgGetTypeInfo:
 			success = h.handleGetTypeInfo(writer, remoteAddr)
 
 		// Transaction operations
 		case MsgBeginTx:
-			success = h.handleBeginTx(writer, msg.Payload, remoteAddr, connState)
+			success = h.handleBeginTx(writer, payload, remoteAddr, connState)
 
 		case MsgCommitTx:
 			success = h.handleCommitTx(writer, remoteAddr, connState)
@@ -387,20 +430,20 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 
 		// Session operations
 		case MsgSetOption:
-			success = h.handleSetOption(writer, msg.Payload, remoteAddr, connState)
+			success = h.handleSetOption(writer, payload, remoteAddr, connState)
 
 		case MsgGetOption:
-			success = h.handleGetOption(writer, msg.Payload, remoteAddr, connState)
+			success = h.handleGetOption(writer, payload, remoteAddr, connState)
 
 		case MsgGetServerInfo:
 			success = h.handleGetServerInfo(writer, remoteAddr)
 
 		// Database operations for ODBC/JDBC driver support
 		case MsgUseDatabase:
-			success = h.handleUseDatabase(writer, msg.Payload, remoteAddr, connState)
+			success = h.handleUseDatabase(writer, payload, remoteAddr, connState)
 
 		case MsgGetDatabases:
-			success = h.handleGetDatabases(writer, msg.Payload, remoteAddr)
+			success = h.handleGetDatabases(writer, payload, remoteAddr)
 
 		default:
 			reqCtx.LogError(log, "unknown message type")

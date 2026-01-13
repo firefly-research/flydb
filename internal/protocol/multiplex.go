@@ -159,3 +159,213 @@ func (mc *MultiplexConn) OpenStream() (*Stream, error) {
 	return stream, nil
 }
 
+// AcceptStream accepts an incoming stream (for server side)
+func (mc *MultiplexConn) AcceptStream(streamID uint32) (*Stream, error) {
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+
+	if _, exists := mc.streams[streamID]; exists {
+		return nil, ErrInvalidStreamID
+	}
+
+	stream := &Stream{
+		ID:       streamID,
+		state:    StreamOpen,
+		recvChan: make(chan *MultiplexFrame, 64),
+		sendChan: make(chan *MultiplexFrame, 64),
+		conn:     mc,
+	}
+
+	mc.streams[streamID] = stream
+	return stream, nil
+}
+
+// GetStream returns an existing stream
+func (mc *MultiplexConn) GetStream(streamID uint32) (*Stream, error) {
+	mc.mu.RLock()
+	defer mc.mu.RUnlock()
+
+	stream, ok := mc.streams[streamID]
+	if !ok {
+		return nil, ErrStreamNotFound
+	}
+	return stream, nil
+}
+
+// CloseStream closes a stream
+func (mc *MultiplexConn) CloseStream(streamID uint32) error {
+	mc.mu.Lock()
+	stream, ok := mc.streams[streamID]
+	if !ok {
+		mc.mu.Unlock()
+		return ErrStreamNotFound
+	}
+	delete(mc.streams, streamID)
+	mc.mu.Unlock()
+
+	atomic.StoreUint32(&stream.state, StreamClosed)
+	close(stream.recvChan)
+	return nil
+}
+
+// Close closes the multiplexed connection
+func (mc *MultiplexConn) Close() error {
+	if mc.closed.Swap(true) {
+		return nil
+	}
+
+	close(mc.closeChan)
+
+	mc.mu.Lock()
+	for id, stream := range mc.streams {
+		atomic.StoreUint32(&stream.state, StreamClosed)
+		close(stream.recvChan)
+		delete(mc.streams, id)
+	}
+	mc.mu.Unlock()
+
+	return mc.conn.Close()
+}
+
+// readLoop reads frames and dispatches to streams
+func (mc *MultiplexConn) readLoop() {
+	for {
+		select {
+		case <-mc.closeChan:
+			return
+		default:
+		}
+
+		frame, err := mc.readFrame()
+		if err != nil {
+			if err != io.EOF {
+				// Log error
+			}
+			mc.Close()
+			return
+		}
+
+		mc.mu.RLock()
+		stream, ok := mc.streams[frame.StreamID]
+		mc.mu.RUnlock()
+
+		if !ok {
+			// Unknown stream - could be new stream from peer
+			if !mc.isClient {
+				// Server auto-accepts new streams
+				stream, err = mc.AcceptStream(frame.StreamID)
+				if err != nil {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+
+		select {
+		case stream.recvChan <- frame:
+		default:
+			// Channel full, drop frame (flow control would handle this)
+		}
+	}
+}
+
+// readFrame reads a single multiplexed frame
+func (mc *MultiplexConn) readFrame() (*MultiplexFrame, error) {
+	if _, err := io.ReadFull(mc.conn, mc.headerBuf); err != nil {
+		return nil, err
+	}
+
+	frame := &MultiplexFrame{
+		Header: Header{
+			Magic:   mc.headerBuf[0],
+			Version: mc.headerBuf[1],
+			Type:    MessageType(mc.headerBuf[2]),
+			Flags:   MessageFlag(mc.headerBuf[3]),
+			Length:  binary.BigEndian.Uint32(mc.headerBuf[8:12]),
+		},
+		StreamID: binary.BigEndian.Uint32(mc.headerBuf[4:8]),
+	}
+
+	if frame.Header.Magic != MagicByte {
+		return nil, ErrInvalidMagic
+	}
+	if frame.Header.Length > MaxMessageSize {
+		return nil, ErrMessageTooLarge
+	}
+
+	frame.Payload = mc.bufferPool.Get(int(frame.Header.Length))
+	if _, err := io.ReadFull(mc.conn, frame.Payload); err != nil {
+		mc.bufferPool.Put(frame.Payload)
+		return nil, err
+	}
+
+	return frame, nil
+}
+
+// WriteFrame writes a frame to a stream
+func (mc *MultiplexConn) WriteFrame(streamID uint32, msgType MessageType, flags MessageFlag, payload []byte) error {
+	if mc.closed.Load() {
+		return ErrStreamClosed
+	}
+
+	mc.writeMu.Lock()
+	defer mc.writeMu.Unlock()
+
+	// Build header
+	header := make([]byte, MultiplexHeaderSize)
+	header[0] = MagicByte
+	header[1] = ProtocolVersion
+	header[2] = byte(msgType)
+	header[3] = byte(flags)
+	binary.BigEndian.PutUint32(header[4:8], streamID)
+	binary.BigEndian.PutUint32(header[8:12], uint32(len(payload)))
+
+	// Write header
+	if _, err := mc.conn.Write(header); err != nil {
+		return err
+	}
+
+	// Write payload
+	if len(payload) > 0 {
+		if _, err := mc.conn.Write(payload); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// Stream methods
+
+// Send sends a message on the stream
+func (s *Stream) Send(msgType MessageType, payload []byte) error {
+	if atomic.LoadUint32(&s.state) != StreamOpen {
+		return ErrStreamClosed
+	}
+	return s.conn.WriteFrame(s.ID, msgType, FlagNone, payload)
+}
+
+// Recv receives a message from the stream
+func (s *Stream) Recv() (*MultiplexFrame, error) {
+	if atomic.LoadUint32(&s.state) == StreamClosed {
+		return nil, ErrStreamClosed
+	}
+
+	frame, ok := <-s.recvChan
+	if !ok {
+		return nil, ErrStreamClosed
+	}
+	return frame, nil
+}
+
+// Close closes the stream
+func (s *Stream) Close() error {
+	return s.conn.CloseStream(s.ID)
+}
+
+// ID returns the stream ID
+func (s *Stream) StreamID() uint32 {
+	return s.ID
+}
+

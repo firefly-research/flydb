@@ -136,7 +136,8 @@ const (
 	WALHeaderSize = 8
 
 	// WAL header flag bits
-	WALFlagEncrypted byte = 0x01 // Bit 0: encryption enabled
+	WALFlagEncrypted   byte = 0x01 // Bit 0: encryption enabled
+	WALFlagCompressed  byte = 0x02 // Bit 1: compression enabled
 )
 
 // ErrEncryptionMismatch is returned when trying to open an encrypted database
@@ -218,6 +219,38 @@ type WAL struct {
 	// encryptor handles encryption/decryption of WAL entries.
 	// If nil, encryption is disabled.
 	encryptor *Encryptor
+
+	// compression configuration
+	compressionEnabled   bool
+	compressionAlgorithm string // "gzip", "lz4", "snappy", "zstd"
+	compressionMinSize   int    // Minimum size to compress (default 256)
+}
+
+// CompressionConfig holds WAL compression settings
+type CompressionConfig struct {
+	Enabled   bool
+	Algorithm string // "gzip", "lz4", "snappy", "zstd"
+	MinSize   int    // Minimum record size to compress
+}
+
+// SetCompression enables or disables compression for WAL entries
+func (w *WAL) SetCompression(config CompressionConfig) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.compressionEnabled = config.Enabled
+	w.compressionAlgorithm = config.Algorithm
+	if config.MinSize > 0 {
+		w.compressionMinSize = config.MinSize
+	} else {
+		w.compressionMinSize = 256 // Default minimum size
+	}
+}
+
+// IsCompressionEnabled returns true if compression is enabled
+func (w *WAL) IsCompressionEnabled() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.compressionEnabled
 }
 
 // OpenWAL opens or creates a WAL file at the specified path.
@@ -643,4 +676,150 @@ func (w *WAL) replayEncrypted(reader *bufio.Reader, fn func(op byte, key string,
 		fn(op, key, value)
 	}
 	return nil
+}
+
+// ReplayWithPosition reads the WAL from startOffset and invokes fn for each record.
+// Unlike Replay, this method returns the final file position after reading all records.
+// This is essential for replication where we need to track exact file positions.
+//
+// Parameters:
+//   - startOffset: Byte offset to start reading from (0 means start after header)
+//   - fn: Callback function invoked for each record
+//
+// Returns:
+//   - newOffset: The file position after reading all available records
+//   - err: Error if reading fails (EOF is not an error)
+func (w *WAL) ReplayWithPosition(startOffset int64, fn func(op byte, key string, value []byte)) (int64, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Adjust offset to account for header if starting from beginning
+	actualOffset := startOffset
+	if startOffset == 0 {
+		actualOffset = WALHeaderSize
+	}
+
+	// Seek to the starting position
+	if _, err := w.file.Seek(actualOffset, io.SeekStart); err != nil {
+		return startOffset, fmt.Errorf("failed to seek in WAL: %w", err)
+	}
+
+	// Track current position
+	currentPos := actualOffset
+
+	// Use encrypted or unencrypted replay based on configuration
+	var err error
+	if w.encryptor != nil {
+		currentPos, err = w.replayEncryptedWithPosition(currentPos, fn)
+	} else {
+		currentPos, err = w.replayUnencryptedWithPosition(currentPos, fn)
+	}
+
+	return currentPos, err
+}
+
+// replayUnencryptedWithPosition reads unencrypted WAL records and tracks position.
+func (w *WAL) replayUnencryptedWithPosition(startPos int64, fn func(op byte, key string, value []byte)) (int64, error) {
+	currentPos := startPos
+
+	for {
+		// Read Operation Byte
+		opBuf := make([]byte, 1)
+		n, err := w.file.Read(opBuf)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return currentPos, err
+		}
+		currentPos += int64(n)
+		op := opBuf[0]
+
+		// Read Key Length
+		var keyLen uint32
+		if err := binary.Read(w.file, binary.BigEndian, &keyLen); err != nil {
+			return currentPos, err
+		}
+		currentPos += 4
+
+		// Read Key
+		keyBuf := make([]byte, keyLen)
+		if _, err := io.ReadFull(w.file, keyBuf); err != nil {
+			return currentPos, err
+		}
+		currentPos += int64(keyLen)
+
+		// Read Value Length
+		var valLen uint32
+		if err := binary.Read(w.file, binary.BigEndian, &valLen); err != nil {
+			return currentPos, err
+		}
+		currentPos += 4
+
+		// Read Value
+		valBuf := make([]byte, valLen)
+		if _, err := io.ReadFull(w.file, valBuf); err != nil {
+			return currentPos, err
+		}
+		currentPos += int64(valLen)
+
+		// Invoke callback with the record
+		fn(op, string(keyBuf), valBuf)
+	}
+	return currentPos, nil
+}
+
+// replayEncryptedWithPosition reads encrypted WAL records and tracks position.
+func (w *WAL) replayEncryptedWithPosition(startPos int64, fn func(op byte, key string, value []byte)) (int64, error) {
+	currentPos := startPos
+
+	for {
+		// Read encrypted record length (4 bytes)
+		var encLen uint32
+		if err := binary.Read(w.file, binary.BigEndian, &encLen); err != nil {
+			if err == io.EOF {
+				break
+			}
+			return currentPos, err
+		}
+		currentPos += 4
+
+		// Read encrypted payload
+		encBuf := make([]byte, encLen)
+		if _, err := io.ReadFull(w.file, encBuf); err != nil {
+			return currentPos, err
+		}
+		currentPos += int64(encLen)
+
+		// Decrypt the record
+		plaintext, err := w.encryptor.Decrypt(encBuf)
+		if err != nil {
+			return currentPos, err
+		}
+
+		// Parse the decrypted record
+		if len(plaintext) < 9 { // Minimum: Op(1) + KeyLen(4) + ValLen(4)
+			return currentPos, io.ErrUnexpectedEOF
+		}
+
+		op := plaintext[0]
+		keyLen := binary.BigEndian.Uint32(plaintext[1:5])
+
+		if len(plaintext) < int(5+keyLen+4) {
+			return currentPos, io.ErrUnexpectedEOF
+		}
+
+		key := string(plaintext[5 : 5+keyLen])
+		valLen := binary.BigEndian.Uint32(plaintext[5+keyLen : 9+keyLen])
+
+		if len(plaintext) < int(9+keyLen+valLen) {
+			return currentPos, io.ErrUnexpectedEOF
+		}
+
+		value := plaintext[9+keyLen : 9+keyLen+valLen]
+
+		// Invoke callback with the record
+		fn(op, key, value)
+	}
+	return currentPos, nil
 }

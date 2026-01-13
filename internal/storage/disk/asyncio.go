@@ -157,3 +157,179 @@ func (aio *AsyncIO) Close() error {
 	return nil
 }
 
+// ReadAsync submits an async read request
+func (aio *AsyncIO) ReadAsync(pageID PageID, offset int64, size int, callback func([]byte, error)) error {
+	data := make([]byte, size)
+	req := &IORequest{
+		Type:        IORead,
+		PageID:      pageID,
+		Data:        data,
+		Offset:      offset,
+		submittedAt: time.Now(),
+		Callback: func(err error) {
+			if err != nil {
+				callback(nil, err)
+			} else {
+				callback(data, nil)
+			}
+		},
+	}
+
+	return aio.submit(req)
+}
+
+// WriteAsync submits an async write request
+func (aio *AsyncIO) WriteAsync(pageID PageID, offset int64, data []byte, callback func(error)) error {
+	req := &IORequest{
+		Type:        IOWrite,
+		PageID:      pageID,
+		Data:        data,
+		Offset:      offset,
+		submittedAt: time.Now(),
+		Callback:    callback,
+	}
+
+	return aio.submit(req)
+}
+
+// SyncAsync submits an async sync request
+func (aio *AsyncIO) SyncAsync(callback func(error)) error {
+	req := &IORequest{
+		Type:        IOSync,
+		submittedAt: time.Now(),
+		Callback:    callback,
+	}
+
+	return aio.submit(req)
+}
+
+// submit submits a request to the queue
+func (aio *AsyncIO) submit(req *IORequest) error {
+	select {
+	case aio.requestCh <- req:
+		aio.pending.Add(1)
+		return nil
+	default:
+		return errors.New("I/O queue full")
+	}
+}
+
+// worker processes I/O requests
+func (aio *AsyncIO) worker(id int) {
+	defer aio.wg.Done()
+
+	batch := make([]*IORequest, 0, aio.config.BatchSize)
+	timer := time.NewTimer(aio.config.BatchTimeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-aio.stopCh:
+			// Process remaining requests
+			aio.processBatch(batch)
+			return
+
+		case req := <-aio.requestCh:
+			batch = append(batch, req)
+			if len(batch) >= aio.config.BatchSize {
+				aio.processBatch(batch)
+				batch = batch[:0]
+				timer.Reset(aio.config.BatchTimeout)
+			}
+
+		case <-timer.C:
+			if len(batch) > 0 {
+				aio.processBatch(batch)
+				batch = batch[:0]
+			}
+			timer.Reset(aio.config.BatchTimeout)
+		}
+	}
+}
+
+// processBatch processes a batch of I/O requests
+func (aio *AsyncIO) processBatch(batch []*IORequest) {
+	if len(batch) == 0 {
+		return
+	}
+
+	// Optionally coalesce adjacent writes
+	if aio.config.EnableCoalesce {
+		batch = aio.coalesceRequests(batch)
+	}
+
+	for _, req := range batch {
+		aio.processRequest(req)
+	}
+}
+
+// processRequest processes a single I/O request
+func (aio *AsyncIO) processRequest(req *IORequest) {
+	var err error
+	start := time.Now()
+
+	switch req.Type {
+	case IORead:
+		_, err = aio.file.ReadAt(req.Data, req.Offset)
+		aio.reads.Add(1)
+
+	case IOWrite:
+		_, err = aio.file.WriteAt(req.Data, req.Offset)
+		aio.writes.Add(1)
+
+	case IOSync:
+		err = aio.file.Sync()
+		aio.syncs.Add(1)
+	}
+
+	latency := time.Since(start)
+	aio.totalLatency.Add(uint64(latency.Nanoseconds()))
+	aio.pending.Add(-1)
+
+	if req.Callback != nil {
+		req.Callback(err)
+	}
+}
+
+// coalesceRequests combines adjacent write requests
+func (aio *AsyncIO) coalesceRequests(batch []*IORequest) []*IORequest {
+	if len(batch) <= 1 {
+		return batch
+	}
+
+	// Simple implementation: just return as-is for now
+	// A full implementation would sort by offset and merge adjacent writes
+	return batch
+}
+
+// Stats returns I/O statistics
+func (aio *AsyncIO) Stats() (reads, writes, syncs uint64, pending int64, avgLatencyNs uint64) {
+	reads = aio.reads.Load()
+	writes = aio.writes.Load()
+	syncs = aio.syncs.Load()
+	pending = aio.pending.Load()
+
+	total := reads + writes + syncs
+	if total > 0 {
+		avgLatencyNs = aio.totalLatency.Load() / total
+	}
+	return
+}
+
+// Pending returns the number of pending requests
+func (aio *AsyncIO) Pending() int64 {
+	return aio.pending.Load()
+}
+
+// WaitIdle waits for all pending requests to complete
+func (aio *AsyncIO) WaitIdle(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for aio.pending.Load() > 0 {
+		if time.Now().After(deadline) {
+			return errors.New("timeout waiting for I/O to complete")
+		}
+		time.Sleep(1 * time.Millisecond)
+	}
+	return nil
+}
+

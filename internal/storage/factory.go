@@ -240,3 +240,23 @@ func (e *UnifiedStorageEngine) DiskEngine() *disk.DiskStorageEngine {
 	return e.diskEngine
 }
 
+// ApplyReplicatedPut applies a replicated PUT operation without writing to WAL.
+// This is used by followers in cluster mode to apply changes received from the leader.
+// The WAL entry is written separately via WriteReplicatedWAL.
+func (e *UnifiedStorageEngine) ApplyReplicatedPut(key string, value []byte) error {
+	return e.diskEngine.ApplyReplicatedPut(key, value)
+}
+
+// ApplyReplicatedDelete applies a replicated DELETE operation without writing to WAL.
+// This is used by followers in cluster mode to apply changes received from the leader.
+func (e *UnifiedStorageEngine) ApplyReplicatedDelete(key string) error {
+	return e.diskEngine.ApplyReplicatedDelete(key)
+}
+
+// WriteReplicatedWAL writes a replicated WAL entry for crash recovery.
+// This is called by followers before applying replicated changes to ensure
+// crash recovery works correctly.
+func (e *UnifiedStorageEngine) WriteReplicatedWAL(op byte, key string, value []byte) error {
+	return e.diskEngine.WriteReplicatedWAL(op, key, value)
+}
+

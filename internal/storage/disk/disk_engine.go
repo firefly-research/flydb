@@ -499,6 +499,98 @@ func (e *DiskStorageEngine) Delete(key string) error {
 	return nil
 }
 
+// ApplyReplicatedPut applies a replicated PUT operation without writing to WAL.
+// This is used by followers in cluster mode to apply changes received from the leader.
+// The WAL entry has already been written by WriteReplicatedWAL.
+// This follows the MySQL/PostgreSQL pattern where replicated changes are:
+// 1. Written to local WAL/relay log for crash recovery
+// 2. Applied to storage without re-logging
+func (e *DiskStorageEngine) ApplyReplicatedPut(key string, value []byte) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.closed {
+		return errors.New("engine is closed")
+	}
+
+	// DO NOT write to WAL - this is a replicated operation
+	// The caller (follower) should have already written to local WAL
+
+	record := encodeRecord(key, value)
+	isNew := true
+
+	// If key exists, try to update in place or delete old record
+	if loc, exists := e.keyIndex[key]; exists {
+		isNew = false
+		// Delete old record first
+		page, err := e.bufferPool.FetchPage(loc.PageID)
+		if err == nil {
+			page.DeleteRecord(loc.SlotID)
+			e.bufferPool.UnpinPage(loc.PageID, true)
+		}
+		delete(e.keyIndex, key)
+	}
+
+	// Find a page with enough space or allocate new one
+	pageID, slotID, err := e.insertRecord(record)
+	if err != nil {
+		return err
+	}
+
+	e.keyIndex[key] = RecordLocation{PageID: pageID, SlotID: slotID}
+
+	// Update statistics
+	if isNew {
+		e.keyCount.Add(1)
+	}
+	e.dataSize.Add(int64(len(record)))
+
+	return nil
+}
+
+// ApplyReplicatedDelete applies a replicated DELETE operation without writing to WAL.
+// This is used by followers in cluster mode to apply changes received from the leader.
+// The WAL entry has already been written by WriteReplicatedWAL.
+func (e *DiskStorageEngine) ApplyReplicatedDelete(key string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.closed {
+		return errors.New("engine is closed")
+	}
+
+	loc, exists := e.keyIndex[key]
+	if !exists {
+		return nil // Idempotent delete
+	}
+
+	// DO NOT write to WAL - this is a replicated operation
+
+	page, err := e.bufferPool.FetchPage(loc.PageID)
+	if err != nil {
+		return err
+	}
+
+	page.DeleteRecord(loc.SlotID)
+	e.bufferPool.UnpinPage(loc.PageID, true)
+	delete(e.keyIndex, key)
+
+	// Update statistics
+	e.keyCount.Add(-1)
+
+	return nil
+}
+
+// WriteReplicatedWAL writes a replicated WAL entry to the local WAL.
+// This is used by followers to persist replicated changes for crash recovery
+// before applying them to storage. This mimics MySQL's relay log.
+func (e *DiskStorageEngine) WriteReplicatedWAL(op byte, key string, value []byte) error {
+	if e.wal == nil {
+		return nil // No WAL configured
+	}
+	return e.wal.Write(op, key, value)
+}
+
 // Scan returns all key-value pairs matching the given prefix.
 // Uses prefetching to improve performance for sequential access patterns.
 func (e *DiskStorageEngine) Scan(prefix string) (map[string][]byte, error) {
