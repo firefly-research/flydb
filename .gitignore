@@ -2,6 +2,7 @@
 /fly-cli
 /flydb
 /flydb-shell
+/flydb-dump
 *.exe
 *.exe~
 *.dll
