@@ -119,6 +119,8 @@ package main
 import (
 	"bufio"
 	"compress/gzip"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
@@ -193,6 +195,10 @@ var (
 	// Cluster options
 	connectTimeout = flag.Duration("connect-timeout", ConnectionTimeout, "Connection timeout for remote connections")
 	queryTimeout   = flag.Duration("query-timeout", QueryTimeout, "Query timeout for remote connections")
+
+	// TLS options
+	noTLS       = flag.Bool("no-tls", false, "Disable TLS and use plain TCP connection")
+	tlsInsecure = flag.Bool("tls-insecure", false, "Skip TLS certificate verification (insecure)")
 )
 
 // isRemoteMode returns true if remote connection mode is enabled
@@ -361,6 +367,11 @@ func printUsage() {
 	fmt.Printf("  %-28s %s\n", cli.Info("-U <username>"), "Username for authentication")
 	fmt.Printf("  %-28s %s\n", cli.Info("-W <password>"), "Password (use -P for secure prompt)")
 	fmt.Printf("  %-28s %s\n", cli.Info("-P"), "Prompt for password interactively")
+	fmt.Println()
+
+	fmt.Println(cli.Highlight("TLS OPTIONS (remote mode):"))
+	fmt.Printf("  %-28s %s\n", cli.Info("--no-tls"), "Disable TLS (use plain TCP)")
+	fmt.Printf("  %-28s %s\n", cli.Info("--tls-insecure"), "Skip TLS certificate verification (insecure)")
 	fmt.Println()
 
 	fmt.Println(cli.Highlight("ENCRYPTION (local mode only):"))
@@ -1490,12 +1501,16 @@ type HAClient struct {
 	authUsername   string
 	authPassword   string
 	lastAuth       bool
+	useTLS         bool // Whether to use TLS for connections
+	tlsInsecure    bool // Whether to skip TLS certificate verification
 }
 
 // NewHAClient creates a new HA-aware client that can fail over between hosts.
-func NewHAClient(hosts []string) *HAClient {
+func NewHAClient(hosts []string, useTLS bool, tlsInsecure bool) *HAClient {
 	return &HAClient{
-		hosts: hosts,
+		hosts:       hosts,
+		useTLS:      useTLS,
+		tlsInsecure: tlsInsecure,
 	}
 }
 
@@ -1504,7 +1519,34 @@ func (h *HAClient) Connect() error {
 	var lastErr error
 
 	for i, hostAddr := range h.hosts {
-		conn, err := net.DialTimeout("tcp", hostAddr, *connectTimeout)
+		var conn net.Conn
+		var err error
+
+		if h.useTLS {
+			// Create TLS configuration
+			tlsConfig := &tls.Config{
+				ServerName: extractHostname(hostAddr),
+			}
+
+			if h.tlsInsecure {
+				tlsConfig.InsecureSkipVerify = true
+			} else {
+				// Load system CA certificates
+				certPool, err := x509.SystemCertPool()
+				if err != nil {
+					certPool = x509.NewCertPool()
+				}
+				tlsConfig.RootCAs = certPool
+			}
+
+			// Dial with TLS
+			dialer := &net.Dialer{Timeout: *connectTimeout}
+			conn, err = tls.DialWithDialer(dialer, "tcp", hostAddr, tlsConfig)
+		} else {
+			// Plain TCP connection
+			conn, err = net.DialTimeout("tcp", hostAddr, *connectTimeout)
+		}
+
 		if err != nil {
 			lastErr = err
 			if *verbose {
@@ -1532,6 +1574,15 @@ func (h *HAClient) Connect() error {
 	return fmt.Errorf("failed to connect to any host: %w", lastErr)
 }
 
+// extractHostname extracts the hostname from a "host:port" address.
+func extractHostname(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
+}
+
 // Reconnect attempts to reconnect to the cluster, trying alternate hosts.
 func (h *HAClient) Reconnect() error {
 	if h.BinaryClient != nil {
@@ -1547,7 +1598,34 @@ func (h *HAClient) Reconnect() error {
 
 	var lastErr error
 	for _, hostAddr := range hostsToTry {
-		conn, err := net.DialTimeout("tcp", hostAddr, *connectTimeout)
+		var conn net.Conn
+		var err error
+
+		if h.useTLS {
+			// Create TLS configuration
+			tlsConfig := &tls.Config{
+				ServerName: extractHostname(hostAddr),
+			}
+
+			if h.tlsInsecure {
+				tlsConfig.InsecureSkipVerify = true
+			} else {
+				// Load system CA certificates
+				certPool, err := x509.SystemCertPool()
+				if err != nil {
+					certPool = x509.NewCertPool()
+				}
+				tlsConfig.RootCAs = certPool
+			}
+
+			// Dial with TLS
+			dialer := &net.Dialer{Timeout: *connectTimeout}
+			conn, err = tls.DialWithDialer(dialer, "tcp", hostAddr, tlsConfig)
+		} else {
+			// Plain TCP connection
+			conn, err = net.DialTimeout("tcp", hostAddr, *connectTimeout)
+		}
+
 		if err != nil {
 			lastErr = err
 			continue
@@ -1713,7 +1791,20 @@ func connectRemote() (*HAClient, error) {
 		return nil, fmt.Errorf("no valid hosts specified")
 	}
 
-	client := NewHAClient(hosts)
+	// Determine TLS settings (enabled by default, unless --no-tls is specified)
+	useTLS := !*noTLS
+
+	// Check environment variable for TLS setting
+	if envTLS := os.Getenv("FLYDB_TLS_ENABLED"); envTLS != "" {
+		useTLS = strings.ToLower(envTLS) == "true" || envTLS == "1"
+	}
+
+	// Override with flag if explicitly set
+	if *noTLS {
+		useTLS = false
+	}
+
+	client := NewHAClient(hosts, useTLS, *tlsInsecure)
 	if err := client.Connect(); err != nil {
 		return nil, err
 	}

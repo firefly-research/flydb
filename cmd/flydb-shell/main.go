@@ -81,6 +81,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -134,6 +136,8 @@ type CLIConfig struct {
 	Format   cli.OutputFormat // Output format (table, json, plain)
 	Execute  string           // Command to execute and exit
 	TargetPrimary bool        // When true, always connect to primary/leader (for writes)
+	UseTLS        bool        // When true, use TLS for connection
+	TLSInsecure   bool        // When true, skip TLS certificate verification
 }
 
 // REPLState holds the runtime state for the REPL session.
@@ -398,14 +402,18 @@ type HAClient struct {
 	authUsername    string        // Cached auth credentials for reconnection
 	authPassword    string        // Cached auth credentials for reconnection
 	lastAuth        bool          // Whether we successfully authenticated
+	useTLS          bool          // Whether to use TLS for connections
+	tlsInsecure     bool          // Whether to skip TLS certificate verification
 }
 
 // NewHAClient creates a new HA-aware client that can fail over between hosts.
 // hosts is a list of "host:port" addresses to try in order.
-func NewHAClient(hosts []string, targetPrimary bool) *HAClient {
+func NewHAClient(hosts []string, targetPrimary bool, useTLS bool, tlsInsecure bool) *HAClient {
 	return &HAClient{
 		hosts:         hosts,
 		targetPrimary: targetPrimary,
+		useTLS:        useTLS,
+		tlsInsecure:   tlsInsecure,
 	}
 }
 
@@ -415,7 +423,34 @@ func (h *HAClient) Connect() error {
 	var lastErr error
 
 	for i, host := range h.hosts {
-		conn, err := net.DialTimeout("tcp", host, ConnectionTimeout)
+		var conn net.Conn
+		var err error
+
+		if h.useTLS {
+			// Create TLS configuration
+			tlsConfig := &tls.Config{
+				ServerName: extractHostname(host),
+			}
+
+			if h.tlsInsecure {
+				tlsConfig.InsecureSkipVerify = true
+			} else {
+				// Load system CA certificates
+				certPool, err := x509.SystemCertPool()
+				if err != nil {
+					certPool = x509.NewCertPool()
+				}
+				tlsConfig.RootCAs = certPool
+			}
+
+			// Dial with TLS
+			dialer := &net.Dialer{Timeout: ConnectionTimeout}
+			conn, err = tls.DialWithDialer(dialer, "tcp", host, tlsConfig)
+		} else {
+			// Plain TCP connection
+			conn, err = net.DialTimeout("tcp", host, ConnectionTimeout)
+		}
+
 		if err != nil {
 			lastErr = err
 			continue
@@ -438,6 +473,14 @@ func (h *HAClient) Connect() error {
 	return fmt.Errorf("failed to connect to any host: %w", lastErr)
 }
 
+// extractHostname extracts the hostname from a "host:port" address.
+func extractHostname(addr string) string {
+	if idx := strings.LastIndex(addr, ":"); idx != -1 {
+		return addr[:idx]
+	}
+	return addr
+}
+
 // Reconnect attempts to reconnect to the cluster, trying alternate hosts.
 // It starts from the next host in the list after the current one.
 func (h *HAClient) Reconnect() error {
@@ -454,7 +497,34 @@ func (h *HAClient) Reconnect() error {
 
 	var lastErr error
 	for _, host := range hostsToTry {
-		conn, err := net.DialTimeout("tcp", host, ConnectionTimeout)
+		var conn net.Conn
+		var err error
+
+		if h.useTLS {
+			// Create TLS configuration
+			tlsConfig := &tls.Config{
+				ServerName: extractHostname(host),
+			}
+
+			if h.tlsInsecure {
+				tlsConfig.InsecureSkipVerify = true
+			} else {
+				// Load system CA certificates
+				certPool, err := x509.SystemCertPool()
+				if err != nil {
+					certPool = x509.NewCertPool()
+				}
+				tlsConfig.RootCAs = certPool
+			}
+
+			// Dial with TLS
+			dialer := &net.Dialer{Timeout: ConnectionTimeout}
+			conn, err = tls.DialWithDialer(dialer, "tcp", host, tlsConfig)
+		} else {
+			// Plain TCP connection
+			conn, err = net.DialTimeout("tcp", host, ConnectionTimeout)
+		}
+
 		if err != nil {
 			lastErr = err
 			continue
@@ -702,6 +772,8 @@ type CLIFlags struct {
 	Execute       string
 	ConfigFile    string
 	TargetPrimary bool // When true, prefer connecting to primary/leader
+	NoTLS         bool // When true, disable TLS and use plain TCP
+	TLSInsecure   bool // When true, skip TLS certificate verification
 }
 
 // parseFlags parses command-line flags and returns the configuration.
@@ -727,6 +799,8 @@ func parseFlags() CLIFlags {
 	flag.StringVar(&flags.ConfigFile, "config", "", "Path to configuration file")
 	flag.StringVar(&flags.ConfigFile, "c", "", "Path to configuration file (shorthand)")
 	flag.BoolVar(&flags.TargetPrimary, "target-primary", false, "Prefer connecting to primary/leader in cluster")
+	flag.BoolVar(&flags.NoTLS, "no-tls", false, "Disable TLS and use plain TCP connection")
+	flag.BoolVar(&flags.TLSInsecure, "tls-insecure", false, "Skip TLS certificate verification (insecure)")
 
 	// Custom usage function
 	flag.Usage = printUsage
@@ -850,6 +924,19 @@ func main() {
 	// Parse hosts list for HA cluster support (comma-separated)
 	hosts := parseHosts(flags.Host, flags.Port)
 
+	// Determine TLS settings (enabled by default, unless --no-tls is specified)
+	useTLS := !flags.NoTLS
+
+	// Check environment variable for TLS setting
+	if envTLS := os.Getenv("FLYDB_TLS_ENABLED"); envTLS != "" {
+		useTLS = strings.ToLower(envTLS) == "true" || envTLS == "1"
+	}
+
+	// Override with flag if explicitly set
+	if flags.NoTLS {
+		useTLS = false
+	}
+
 	// Create configuration struct and start the REPL.
 	config := CLIConfig{
 		Host:          flags.Host,
@@ -861,6 +948,8 @@ func main() {
 		Format:        cli.ParseOutputFormat(flags.Format),
 		Execute:       flags.Execute,
 		TargetPrimary: flags.TargetPrimary,
+		UseTLS:        useTLS,
+		TLSInsecure:   flags.TLSInsecure,
 	}
 
 	startREPL(config)
@@ -951,7 +1040,7 @@ func loadConfigFile(path string, flags *CLIFlags) error {
 }
 
 // connectWithRetry attempts to connect to the server with exponential backoff.
-func connectWithRetry(addr string) (*BinaryClient, error) {
+func connectWithRetry(addr string, useTLS bool, tlsInsecure bool) (*BinaryClient, error) {
 	var lastErr error
 	delay := InitialRetryDelay
 
@@ -961,7 +1050,34 @@ func connectWithRetry(addr string) (*BinaryClient, error) {
 		}
 
 		// Attempt connection with timeout
-		conn, err := net.DialTimeout("tcp", addr, ConnectionTimeout)
+		var conn net.Conn
+		var err error
+
+		if useTLS {
+			// Create TLS configuration
+			tlsConfig := &tls.Config{
+				ServerName: extractHostname(addr),
+			}
+
+			if tlsInsecure {
+				tlsConfig.InsecureSkipVerify = true
+			} else {
+				// Load system CA certificates
+				certPool, err := x509.SystemCertPool()
+				if err != nil {
+					certPool = x509.NewCertPool()
+				}
+				tlsConfig.RootCAs = certPool
+			}
+
+			// Dial with TLS
+			dialer := &net.Dialer{Timeout: ConnectionTimeout}
+			conn, err = tls.DialWithDialer(dialer, "tcp", addr, tlsConfig)
+		} else {
+			// Plain TCP connection
+			conn, err = net.DialTimeout("tcp", addr, ConnectionTimeout)
+		}
+
 		if err != nil {
 			lastErr = err
 			if attempt < MaxRetries {
@@ -1027,7 +1143,7 @@ func startREPL(config CLIConfig) {
 			fmt.Printf("Connecting to cluster (%s)...\n", strings.Join(config.Hosts, ", "))
 		}
 
-		haClient = NewHAClient(config.Hosts, config.TargetPrimary)
+		haClient = NewHAClient(config.Hosts, config.TargetPrimary, config.UseTLS, config.TLSInsecure)
 		if err := haClient.Connect(); err != nil {
 			if spinner != nil {
 				spinner.StopWithError("Connection failed")
@@ -1039,8 +1155,12 @@ func startREPL(config CLIConfig) {
 		addr = haClient.CurrentHost()
 		client = haClient.BinaryClient
 
+		protocol := "tcp"
+		if config.UseTLS {
+			protocol = "tls"
+		}
 		if spinner != nil {
-			spinner.StopWithSuccess(fmt.Sprintf("Connected to %s (cluster mode: %d nodes)", addr, len(config.Hosts)))
+			spinner.StopWithSuccess(fmt.Sprintf("Connected to %s://%s (cluster mode: %d nodes)", protocol, addr, len(config.Hosts)))
 		}
 	} else {
 		// Single host mode: use direct connection
@@ -1056,7 +1176,7 @@ func startREPL(config CLIConfig) {
 		}
 
 		var err error
-		client, err = connectWithRetry(addr)
+		client, err = connectWithRetry(addr, config.UseTLS, config.TLSInsecure)
 		if err != nil {
 			if spinner != nil {
 				spinner.StopWithError("Connection failed")
@@ -1064,8 +1184,13 @@ func startREPL(config CLIConfig) {
 			cli.ErrConnectionFailed(config.Host, config.Port, err).Exit()
 		}
 
+		protocol := "tcp"
+		if config.UseTLS {
+			protocol = "tls"
+		}
+
 		if spinner != nil {
-			spinner.StopWithSuccess(fmt.Sprintf("Connected to %s", addr))
+			spinner.StopWithSuccess(fmt.Sprintf("Connected to %s://%s", protocol, addr))
 		}
 	}
 	defer client.Close()
@@ -1290,7 +1415,7 @@ func startREPL(config CLIConfig) {
 					spinner.StopWithSuccess(fmt.Sprintf("Reconnected to %s", addr))
 				} else {
 					// Single host mode: retry the same address
-					newClient, reconnErr := connectWithRetry(addr)
+					newClient, reconnErr := connectWithRetry(addr, config.UseTLS, config.TLSInsecure)
 					if reconnErr != nil {
 						spinner.StopWithError("Failed to reconnect")
 						cli.PrintError("Exiting...")
@@ -1528,7 +1653,7 @@ func runSimpleREPL(config CLIConfig, client *BinaryClient, addr string) {
 
 				spinner := cli.NewSpinner("Reconnecting...")
 				spinner.Start()
-				newClient, reconnErr := connectWithRetry(addr)
+				newClient, reconnErr := connectWithRetry(addr, config.UseTLS, config.TLSInsecure)
 				if reconnErr != nil {
 					spinner.StopWithError("Failed to reconnect")
 					cli.PrintError("Exiting...")
