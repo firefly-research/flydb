@@ -55,8 +55,8 @@ func TestFromConfig(t *testing.T) {
 	cfg := &config.Config{
 		Port:              9000,
 		ReplPort:          9002,
-		Role:              "master",
-		MasterAddr:        "localhost:9999",
+		Role:              "cluster",
+		ClusterPeers:      []string{"localhost:9999"},
 		DBPath:            "/tmp/test.fdb",
 		EncryptionEnabled: true,
 		LogLevel:          "debug",
@@ -72,11 +72,11 @@ func TestFromConfig(t *testing.T) {
 	if wizardCfg.ReplPort != "9002" {
 		t.Errorf("Expected replication port '9002', got '%s'", wizardCfg.ReplPort)
 	}
-	if wizardCfg.Role != "master" {
-		t.Errorf("Expected role 'master', got '%s'", wizardCfg.Role)
+	if wizardCfg.Role != "cluster" {
+		t.Errorf("Expected role 'cluster', got '%s'", wizardCfg.Role)
 	}
-	if wizardCfg.MasterAddr != "localhost:9999" {
-		t.Errorf("Expected master_addr 'localhost:9999', got '%s'", wizardCfg.MasterAddr)
+	if len(wizardCfg.ClusterPeers) != 1 || wizardCfg.ClusterPeers[0] != "localhost:9999" {
+		t.Errorf("Expected cluster peers '[localhost:9999]', got '%v'", wizardCfg.ClusterPeers)
 	}
 	if wizardCfg.DBPath != "/tmp/test.fdb" {
 		t.Errorf("Expected db_path '/tmp/test.fdb', got '%s'", wizardCfg.DBPath)
@@ -99,8 +99,8 @@ func TestToConfig(t *testing.T) {
 	wizardCfg := &Config{
 		Port:              "9000",
 		ReplPort:          "9002",
-		Role:              "slave",
-		MasterAddr:        "master.example.com:9999",
+		Role:              "cluster",
+		ClusterPeers:      []string{"node1:9999"},
 		DBPath:            "/var/lib/flydb/data.fdb",
 		EncryptionEnabled: true,
 		LogLevel:          "warn",
@@ -116,11 +116,11 @@ func TestToConfig(t *testing.T) {
 	if cfg.ReplPort != 9002 {
 		t.Errorf("Expected replication port 9002, got %d", cfg.ReplPort)
 	}
-	if cfg.Role != "slave" {
-		t.Errorf("Expected role 'slave', got '%s'", cfg.Role)
+	if cfg.Role != "cluster" {
+		t.Errorf("Expected role 'cluster', got '%s'", cfg.Role)
 	}
-	if cfg.MasterAddr != "master.example.com:9999" {
-		t.Errorf("Expected master_addr 'master.example.com:9999', got '%s'", cfg.MasterAddr)
+	if len(cfg.ClusterPeers) != 1 || cfg.ClusterPeers[0] != "node1:9999" {
+		t.Errorf("Expected cluster peers '[node1:9999]', got '%v'", cfg.ClusterPeers)
 	}
 	if cfg.DBPath != "/var/lib/flydb/data.fdb" {
 		t.Errorf("Expected db_path '/var/lib/flydb/data.fdb', got '%s'", cfg.DBPath)
@@ -172,8 +172,7 @@ func TestSaveConfigToFile(t *testing.T) {
 	wizardCfg := &Config{
 		Port:       "7777",
 		ReplPort:   "7779",
-		Role:       "master",
-		MasterAddr: "",
+		Role:       "cluster",
 		DBPath:     "/tmp/test.fdb",
 		LogLevel:   "debug",
 		LogJSON:    true,
@@ -200,8 +199,8 @@ func TestSaveConfigToFile(t *testing.T) {
 	if loaded.Port != 7777 {
 		t.Errorf("Expected port 7777, got %d", loaded.Port)
 	}
-	if loaded.Role != "master" {
-		t.Errorf("Expected role 'master', got '%s'", loaded.Role)
+	if loaded.Role != "cluster" {
+		t.Errorf("Expected role 'cluster', got '%s'", loaded.Role)
 	}
 	if loaded.LogLevel != "debug" {
 		t.Errorf("Expected log_level 'debug', got '%s'", loaded.LogLevel)
@@ -216,7 +215,7 @@ func TestLoadExistingConfig(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	configContent := `role = "master"
+	configContent := `role = "cluster"
 port = 9000
 replication_port = 9002
 db_path = "/tmp/test.fdb"
@@ -245,8 +244,8 @@ log_level = "debug"
 	if cfg.Port != 9000 {
 		t.Errorf("Expected port 9000, got %d", cfg.Port)
 	}
-	if cfg.Role != "master" {
-		t.Errorf("Expected role 'master', got '%s'", cfg.Role)
+	if cfg.Role != "cluster" {
+		t.Errorf("Expected role 'cluster', got '%s'", cfg.Role)
 	}
 }
 
@@ -256,7 +255,6 @@ func TestRoundTrip(t *testing.T) {
 		Port:              8889,
 		ReplPort:          9999,
 		Role:              "standalone",
-		MasterAddr:        "",
 		DBPath:            "flydb.fdb",
 		EncryptionEnabled: true,
 		LogLevel:          "info",

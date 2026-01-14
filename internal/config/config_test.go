@@ -68,25 +68,6 @@ func TestConfigValidation(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "valid master config",
-			cfg: func() *Config {
-				cfg := validTestConfig()
-				cfg.Role = "master"
-				return cfg
-			}(),
-			wantErr: false,
-		},
-		{
-			name: "valid slave config",
-			cfg: func() *Config {
-				cfg := validTestConfig()
-				cfg.Role = "slave"
-				cfg.MasterAddr = "localhost:9999"
-				return cfg
-			}(),
-			wantErr: false,
-		},
-		{
 			name: "invalid port - zero",
 			cfg: func() *Config {
 				cfg := validTestConfig()
@@ -109,16 +90,6 @@ func TestConfigValidation(t *testing.T) {
 			cfg: func() *Config {
 				cfg := validTestConfig()
 				cfg.Role = "invalid"
-				return cfg
-			}(),
-			wantErr: true,
-		},
-		{
-			name: "slave without master_addr",
-			cfg: func() *Config {
-				cfg := validTestConfig()
-				cfg.Role = "slave"
-				cfg.MasterAddr = ""
 				return cfg
 			}(),
 			wantErr: true,
@@ -191,13 +162,13 @@ func TestLoadFromFile(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	configContent := `# Test configuration
-role = "master"
+role = "cluster"
 port = 9000
 replication_port = 9002
 db_path = "/tmp/test.fdb"
 log_level = "debug"
 log_json = true
-master_addr = "localhost:9999"
+cluster_peers = ["node2:9998"]
 `
 
 	configPath := filepath.Join(tmpDir, "flydb.conf")
@@ -212,8 +183,8 @@ master_addr = "localhost:9999"
 
 	cfg := mgr.Get()
 
-	if cfg.Role != "master" {
-		t.Errorf("Expected role 'master', got '%s'", cfg.Role)
+	if cfg.Role != "cluster" {
+		t.Errorf("Expected role 'cluster', got '%s'", cfg.Role)
 	}
 	if cfg.Port != 9000 {
 		t.Errorf("Expected port 9000, got %d", cfg.Port)
@@ -254,7 +225,7 @@ func TestLoadFromEnv(t *testing.T) {
 
 	// Set test env vars
 	os.Setenv(EnvPort, "7777")
-	os.Setenv(EnvRole, "master")
+	os.Setenv(EnvRole, "cluster")
 	os.Setenv(EnvLogLevel, "debug")
 	os.Setenv(EnvLogJSON, "true")
 	os.Setenv(EnvAdminPassword, "testpassword")
@@ -267,8 +238,8 @@ func TestLoadFromEnv(t *testing.T) {
 	if cfg.Port != 7777 {
 		t.Errorf("Expected port 7777 from env, got %d", cfg.Port)
 	}
-	if cfg.Role != "master" {
-		t.Errorf("Expected role 'master' from env, got '%s'", cfg.Role)
+	if cfg.Role != "cluster" {
+		t.Errorf("Expected role 'cluster' from env, got '%s'", cfg.Role)
 	}
 	if cfg.LogLevel != "debug" {
 		t.Errorf("Expected log_level 'debug' from env, got '%s'", cfg.LogLevel)
@@ -321,19 +292,19 @@ log_level = "info"
 
 func TestToTOML(t *testing.T) {
 	cfg := &Config{
-		Port:       8889,
-		ReplPort:   9999,
-		Role:       "master",
-		MasterAddr: "localhost:9999",
-		DBPath:     "/var/lib/flydb/data.fdb",
-		LogLevel:   "info",
-		LogJSON:    false,
+		Port:         8889,
+		ReplPort:     9999,
+		Role:         "cluster",
+		ClusterPeers: []string{"node2:9998"},
+		DBPath:       "/var/lib/flydb/data.fdb",
+		LogLevel:     "info",
+		LogJSON:      false,
 	}
 
 	toml := cfg.ToTOML()
 
 	// Check that key values are present
-	if !contains(toml, "role = \"master\"") {
+	if !contains(toml, "role = \"cluster\"") {
 		t.Error("TOML output missing role")
 	}
 	if !contains(toml, "port = 8889") {
@@ -353,7 +324,8 @@ func TestSaveToFile(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Port = 7777
-	cfg.Role = "master"
+	cfg.Role = "cluster"
+	cfg.ClusterPeers = []string{"node2:9998"}
 
 	configPath := filepath.Join(tmpDir, "subdir", "flydb.conf")
 	if err := cfg.SaveToFile(configPath); err != nil {
@@ -375,8 +347,8 @@ func TestSaveToFile(t *testing.T) {
 	if loaded.Port != 7777 {
 		t.Errorf("Expected port 7777, got %d", loaded.Port)
 	}
-	if loaded.Role != "master" {
-		t.Errorf("Expected role 'master', got '%s'", loaded.Role)
+	if loaded.Role != "cluster" {
+		t.Errorf("Expected role 'cluster', got '%s'", loaded.Role)
 	}
 }
 

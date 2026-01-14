@@ -24,8 +24,7 @@ Operative Modes:
 ================
 
   - Standalone: Single server mode for development or small deployments
-  - Master: Leader node that accepts writes and replicates to followers
-  - Slave: Follower node that receives replication from a master
+  - Cluster: Distributed cluster mode with automatic failover
 
 Interactive Flow:
 =================
@@ -83,7 +82,6 @@ type Config struct {
 	ReplPort             string
 	ClusterPort          string
 	Role                 string
-	MasterAddr           string
 	DBPath               string
 	DataDir              string // Directory for multi-database storage
 	MultiDBEnabled       bool   // Enable multi-database mode
@@ -136,7 +134,6 @@ func DefaultConfig() Config {
 		ReplPort:          "9999",
 		ClusterPort:       "9998",
 		Role:              "standalone",
-		MasterAddr:        "",
 		DBPath:            "flydb.fdb",
 		DataDir:           config.GetDefaultDataDir(),
 		MultiDBEnabled:    true, // Multi-database mode is always enabled
@@ -186,9 +183,7 @@ func FromConfig(cfg *config.Config) Config {
 		ReplPort:             strconv.Itoa(cfg.ReplPort),
 		ClusterPort:          strconv.Itoa(cfg.ClusterPort),
 		Role:                 cfg.Role,
-		MasterAddr:           cfg.MasterAddr,
 		DBPath:               cfg.DBPath,
-		DataDir:              cfg.DataDir,
 		MultiDBEnabled:       cfg.DataDir != "",
 		EncryptionEnabled:    cfg.EncryptionEnabled,
 		EncryptionPassphrase: cfg.EncryptionPassphrase,
@@ -246,7 +241,6 @@ func (c *Config) ToConfig() *config.Config {
 		ReplPort:             replPort,
 		ClusterPort:          clusterPort,
 		Role:                 c.Role,
-		MasterAddr:           c.MasterAddr,
 		DBPath:               c.DBPath,
 		DataDir:              dataDir,
 		EncryptionEnabled:    c.EncryptionEnabled,
@@ -341,10 +335,6 @@ func DisplayExistingConfig(cfg *config.Config, configPath string) {
 	switch cfg.Role {
 	case "standalone":
 		roleDisplay = "Standalone"
-	case "master":
-		roleDisplay = "Master"
-	case "slave":
-		roleDisplay = "Slave"
 	case "cluster":
 		roleDisplay = "Cluster"
 	default:
@@ -353,19 +343,13 @@ func DisplayExistingConfig(cfg *config.Config, configPath string) {
 
 	fmt.Printf("    %-16s %s %s\n", cli.Dimmed("Role:"), roleDisplay, cli.Dimmed(getRoleDescription(cfg.Role)))
 	fmt.Printf("    %-16s %d\n", cli.Dimmed("Port:"), cfg.Port)
-	if cfg.Role == "master" || cfg.Role == "cluster" {
-		fmt.Printf("    %-16s %d\n", cli.Dimmed("Repl Port:"), cfg.ReplPort)
-	}
 	if cfg.Role == "cluster" {
+		fmt.Printf("    %-16s %d\n", cli.Dimmed("Repl Port:"), cfg.ReplPort)
 		fmt.Printf("    %-16s %d\n", cli.Dimmed("Cluster Port:"), cfg.ClusterPort)
 		if len(cfg.ClusterPeers) > 0 {
 			fmt.Printf("    %-16s %v\n", cli.Dimmed("Cluster Peers:"), cfg.ClusterPeers)
 		}
 		fmt.Printf("    %-16s %s\n", cli.Dimmed("Replication:"), cfg.ReplicationMode)
-	}
-
-	if cfg.Role == "slave" && cfg.MasterAddr != "" {
-		fmt.Printf("    %-16s %s\n", cli.Dimmed("Master:"), cfg.MasterAddr)
 	}
 
 	// Storage
@@ -384,10 +368,6 @@ func getRoleDescription(role string) string {
 	switch role {
 	case "standalone":
 		return "(single server)"
-	case "master":
-		return "(leader node)"
-	case "slave":
-		return "(follower node)"
 	case "cluster":
 		return "(distributed cluster)"
 	default:
@@ -697,9 +677,7 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 	printStepHeader(1, "Server Role")
 	fmt.Println()
 	fmt.Printf("    %s  Standalone %s\n", cli.Success("[1]"), cli.Dimmed("- single server, development/small deployments"))
-	fmt.Printf("    %s  Master     %s\n", cli.Highlight("[2]"), cli.Dimmed("- leader node, accepts writes"))
-	fmt.Printf("    %s  Slave      %s\n", cli.Highlight("[3]"), cli.Dimmed("- follower node, read replicas"))
-	fmt.Printf("    %s  Cluster    %s\n", cli.Highlight("[4]"), cli.Dimmed("- distributed cluster with automatic failover"))
+	fmt.Printf("    %s  Cluster    %s\n", cli.Highlight("[2]"), cli.Dimmed("- distributed cluster with automatic failover"))
 	fmt.Println()
 
 	// Determine default mode selection based on current role
@@ -707,12 +685,8 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 	switch cfg.Role {
 	case "standalone":
 		defaultMode = "1"
-	case "master":
-		defaultMode = "2"
-	case "slave":
-		defaultMode = "3"
 	case "cluster":
-		defaultMode = "4"
+		defaultMode = "2"
 	}
 
 	mode := promptWithDefault(reader, "  Select role", defaultMode)
@@ -720,10 +694,6 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 	case "1":
 		cfg.Role = "standalone"
 	case "2":
-		cfg.Role = "master"
-	case "3":
-		cfg.Role = "slave"
-	case "4":
 		cfg.Role = "cluster"
 	default:
 		cfg.Role = "standalone"
@@ -736,27 +706,14 @@ func runConfigurationSteps(reader *bufio.Reader, cfg *Config, needsAdminSetup bo
 
 	cfg.Port = promptPortWithValidation(reader, "  Server port (binary protocol)", cfg.Port)
 
-	if cfg.Role == "master" || cfg.Role == "cluster" {
-		cfg.ReplPort = promptPortWithValidation(reader, "  Replication port", cfg.ReplPort)
-	}
 	if cfg.Role == "cluster" {
+		cfg.ReplPort = promptPortWithValidation(reader, "  Replication port", cfg.ReplPort)
 		cfg.ClusterPort = promptPortWithValidation(reader, "  Cluster port", cfg.ClusterPort)
 	}
 	fmt.Println()
 
 	// Step 3: Configure role-specific settings
 	stepNum := 3
-	if cfg.Role == "slave" {
-		printStepHeader(stepNum, "Replication")
-		fmt.Println()
-		defaultMaster := cfg.MasterAddr
-		if defaultMaster == "" {
-			defaultMaster = "localhost:9999"
-		}
-		cfg.MasterAddr = promptWithValidation(reader, "  Master address (host:port)", defaultMaster, validateAddress)
-		fmt.Println()
-		stepNum++
-	}
 
 	// Configure cluster-specific settings
 	if cfg.Role == "cluster" {
@@ -1143,15 +1100,9 @@ func printSummary(cfg *Config) {
 
 	// Ports
 	fmt.Printf("    %-16s %s\n", cli.Dimmed("Port:"), cfg.Port)
-	if cfg.Role == "master" || cfg.Role == "cluster" {
-		fmt.Printf("    %-16s %s\n", cli.Dimmed("Repl Port:"), cfg.ReplPort)
-	}
 	if cfg.Role == "cluster" {
+		fmt.Printf("    %-16s %s\n", cli.Dimmed("Repl Port:"), cfg.ReplPort)
 		fmt.Printf("    %-16s %s\n", cli.Dimmed("Cluster Port:"), cfg.ClusterPort)
-	}
-
-	if cfg.Role == "slave" {
-		fmt.Printf("    %-16s %s\n", cli.Dimmed("Master:"), cfg.MasterAddr)
 	}
 
 	// Cluster configuration
