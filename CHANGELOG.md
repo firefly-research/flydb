@@ -7,6 +7,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [01.26.15] - 2026-01-14
+
+### TLS Transport Security Implementation
+
+This release introduces comprehensive TLS support for all client-server connections, enabled by default for enhanced security. The implementation includes automatic certificate generation, flexible configuration options, and full backward compatibility for legacy deployments.
+
+### Added
+
+#### TLS Transport Security
+- **TLS enabled by default**: All client-server connections now use TLS 1.2+ encryption by default
+- **Auto-generated certificates**: Self-signed certificates automatically generated using ECDSA (P-256/P-384) for development/testing
+- **Certificate management**: Complete certificate lifecycle including generation, validation, and expiration warnings (30-day alerts)
+- **Secure defaults**: Modern cipher suites (ECDHE-ECDSA/RSA-AES-GCM, ChaCha20-Poly1305) with TLS 1.2+ minimum version
+- **Automatic certificate paths**:
+  - Root user: `/etc/flydb/certs/server.crt` and `/etc/flydb/certs/server.key`
+  - Non-root user: `~/.config/flydb/certs/server.crt` and `~/.config/flydb/certs/server.key`
+- **Proper file permissions**: Certificates (0644), private keys (0600) set automatically
+
+#### Server TLS Configuration
+- **New command-line flags**:
+  - `-tls-enabled` (default: true) - Enable/disable TLS
+  - `-tls-cert-file` (default: auto) - Path to TLS certificate file
+  - `-tls-key-file` (default: auto) - Path to TLS private key file
+  - `-tls-auto-gen` (default: true) - Auto-generate self-signed certificates
+- **New environment variables**:
+  - `FLYDB_TLS_ENABLED` - Enable/disable TLS (true/false)
+  - `FLYDB_TLS_CERT_FILE` - Path to TLS certificate file
+  - `FLYDB_TLS_KEY_FILE` - Path to TLS private key file
+  - `FLYDB_TLS_AUTO_GEN` - Auto-generate certificates (true/false)
+- **Configuration file support**: TLS settings in `flydb.yaml` with `tls_enabled`, `tls_cert_file`, `tls_key_file`, `tls_auto_gen`
+
+#### Client TLS Support
+- **flydb-shell TLS flags**:
+  - `--no-tls` - Disable TLS for connecting to legacy servers
+  - `--tls-insecure` - Skip certificate verification for self-signed certificates
+- **flydb-dump TLS flags**:
+  - `--no-tls` - Disable TLS for legacy server connections
+  - `--tls-insecure` - Skip certificate verification for self-signed certificates
+- **TLS connection status**: Connection messages show protocol (`tls://` or `tcp://`)
+- **Environment variable support**: `FLYDB_TLS_ENABLED` respected by all client tools
+
+#### Interactive Wizard TLS Configuration
+- **New TLS configuration step**: Guided setup for TLS settings during installation
+- **Certificate mode selection**: Choose between auto-generated or custom certificates
+- **Custom certificate paths**: Prompt for certificate and key file paths when using custom certificates
+- **TLS status in summary**: Configuration summary displays TLS status and certificate mode
+
+### Changed
+
+- **Security by default**: TLS is now enabled by default for all new installations
+- **Connection protocol display**: Server startup and client connection messages show `tls://` instead of `tcp://` when TLS is enabled
+- **Server listener logic**: TLS listener replaces plain TCP listener when TLS is enabled (not both simultaneously)
+- **README security section**: Updated to highlight TLS as a default security feature alongside encryption at rest
+
+### Security
+
+- **Transport layer encryption**: All client-server communication encrypted by default using TLS 1.2+
+- **Modern cryptography**: ECDSA key generation with P-256/P-384 curves
+- **Secure cipher suites**: Only modern, secure cipher suites enabled (no legacy/weak ciphers)
+- **Certificate validation**: Automatic expiration checking with advance warnings
+- **Production warnings**: Clear warnings when using self-signed certificates in production
+
+### Documentation
+
+- **README updates**:
+  - New "TLS Encryption (Transport Security)" section with usage examples
+  - TLS troubleshooting guide with common issues and solutions
+  - Updated environment variables and CLI flags tables
+  - Updated configuration file examples
+- **API documentation**: TLS configuration options and connection flags documented
+- **Architecture documentation**: New TLS layer section with component details
+- **Installation wizard**: TLS configuration step added to interactive setup
+
+### Backward Compatibility
+
+- **Legacy server support**: `--no-tls` flag allows connections to servers without TLS
+- **Opt-out mechanism**: TLS can be disabled via `FLYDB_TLS_ENABLED=false` or `-tls-enabled=false`
+- **No breaking changes**: Existing configurations continue to work with TLS disabled
+- **Self-signed certificate support**: `--tls-insecure` flag for development/testing environments
+
+### Usage Examples
+
+```bash
+# Server: Start with auto-generated TLS certificates (default)
+flydb -data-dir ./data
+
+# Server: Use custom certificates (production)
+flydb -data-dir ./data \
+  -tls-cert-file /path/to/server.crt \
+  -tls-key-file /path/to/server.key
+
+# Server: Disable TLS (legacy/testing)
+FLYDB_TLS_ENABLED=false flydb -data-dir ./data
+
+# Client: Connect with TLS (skip verification for self-signed certs)
+flydb-shell --host localhost --port 8889 --tls-insecure
+
+# Client: Connect without TLS (to legacy servers)
+flydb-shell --host localhost --port 8889 --no-tls
+
+# Dump: Export with TLS
+flydb-dump --host localhost --port 8889 --tls-insecure -o backup.sql
+
+# Dump: Export without TLS (legacy servers)
+flydb-dump --host localhost --port 8889 --no-tls -o backup.sql
+```
+
+---
+
 ## [01.26.14] - 2026-01-13
 
 ### Cluster Mode Fixes and HA Client Support

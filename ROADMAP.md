@@ -2,8 +2,8 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.14
-**Last Updated:** January 13, 2026
+**Version:** 01.26.15
+**Last Updated:** January 14, 2026
 
 ---
 
@@ -143,6 +143,13 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Built-in Admin Account | Bootstrap operations | 01.26.1 |
 | Secure Admin Password Setup | Generated or user-specified on first run | 01.26.1 |
 | Environment Variable Config | FLYDB_ADMIN_PASSWORD for automated deployments | 01.26.1 |
+| TLS Transport Security | TLS 1.2+ encryption for all client-server connections (enabled by default) | 01.26.15 |
+| Auto-Generated Certificates | Self-signed certificate generation using ECDSA (P-256/P-384) | 01.26.15 |
+| Certificate Management | Validation, expiration checking, and 30-day renewal warnings | 01.26.15 |
+| Secure Cipher Suites | Modern ciphers only (ECDHE-ECDSA/RSA-AES-GCM, ChaCha20-Poly1305) | 01.26.15 |
+| TLS Configuration | Flexible TLS settings via CLI flags, environment variables, and config file | 01.26.15 |
+| Custom Certificates | Support for production certificates from trusted CAs | 01.26.15 |
+| Backward Compatibility | Optional TLS disable for legacy deployments | 01.26.15 |
 
 ### Distributed Features
 
@@ -179,7 +186,7 @@ This document outlines the development roadmap for FlyDB, including completed fe
 |---------|-------------|---------|
 | Connection Pooling | Efficient connection management | 01.26.1 |
 | Query Caching | LRU cache with TTL and auto-invalidation | 01.26.1 |
-| TLS Support | Encrypted client-server connections | 01.26.1 |
+| TLS Support | Encrypted client-server connections (enhanced with auto-generation in 01.26.15) | 01.26.1 |
 | Zero-Copy Message Delivery | Buffer pooling and direct buffer access for reduced allocations | 01.26.13 |
 | Batch Compression | Configurable compression (Gzip, LZ4, Snappy, Zstd) for WAL and replication | 01.26.13 |
 | Connection Multiplexing | Multiple logical streams over single TCP connection | 01.26.13 |
@@ -429,6 +436,9 @@ storage:
 
 | Version | Release Date | Highlights |
 |---------|--------------|------------|
+| 01.26.15 | January 14, 2026 | TLS transport security enabled by default with auto-generated certificates |
+| 01.26.14 | January 13, 2026 | Cluster mode fixes, HA client connections, remote flydb-dump support |
+| 01.26.13 | January 12, 2026 | Raft consensus, enhanced replication, zero-copy messaging, async disk I/O |
 | 01.26.11 | January 2026 | Function value evaluation in INSERT/UPDATE, UUID generation functions |
 | 01.26.10 | January 2026 | Unified cluster architecture, SQL dump utility, JSONB support |
 | 01.26.9 | January 2026 | Production-ready cluster mode with automatic leader election and failover |
