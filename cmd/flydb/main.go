@@ -611,6 +611,7 @@ func main() {
 			SyncTimeout:         time.Duration(cfg.SyncTimeout) * time.Millisecond,
 			EnableAutoRebalance: true,
 			DataDir:             cfg.DataDir,
+			EncryptionKeyHash:   storage.ComputeEncryptionKeyHash(encConfig), // CRITICAL: For cluster encryption validation
 		}
 
 		// Set default consistency based on replication mode

@@ -1700,6 +1700,13 @@ wizard_step_security() {
     echo -e "  ${DIM}• Encrypts WAL data on disk using AES-256-GCM${RESET}"
     echo -e "  ${YELLOW}${ICON_WARNING}${RESET} ${YELLOW}Encryption is enabled by default for security${RESET}"
     echo -e "  ${YELLOW}${ICON_WARNING}${RESET} ${YELLOW}Keep your passphrase safe - data cannot be recovered without it!${RESET}"
+
+    # Cluster-specific warning
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        echo ""
+        echo -e "  ${RED}${ICON_WARNING}${RESET} ${RED}${BOLD}CLUSTER MODE: All nodes MUST use the SAME passphrase!${RESET}"
+        echo -e "  ${DIM}  Nodes with different passphrases will be rejected from the cluster${RESET}"
+    fi
     echo ""
 
     if prompt_yes_no "Enable data-at-rest encryption?" "y"; then
@@ -1707,6 +1714,11 @@ wizard_step_security() {
 
         echo ""
         echo -e "  ${DIM}Enter a passphrase or leave empty for auto-generated${RESET}"
+
+        # Additional cluster warning
+        if [[ "$SERVER_ROLE" == "cluster" ]]; then
+            echo -e "  ${YELLOW}${ICON_WARNING}${RESET} ${YELLOW}Use the SAME passphrase on ALL cluster nodes${RESET}"
+        fi
 
         # Check for environment variable
         if [[ -n "${FLYDB_ENCRYPTION_PASSPHRASE:-}" ]]; then
@@ -2261,6 +2273,11 @@ show_configuration_summary() {
         echo -e "      ${CYAN}${ENCRYPTION_PASSPHRASE}${RESET}"
         echo -e "      ${DIM}(Save this securely - NOT stored in flydb.json)${RESET}"
         echo -e "      ${DIM}(Required via FLYDB_ENCRYPTION_PASSPHRASE env var)${RESET}"
+
+        # Cluster-specific warning
+        if [[ "$SERVER_ROLE" == "cluster" ]]; then
+            echo -e "      ${RED}${BOLD}⚠ CLUSTER: Use this SAME passphrase on ALL nodes!${RESET}"
+        fi
         echo ""
     fi
 }
@@ -2316,6 +2333,13 @@ configure_section_security() {
 
     echo -e "  ${BOLD}Data-at-Rest Encryption${RESET}"
     echo -e "  ${DIM}Encrypt all data stored on disk using AES-256-GCM.${RESET}"
+
+    # Cluster-specific warning
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        echo ""
+        echo -e "  ${RED}${BOLD}⚠ CLUSTER MODE:${RESET} ${RED}All nodes MUST use the SAME passphrase!${RESET}"
+        echo -e "  ${DIM}Nodes with different passphrases will be rejected from the cluster${RESET}"
+    fi
     echo ""
 
     if prompt_yes_no "Enable data-at-rest encryption" "$([[ "$ENCRYPTION_ENABLED" == "true" ]] && echo "y" || echo "n")"; then
@@ -2323,6 +2347,11 @@ configure_section_security() {
         echo ""
         echo -e "  ${YELLOW}${BOLD}⚠ IMPORTANT:${RESET} ${YELLOW}Passphrase is NOT stored in config file${RESET}"
         echo -e "  ${DIM}For security, you must provide it via FLYDB_ENCRYPTION_PASSPHRASE env var${RESET}"
+
+        # Additional cluster warning
+        if [[ "$SERVER_ROLE" == "cluster" ]]; then
+            echo -e "  ${RED}${BOLD}⚠ CLUSTER:${RESET} ${RED}Use the SAME passphrase on ALL nodes${RESET}"
+        fi
         echo ""
         echo -e "  ${DIM}Leave empty to auto-generate a secure passphrase${RESET}"
         local custom_pass

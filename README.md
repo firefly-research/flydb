@@ -981,6 +981,39 @@ export FLYDB_ENCRYPTION_PASSPHRASE="your-passphrase"
 
 The installer will auto-generate a secure passphrase if you don't provide one. **Save this passphrase securely** - without it, you cannot access your encrypted data!
 
+**🔴 CRITICAL FOR CLUSTER MODE:**
+
+**All nodes in a cluster MUST use the SAME encryption passphrase!**
+
+When running in cluster mode, encryption keys are validated during node join. If a node attempts to join with a different encryption passphrase, it will be **rejected** with a clear error message:
+
+```
+❌ FATAL: Cluster join REJECTED - Encryption key mismatch!
+All cluster nodes MUST use the SAME encryption passphrase!
+```
+
+**Example - Cluster with Encryption:**
+
+```bash
+# Node 1
+export FLYDB_ENCRYPTION_PASSPHRASE="my-cluster-secret-passphrase"
+./flydb -role cluster -cluster-port 9998 -cluster-peers node2:9998,node3:9998
+
+# Node 2 (MUST use the SAME passphrase)
+export FLYDB_ENCRYPTION_PASSPHRASE="my-cluster-secret-passphrase"
+./flydb -role cluster -cluster-port 9998 -cluster-peers node1:9998,node3:9998
+
+# Node 3 (MUST use the SAME passphrase)
+export FLYDB_ENCRYPTION_PASSPHRASE="my-cluster-secret-passphrase"
+./flydb -role cluster -cluster-port 9998 -cluster-peers node1:9998,node2:9998
+```
+
+**Why this matters:**
+- Encrypted data is replicated between nodes during synchronization
+- Nodes with different encryption keys cannot decrypt each other's data
+- This would cause replication failures and data corruption
+- The system validates encryption key compatibility during cluster join to prevent this
+
 To disable encryption:
 
 ```bash

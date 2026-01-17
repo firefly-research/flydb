@@ -47,6 +47,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"strings"
@@ -176,4 +177,44 @@ func IsEncryptionError(err error) bool {
 		strings.Contains(errStr, "cipher:") ||
 		strings.Contains(errStr, "decryption failed") ||
 		errors.Is(err, ErrEncryptionFailed)
+}
+
+// ComputeEncryptionKeyHash computes a SHA-256 hash of the derived encryption key.
+// This hash can be used to verify that all cluster nodes are using the same encryption key
+// without exposing the actual key or passphrase.
+//
+// IMPORTANT FOR CLUSTER MODE:
+// All nodes in a cluster MUST use the same encryption passphrase. If nodes have different
+// passphrases, they will derive different encryption keys and will be unable to decrypt
+// each other's data, causing replication failures and data corruption.
+//
+// This function returns a hex-encoded hash that can be safely exchanged between nodes
+// during cluster join to validate encryption key compatibility.
+//
+// Parameters:
+//   - config: Encryption configuration (same as used for NewEncryptor)
+//
+// Returns the hex-encoded SHA-256 hash of the encryption key, or empty string if encryption is disabled.
+func ComputeEncryptionKeyHash(config EncryptionConfig) string {
+	if !config.Enabled {
+		return ""
+	}
+
+	// Derive the key using the same logic as NewEncryptor
+	key := config.Key
+	if len(key) == 0 && config.Passphrase != "" {
+		salt := config.Salt
+		if len(salt) == 0 {
+			salt = DefaultSalt
+		}
+		key = pbkdf2.Key([]byte(config.Passphrase), salt, KeyDerivationIterations, 32, sha256.New)
+	}
+
+	if len(key) != 32 {
+		return "" // Invalid key
+	}
+
+	// Compute SHA-256 hash of the key
+	hash := sha256.Sum256(key)
+	return hex.EncodeToString(hash[:])
 }

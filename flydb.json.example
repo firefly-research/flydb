@@ -12,6 +12,7 @@
   "checkpoint_secs": 60,
 
   "_encryption_note": "IMPORTANT: Encryption passphrase is NOT stored in this file for security. Set via FLYDB_ENCRYPTION_PASSPHRASE environment variable.",
+  "_encryption_cluster_note": "CRITICAL FOR CLUSTER MODE: All nodes MUST use the SAME encryption passphrase! Nodes with different passphrases will be rejected.",
   "encryption_enabled": true,
   
   "tls_enabled": true,

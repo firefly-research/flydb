@@ -197,6 +197,10 @@ type ClusterConfig struct {
 
 	// DataDir is the directory for storing cluster metadata
 	DataDir string `json:"data_dir"`
+
+	// EncryptionKeyHash is the SHA-256 hash of the encryption key
+	// Used to validate that all cluster nodes use the same encryption key
+	EncryptionKeyHash string `json:"encryption_key_hash,omitempty"`
 }
 
 // DefaultClusterConfig returns a ClusterConfig with sensible defaults
@@ -311,6 +315,11 @@ type ClusterNode struct {
 
 	// Metadata holds additional node metadata
 	Metadata map[string]string `json:"metadata"`
+
+	// EncryptionKeyHash is the SHA-256 hash of the encryption key (for validation)
+	// All nodes in a cluster MUST have the same encryption key hash.
+	// Empty string means encryption is disabled.
+	EncryptionKeyHash string `json:"encryption_key_hash,omitempty"`
 }
 
 // NodeState represents the state of a cluster node
@@ -734,14 +743,15 @@ func NewUnifiedClusterManager(config ClusterConfig) *UnifiedClusterManager {
 
 	// Add self to nodes
 	selfNode := &ClusterNode{
-		ID:          config.NodeID,
-		Addr:        config.NodeAddr,
-		ClusterPort: config.ClusterPort,
-		DataPort:    config.DataPort,
-		State:       NodeAlive,
-		Role:        RoleFollower,
-		JoinedAt:    time.Now(),
-		Metadata:    make(map[string]string),
+		ID:                config.NodeID,
+		Addr:              config.NodeAddr,
+		ClusterPort:       config.ClusterPort,
+		DataPort:          config.DataPort,
+		State:             NodeAlive,
+		Role:              RoleFollower,
+		JoinedAt:          time.Now(),
+		Metadata:          make(map[string]string),
+		EncryptionKeyHash: config.EncryptionKeyHash, // Include encryption key hash
 	}
 	ucm.nodes[config.NodeID] = selfNode
 	ucm.ring.AddNode(selfNode)
@@ -1197,8 +1207,9 @@ const (
 	msgVoteResponse  byte = 0x03
 	msgJoinRequest   byte = 0x04
 	msgJoinResponse  byte = 0x05
-	msgPartitionSync byte = 0x06
-	msgDataSync      byte = 0x07
+	msgJoinRejected  byte = 0x06 // Join rejected (e.g., encryption key mismatch)
+	msgPartitionSync byte = 0x07
+	msgDataSync      byte = 0x08
 )
 
 // heartbeatLoop sends periodic heartbeats to all nodes
@@ -1369,6 +1380,25 @@ func (ucm *UnifiedClusterManager) handleJoinRequest(conn net.Conn) {
 	var node ClusterNode
 	if err := json.Unmarshal(data, &node); err != nil {
 		return
+	}
+
+	// CRITICAL: Validate encryption key hash
+	// All nodes in a cluster MUST use the same encryption key
+	if ucm.config.EncryptionKeyHash != "" || node.EncryptionKeyHash != "" {
+		if ucm.config.EncryptionKeyHash != node.EncryptionKeyHash {
+			// Encryption key mismatch - REJECT the join request
+			fmt.Printf("❌ REJECTED node %s: Encryption key mismatch!\n", node.ID)
+			fmt.Printf("   Local encryption hash:  %s\n", ucm.config.EncryptionKeyHash)
+			fmt.Printf("   Remote encryption hash: %s\n", node.EncryptionKeyHash)
+			fmt.Println("   All cluster nodes MUST use the same FLYDB_ENCRYPTION_PASSPHRASE")
+
+			// Send rejection response
+			conn.Write([]byte{msgJoinRejected})
+			errorMsg := "Encryption key mismatch: All cluster nodes must use the same encryption passphrase"
+			binary.Write(conn, binary.BigEndian, uint32(len(errorMsg)))
+			conn.Write([]byte(errorMsg))
+			return
+		}
 	}
 
 	// Add the node to the cluster
@@ -1595,13 +1625,14 @@ func (ucm *UnifiedClusterManager) joinCluster() {
 
 			// Send join request
 			selfNode := ClusterNode{
-				ID:          ucm.nodeID,
-				Addr:        ucm.nodeAddr,
-				ClusterPort: ucm.config.ClusterPort,
-				DataPort:    ucm.config.DataPort,
-				State:       NodeAlive,
-				Role:        RoleFollower,
-				JoinedAt:    time.Now(),
+				ID:                ucm.nodeID,
+				Addr:              ucm.nodeAddr,
+				ClusterPort:       ucm.config.ClusterPort,
+				DataPort:          ucm.config.DataPort,
+				State:             NodeAlive,
+				Role:              RoleFollower,
+				JoinedAt:          time.Now(),
+				EncryptionKeyHash: ucm.config.EncryptionKeyHash, // Include encryption key hash for validation
 			}
 			data, _ := json.Marshal(selfNode)
 
@@ -1640,6 +1671,44 @@ func (ucm *UnifiedClusterManager) joinCluster() {
 				conn.Close()
 				fmt.Printf("Successfully joined cluster via %s\n", seed)
 				return
+			} else if respType[0] == msgJoinRejected {
+				// Join was rejected - read error message
+				var length uint32
+				if err := binary.Read(conn, binary.BigEndian, &length); err != nil {
+					conn.Close()
+					continue
+				}
+
+				errorMsg := make([]byte, length)
+				if _, err := conn.Read(errorMsg); err != nil {
+					conn.Close()
+					continue
+				}
+
+				// CRITICAL ERROR: Encryption key mismatch
+				fmt.Println()
+				fmt.Println("═══════════════════════════════════════════════════════════════")
+				fmt.Println("❌ FATAL: Cluster join REJECTED - Encryption key mismatch!")
+				fmt.Println("═══════════════════════════════════════════════════════════════")
+				fmt.Println()
+				fmt.Printf("  Seed node: %s\n", seed)
+				fmt.Printf("  Reason: %s\n", string(errorMsg))
+				fmt.Println()
+				fmt.Println("  All cluster nodes MUST use the SAME encryption passphrase!")
+				fmt.Println()
+				fmt.Println("  To fix this:")
+				fmt.Println("  1. Ensure all nodes use the same FLYDB_ENCRYPTION_PASSPHRASE")
+				fmt.Println("  2. Restart this node with the correct passphrase")
+				fmt.Println()
+				fmt.Println("  Current encryption key hash (this node):")
+				fmt.Printf("    %s\n", ucm.config.EncryptionKeyHash)
+				fmt.Println()
+				fmt.Println("═══════════════════════════════════════════════════════════════")
+				fmt.Println()
+
+				conn.Close()
+				// Exit immediately - this is a fatal configuration error
+				panic("Encryption key mismatch: Cannot join cluster with different encryption passphrase")
 			}
 
 			conn.Close()
