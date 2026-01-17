@@ -419,9 +419,15 @@ This release introduces production-grade horizontal scaling features with multip
 - **flydb-shell TLS flags**:
   - `--no-tls` - Disable TLS for connecting to legacy servers
   - `--tls-insecure` - Skip certificate verification for self-signed certificates
+  - `--tls-ca` - Path to CA certificate for server verification
+  - `--tls-cert` - Path to client certificate for mutual TLS
+  - `--tls-key` - Path to client private key for mutual TLS
 - **flydb-dump TLS flags**:
   - `--no-tls` - Disable TLS for legacy server connections
   - `--tls-insecure` - Skip certificate verification for self-signed certificates
+  - `--tls-ca` - Path to CA certificate for server verification
+  - `--tls-cert` - Path to client certificate for mutual TLS
+  - `--tls-key` - Path to client private key for mutual TLS
 - **TLS connection status**: Connection messages show protocol (`tls://` or `tcp://`)
 - **Environment variable support**: `FLYDB_TLS_ENABLED` respected by all client tools
 
@@ -478,8 +484,14 @@ flydb -data-dir ./data \
 # Server: Disable TLS (legacy/testing)
 FLYDB_TLS_ENABLED=false flydb -data-dir ./data
 
+# Client: Connect with TLS (using auto-generated CA cert for verification)
+flydb-shell --host localhost --port 8889 --tls-ca ~/.config/flydb/certs/server.crt
+
 # Client: Connect with TLS (skip verification for self-signed certs)
 flydb-shell --host localhost --port 8889 --tls-insecure
+
+# Client: Connect with mutual TLS (client cert and key)
+flydb-shell --host localhost --port 8889 --tls-ca ca.crt --tls-cert client.crt --tls-key client.key
 
 # Client: Connect without TLS (to legacy servers)
 flydb-shell --host localhost --port 8889 --no-tls

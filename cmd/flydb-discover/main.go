@@ -21,10 +21,11 @@ This tool discovers FlyDB nodes on the local network using mDNS (Bonjour/Avahi).
 It can be used by install.sh to find existing cluster nodes for joining.
 
 Usage:
-    flydb-discover                    # Discover nodes (5 second timeout)
-    flydb-discover --timeout 10       # Custom timeout in seconds
-    flydb-discover --json             # Output as JSON
-    flydb-discover --quiet            # Only output addresses (for scripting)
+
+	flydb-discover                    # Discover nodes (5 second timeout)
+	flydb-discover --timeout 10       # Custom timeout in seconds
+	flydb-discover --json             # Output as JSON
+	flydb-discover --quiet            # Only output addresses (for scripting)
 */
 package main
 
@@ -38,23 +39,9 @@ import (
 	"strings"
 	"time"
 
+	"flydb/internal/banner"
 	"flydb/internal/cluster"
-)
-
-const (
-	version   = "1.0.0"
-	copyright = "Copyright (c) 2026 FlyDB Authors"
-)
-
-// ANSI color codes
-const (
-	reset  = "\033[0m"
-	bold   = "\033[1m"
-	dim    = "\033[2m"
-	red    = "\033[31m"
-	green  = "\033[32m"
-	yellow = "\033[33m"
-	cyan   = "\033[36m"
+	"flydb/pkg/cli"
 )
 
 func main() {
@@ -94,29 +81,32 @@ func main() {
 
 	// Show scanning message unless in quiet mode
 	if !*quiet && !*jsonOutput {
-		fmt.Printf("%s%sℹ%s Scanning for FlyDB nodes on the network (timeout: %ds)...\n\n",
-			cyan, bold, reset, *timeout)
+		cli.PrintInfo("Scanning for FlyDB nodes on the network (timeout: %ds)...", *timeout)
+		fmt.Println()
 	}
 
 	// Discover nodes
 	nodes, err := discovery.DiscoverNodes(time.Duration(*timeout) * time.Second)
 	if err != nil {
 		if !*quiet {
-			fmt.Fprintf(os.Stderr, "%s%s✗%s Discovery failed: %v\n", red, bold, reset, err)
+			cli.PrintError("Discovery failed: %v", err)
 		}
 		os.Exit(1)
 	}
 
 	if len(nodes) == 0 {
 		if !*quiet && !*jsonOutput {
-			fmt.Printf("%s%s⚠%s No FlyDB nodes found on the network.\n\n", yellow, bold, reset)
-			fmt.Printf("%s%sTROUBLESHOOTING%s\n\n", bold, cyan, reset)
-			fmt.Printf("%s  Common issues:%s\n", dim, reset)
-			fmt.Printf("    %s•%s FlyDB nodes are not running with discovery enabled\n", yellow, reset)
-			fmt.Printf("    %s•%s mDNS/Bonjour is blocked by firewall (UDP port 5353)\n", yellow, reset)
-			fmt.Printf("    %s•%s Nodes are on a different network segment\n\n", yellow, reset)
-			fmt.Printf("%s  Try:%s\n", dim, reset)
-			fmt.Printf("    %sflydb-discover --timeout 10%s   # Increase timeout\n\n", green, reset)
+			cli.PrintWarning("No FlyDB nodes found on the network.")
+			fmt.Println()
+			fmt.Printf("  %s%sTROUBLESHOOTING:%s\n", cli.Bold, cli.Cyan, cli.Reset)
+			fmt.Printf("    %sCommon issues:%s\n", cli.Dim, cli.Reset)
+			fmt.Printf("      %s•%s FlyDB nodes are not running with discovery enabled\n", cli.Yellow, cli.Reset)
+			fmt.Printf("      %s•%s mDNS/Bonjour is blocked by firewall (UDP port 5353)\n", cli.Yellow, cli.Reset)
+			fmt.Printf("      %s•%s Nodes are on a different network segment\n", cli.Yellow, cli.Reset)
+			fmt.Println()
+			fmt.Printf("    %sTry:%s\n", cli.Dim, cli.Reset)
+			fmt.Printf("      %sflydb-discover --timeout 10%s   # Increase timeout\n", cli.Green, cli.Reset)
+			fmt.Println()
 		}
 		os.Exit(0)
 	}
@@ -131,26 +121,14 @@ func main() {
 }
 
 func printBanner() {
-	fmt.Println()
-	fmt.Printf("%s%s", cyan, bold)
-	fmt.Println("  ███████╗██╗  ██╗   ██╗██████╗ ██████╗ ")
-	fmt.Println("  ██╔════╝██║  ╚██╗ ██╔╝██╔══██╗██╔══██╗")
-	fmt.Println("  █████╗  ██║   ╚████╔╝ ██║  ██║██████╔╝")
-	fmt.Println("  ██╔══╝  ██║    ╚██╔╝  ██║  ██║██╔══██╗")
-	fmt.Println("  ██║     ███████╗██║   ██████╔╝██████╔╝")
-	fmt.Println("  ╚═╝     ╚══════╝╚═╝   ╚═════╝ ╚═════╝ ")
-	fmt.Printf("%s\n", reset)
-	fmt.Printf("  %s%sFlyDB Discover%s %sv%s%s\n", green, bold, reset, dim, version, reset)
-	fmt.Printf("  %sNetwork Node Discovery Tool%s\n\n", dim, reset)
+	banner.Print()
+	fmt.Printf("  %s%sFlyDB Discover%s %sv%s%s\n", cli.BrightGreen, cli.Bold, cli.Reset, cli.Dim, banner.Version, cli.Reset)
+	fmt.Printf("  %sNetwork Node Discovery Tool%s\n\n", cli.Dim, cli.Reset)
 }
 
-
-
 func printVersion() {
-	fmt.Println()
-	fmt.Printf("  %s%sFlyDB Discover%s %sv%s%s\n", cyan, bold, reset, dim, version, reset)
-	fmt.Printf("  %sNetwork Node Discovery Tool%s\n\n", dim, reset)
-	fmt.Printf("  %s%s%s\n\n", dim, copyright, reset)
+	fmt.Printf("flydb-discover version %s\n", banner.Version)
+	fmt.Printf("%s\n", banner.Copyright)
 }
 
 func printUsage() {
@@ -158,43 +136,37 @@ func printUsage() {
 	printBanner()
 
 	// Description
-	fmt.Printf("%s  Discovers FlyDB nodes on the local network using mDNS (Bonjour/Avahi).%s\n", dim, reset)
-	fmt.Printf("%s  Useful for finding existing cluster nodes to join.%s\n\n", dim, reset)
+	fmt.Printf("  %sDiscovers FlyDB nodes on the local network using mDNS (Bonjour/Avahi).%s\n", cli.Dim, cli.Reset)
+	fmt.Printf("  %sUseful for finding existing cluster nodes to join.%s\n\n", cli.Dim, cli.Reset)
 
 	// Usage
-	fmt.Printf("%sUsage:%s flydb-discover [options]\n\n", bold, reset)
+	fmt.Printf("  %s%sUSAGE:%s\n", cli.Bold, cli.Cyan, cli.Reset)
+	fmt.Println("    flydb-discover [options]")
+	fmt.Println()
 
 	// Options
-	fmt.Printf("%s%sOPTIONS%s\n\n", bold, cyan, reset)
-	fmt.Printf("    %s--timeout%s <seconds>   Discovery timeout (default: 5)\n", green, reset)
-	fmt.Printf("    %s--json%s               Output results as JSON\n", green, reset)
-	fmt.Printf("    %s--quiet%s, %s-q%s          Only output addresses (for scripting)\n", green, reset, green, reset)
-	fmt.Printf("    %s--version%s, %s-v%s        Show version information\n", green, reset, green, reset)
-	fmt.Printf("    %s--help%s, %s-h%s           Show this help message\n\n", green, reset, green, reset)
+	fmt.Printf("  %s%sOPTIONS:%s\n", cli.Bold, cli.Cyan, cli.Reset)
+	fmt.Printf("    %s--timeout%s <n>     Discovery timeout in seconds (default: 5)\n", cli.Green, cli.Reset)
+	fmt.Printf("    %s--json%s            Output results as JSON\n", cli.Green, cli.Reset)
+	fmt.Printf("    %s--quiet%s, %s-q%s       Only output addresses (for scripting)\n", cli.Green, cli.Reset, cli.Green, cli.Reset)
+	fmt.Printf("    %s--version%s, %s-v%s     Show version information\n", cli.Green, cli.Reset, cli.Green, cli.Reset)
+	fmt.Printf("    %s--help%s, %s-h%s        Show this help message\n", cli.Green, cli.Reset, cli.Green, cli.Reset)
+	fmt.Println()
 
 	// Examples
-	fmt.Printf("%s%sEXAMPLES%s\n\n", bold, cyan, reset)
-	fmt.Printf("%s    # Discover nodes with default timeout%s\n", dim, reset)
+	fmt.Printf("  %s%sEXAMPLES:%s\n", cli.Bold, cli.Cyan, cli.Reset)
+	fmt.Println("    " + cli.Dimmed("# Discover nodes with default timeout"))
 	fmt.Println("    flydb-discover")
 	fmt.Println()
-	fmt.Printf("%s    # Increase timeout for slower networks%s\n", dim, reset)
-	fmt.Println("    flydb-discover --timeout 10")
-	fmt.Println()
-	fmt.Printf("%s    # Get JSON output for automation%s\n", dim, reset)
+	fmt.Println("    " + cli.Dimmed("# Get JSON output for automation"))
 	fmt.Println("    flydb-discover --json")
-	fmt.Println()
-	fmt.Printf("%s    # Get just addresses for scripting%s\n", dim, reset)
-	fmt.Println("    flydb-discover --quiet")
-	fmt.Println()
-	fmt.Printf("%s    # Use in install script to find cluster%s\n", dim, reset)
-	fmt.Println("    PEERS=$(flydb-discover --quiet)")
 	fmt.Println()
 
 	// Network requirements
-	fmt.Printf("%s%sNETWORK REQUIREMENTS%s\n\n", bold, cyan, reset)
-	fmt.Printf("    %s•%s mDNS uses UDP port 5353 (multicast)\n", yellow, reset)
-	fmt.Printf("    %s•%s Nodes must be on the same network segment\n", yellow, reset)
-	fmt.Printf("    %s•%s Firewalls must allow mDNS traffic\n\n", yellow, reset)
+	fmt.Printf("  %s%sNETWORK REQUIREMENTS:%s\n", cli.Bold, cli.Cyan, cli.Reset)
+	fmt.Printf("    %s•%s mDNS uses UDP port 5353 (multicast)\n", cli.Yellow, cli.Reset)
+	fmt.Printf("    %s•%s Nodes must be on the same network segment\n", cli.Yellow, cli.Reset)
+	fmt.Println()
 }
 
 func outputJSON(nodes []*cluster.DiscoveredNode) {
@@ -232,46 +204,47 @@ func outputQuiet(nodes []*cluster.DiscoveredNode) {
 }
 
 func outputHuman(nodes []*cluster.DiscoveredNode) {
-	fmt.Printf("%s%s✓%s Found %d FlyDB node(s)\n\n", green, bold, reset, len(nodes))
+	cli.PrintSuccess("Found %d FlyDB node(s)", len(nodes))
+	fmt.Println()
 
 	for i, n := range nodes {
 		// Node header with index and ID
 		fmt.Printf("  %s[%d]%s %s%s%s\n",
-			dim, i+1, reset,
-			bold+cyan, n.NodeID, reset)
+			cli.Dim, i+1, cli.Reset,
+			cli.Bold+cli.Cyan, n.NodeID, cli.Reset)
 
 		// Cluster address (always present)
 		fmt.Printf("      %sCluster Address:%s %s%s%s\n",
-			dim, reset,
-			green, n.ClusterAddr, reset)
+			cli.Dim, cli.Reset,
+			cli.Green, n.ClusterAddr, cli.Reset)
 
 		// Raft address (optional)
 		if n.RaftAddr != "" {
 			fmt.Printf("      %sRaft Address:%s    %s\n",
-				dim, reset, n.RaftAddr)
+				cli.Dim, cli.Reset, n.RaftAddr)
 		}
 
 		// HTTP address (optional)
 		if n.HTTPAddr != "" {
 			fmt.Printf("      %sHTTP Address:%s    %s\n",
-				dim, reset, n.HTTPAddr)
+				cli.Dim, cli.Reset, n.HTTPAddr)
 		}
 
 		// Cluster ID (optional)
 		if n.ClusterID != "" {
 			fmt.Printf("      %sCluster ID:%s      %s\n",
-				dim, reset, n.ClusterID)
+				cli.Dim, cli.Reset, n.ClusterID)
 		}
 
 		// Version (optional)
 		if n.Version != "" {
 			fmt.Printf("      %sVersion:%s         %s\n",
-				dim, reset, n.Version)
+				cli.Dim, cli.Reset, n.Version)
 		}
 
 		fmt.Println()
 	}
 
 	// Helpful tip
-	fmt.Printf("%s  Tip: Use --json for machine-readable output%s\n\n", dim, reset)
+	fmt.Printf("  %sTip: Use --json for machine-readable output%s\n\n", cli.Dim, cli.Reset)
 }

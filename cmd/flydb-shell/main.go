@@ -138,6 +138,9 @@ type CLIConfig struct {
 	TargetPrimary bool             // When true, always connect to primary/leader (for writes)
 	UseTLS        bool             // When true, use TLS for connection
 	TLSInsecure   bool             // When true, skip TLS certificate verification
+	TLSCA         string           // Path to CA certificate file
+	TLSCert       string           // Path to client certificate file
+	TLSKey        string           // Path to client key file
 }
 
 // REPLState holds the runtime state for the REPL session.
@@ -404,16 +407,22 @@ type HAClient struct {
 	lastAuth       bool     // Whether we successfully authenticated
 	useTLS         bool     // Whether to use TLS for connections
 	tlsInsecure    bool     // Whether to skip TLS certificate verification
+	tlsCA          string   // Path to CA certificate file
+	tlsCert        string   // Path to client certificate file
+	tlsKey         string   // Path to client key file
 }
 
 // NewHAClient creates a new HA-aware client that can fail over between hosts.
 // hosts is a list of "host:port" addresses to try in order.
-func NewHAClient(hosts []string, targetPrimary bool, useTLS bool, tlsInsecure bool) *HAClient {
+func NewHAClient(hosts []string, targetPrimary bool, useTLS bool, tlsInsecure bool, tlsCA, tlsCert, tlsKey string) *HAClient {
 	return &HAClient{
 		hosts:         hosts,
 		targetPrimary: targetPrimary,
 		useTLS:        useTLS,
 		tlsInsecure:   tlsInsecure,
+		tlsCA:         tlsCA,
+		tlsCert:       tlsCert,
+		tlsKey:        tlsKey,
 	}
 }
 
@@ -435,12 +444,35 @@ func (h *HAClient) Connect() error {
 			if h.tlsInsecure {
 				tlsConfig.InsecureSkipVerify = true
 			} else {
-				// Load system CA certificates
-				certPool, err := x509.SystemCertPool()
-				if err != nil {
+				// Load CA certificates
+				var certPool *x509.CertPool
+				if h.tlsCA != "" {
+					caData, err := os.ReadFile(h.tlsCA)
+					if err != nil {
+						return fmt.Errorf("failed to read CA certificate: %w", err)
+					}
 					certPool = x509.NewCertPool()
+					if !certPool.AppendCertsFromPEM(caData) {
+						return fmt.Errorf("failed to append CA certificate")
+					}
+				} else {
+					// Load system CA certificates
+					var err error
+					certPool, err = x509.SystemCertPool()
+					if err != nil {
+						certPool = x509.NewCertPool()
+					}
 				}
 				tlsConfig.RootCAs = certPool
+			}
+
+			// Load client certificate if provided
+			if h.tlsCert != "" && h.tlsKey != "" {
+				cert, err := tls.LoadX509KeyPair(h.tlsCert, h.tlsKey)
+				if err != nil {
+					return fmt.Errorf("failed to load client certificate/key: %w", err)
+				}
+				tlsConfig.Certificates = []tls.Certificate{cert}
 			}
 
 			// Dial with TLS
@@ -509,12 +541,38 @@ func (h *HAClient) Reconnect() error {
 			if h.tlsInsecure {
 				tlsConfig.InsecureSkipVerify = true
 			} else {
-				// Load system CA certificates
-				certPool, err := x509.SystemCertPool()
-				if err != nil {
+				// Load CA certificates
+				var certPool *x509.CertPool
+				if h.tlsCA != "" {
+					caData, err := os.ReadFile(h.tlsCA)
+					if err != nil {
+						lastErr = fmt.Errorf("failed to read CA certificate: %w", err)
+						continue
+					}
 					certPool = x509.NewCertPool()
+					if !certPool.AppendCertsFromPEM(caData) {
+						lastErr = fmt.Errorf("failed to append CA certificate")
+						continue
+					}
+				} else {
+					// Load system CA certificates
+					var err error
+					certPool, err = x509.SystemCertPool()
+					if err != nil {
+						certPool = x509.NewCertPool()
+					}
 				}
 				tlsConfig.RootCAs = certPool
+			}
+
+			// Load client certificate if provided
+			if h.tlsCert != "" && h.tlsKey != "" {
+				cert, err := tls.LoadX509KeyPair(h.tlsCert, h.tlsKey)
+				if err != nil {
+					lastErr = fmt.Errorf("failed to load client certificate/key: %w", err)
+					continue
+				}
+				tlsConfig.Certificates = []tls.Certificate{cert}
 			}
 
 			// Dial with TLS
@@ -771,9 +829,12 @@ type CLIFlags struct {
 	NoColor       bool
 	Execute       string
 	ConfigFile    string
-	TargetPrimary bool // When true, prefer connecting to primary/leader
-	NoTLS         bool // When true, disable TLS and use plain TCP
-	TLSInsecure   bool // When true, skip TLS certificate verification
+	TargetPrimary bool   // When true, prefer connecting to primary/leader
+	NoTLS         bool   // When true, disable TLS and use plain TCP
+	TLSInsecure   bool   // When true, skip TLS certificate verification
+	TLSCA         string // Path to CA certificate file
+	TLSCert       string // Path to client certificate file
+	TLSKey        string // Path to client key file
 }
 
 // parseFlags parses command-line flags and returns the configuration.
@@ -801,6 +862,9 @@ func parseFlags() CLIFlags {
 	flag.BoolVar(&flags.TargetPrimary, "target-primary", false, "Prefer connecting to primary/leader in cluster")
 	flag.BoolVar(&flags.NoTLS, "no-tls", false, "Disable TLS and use plain TCP connection")
 	flag.BoolVar(&flags.TLSInsecure, "tls-insecure", false, "Skip TLS certificate verification (insecure)")
+	flag.StringVar(&flags.TLSCA, "tls-ca", "", "Path to CA certificate file for TLS verification")
+	flag.StringVar(&flags.TLSCert, "tls-cert", "", "Path to client certificate file for mutual TLS")
+	flag.StringVar(&flags.TLSKey, "tls-key", "", "Path to client key file for mutual TLS")
 
 	// Custom usage function
 	flag.Usage = printUsage
@@ -833,6 +897,9 @@ func printUsage() {
 	fmt.Printf("        %s    Prefer connecting to primary in cluster\n", cli.Info("--target-primary"))
 	fmt.Printf("        %s             Disable TLS and use plain TCP connection\n", cli.Info("--no-tls"))
 	fmt.Printf("        %s        Skip TLS certificate verification (insecure)\n", cli.Info("--tls-insecure"))
+	fmt.Printf("        %s <file>      Path to CA certificate file for TLS verification\n", cli.Info("--tls-ca"))
+	fmt.Printf("        %s <file>    Path to client certificate file for mutual TLS\n", cli.Info("--tls-cert"))
+	fmt.Printf("        %s <file>     Path to client key file for mutual TLS\n", cli.Info("--tls-key"))
 	fmt.Println()
 
 	fmt.Println("  " + cli.Highlight("Examples"))
@@ -852,11 +919,14 @@ func printUsage() {
 	fmt.Println("    " + cli.Dimmed("# Execute a query and exit"))
 	fmt.Println("    " + cli.Success("fsql -e \"SELECT * FROM users\""))
 	fmt.Println()
-	fmt.Println("    " + cli.Dimmed("# Query a specific database"))
-	fmt.Println("    " + cli.Success("fsql -d mydb -e \"SELECT * FROM users\""))
-	fmt.Println()
 	fmt.Println("    " + cli.Dimmed("# Connect with TLS (enabled by default)"))
 	fmt.Println("    " + cli.Success("fsql -H example.com"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("# Connect with custom CA certificate"))
+	fmt.Println("    " + cli.Success("fsql -H example.com --tls-ca /path/to/ca.crt"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("# Connect with mutual TLS (client certificate and key)"))
+	fmt.Println("    " + cli.Success("fsql -H example.com --tls-cert client.crt --tls-key client.key"))
 	fmt.Println()
 	fmt.Println("    " + cli.Dimmed("# Connect skipping TLS verification (for self-signed certs)"))
 	fmt.Println("    " + cli.Success("fsql -H example.com --tls-insecure"))
@@ -954,6 +1024,9 @@ func main() {
 		TargetPrimary: flags.TargetPrimary,
 		UseTLS:        useTLS,
 		TLSInsecure:   flags.TLSInsecure,
+		TLSCA:         flags.TLSCA,
+		TLSCert:       flags.TLSCert,
+		TLSKey:        flags.TLSKey,
 	}
 
 	startREPL(config)
@@ -1044,7 +1117,7 @@ func loadConfigFile(path string, flags *CLIFlags) error {
 }
 
 // connectWithRetry attempts to connect to the server with exponential backoff.
-func connectWithRetry(addr string, useTLS bool, tlsInsecure bool) (*BinaryClient, error) {
+func connectWithRetry(addr string, useTLS bool, tlsInsecure bool, tlsCA, tlsCert, tlsKey string) (*BinaryClient, error) {
 	var lastErr error
 	delay := InitialRetryDelay
 
@@ -1066,12 +1139,35 @@ func connectWithRetry(addr string, useTLS bool, tlsInsecure bool) (*BinaryClient
 			if tlsInsecure {
 				tlsConfig.InsecureSkipVerify = true
 			} else {
-				// Load system CA certificates
-				certPool, err := x509.SystemCertPool()
-				if err != nil {
+				// Load CA certificates
+				var certPool *x509.CertPool
+				if tlsCA != "" {
+					caData, err := os.ReadFile(tlsCA)
+					if err != nil {
+						return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+					}
 					certPool = x509.NewCertPool()
+					if !certPool.AppendCertsFromPEM(caData) {
+						return nil, fmt.Errorf("failed to append CA certificate")
+					}
+				} else {
+					// Load system CA certificates
+					var err error
+					certPool, err = x509.SystemCertPool()
+					if err != nil {
+						certPool = x509.NewCertPool()
+					}
 				}
 				tlsConfig.RootCAs = certPool
+			}
+
+			// Load client certificate if provided
+			if tlsCert != "" && tlsKey != "" {
+				cert, err := tls.LoadX509KeyPair(tlsCert, tlsKey)
+				if err != nil {
+					return nil, fmt.Errorf("failed to load client certificate/key: %w", err)
+				}
+				tlsConfig.Certificates = []tls.Certificate{cert}
 			}
 
 			// Dial with TLS
@@ -1147,7 +1243,7 @@ func startREPL(config CLIConfig) {
 			fmt.Printf("Connecting to cluster (%s)...\n", strings.Join(config.Hosts, ", "))
 		}
 
-		haClient = NewHAClient(config.Hosts, config.TargetPrimary, config.UseTLS, config.TLSInsecure)
+		haClient = NewHAClient(config.Hosts, config.TargetPrimary, config.UseTLS, config.TLSInsecure, config.TLSCA, config.TLSCert, config.TLSKey)
 		if err := haClient.Connect(); err != nil {
 			if spinner != nil {
 				spinner.StopWithError("Connection failed")
@@ -1180,7 +1276,7 @@ func startREPL(config CLIConfig) {
 		}
 
 		var err error
-		client, err = connectWithRetry(addr, config.UseTLS, config.TLSInsecure)
+		client, err = connectWithRetry(addr, config.UseTLS, config.TLSInsecure, config.TLSCA, config.TLSCert, config.TLSKey)
 		if err != nil {
 			if spinner != nil {
 				spinner.StopWithError("Connection failed")
@@ -1419,7 +1515,7 @@ func startREPL(config CLIConfig) {
 					spinner.StopWithSuccess(fmt.Sprintf("Reconnected to %s", addr))
 				} else {
 					// Single host mode: retry the same address
-					newClient, reconnErr := connectWithRetry(addr, config.UseTLS, config.TLSInsecure)
+					newClient, reconnErr := connectWithRetry(addr, config.UseTLS, config.TLSInsecure, config.TLSCA, config.TLSCert, config.TLSKey)
 					if reconnErr != nil {
 						spinner.StopWithError("Failed to reconnect")
 						cli.PrintError("Exiting...")
@@ -1657,7 +1753,7 @@ func runSimpleREPL(config CLIConfig, client *BinaryClient, addr string) {
 
 				spinner := cli.NewSpinner("Reconnecting...")
 				spinner.Start()
-				newClient, reconnErr := connectWithRetry(addr, config.UseTLS, config.TLSInsecure)
+				newClient, reconnErr := connectWithRetry(addr, config.UseTLS, config.TLSInsecure, config.TLSCA, config.TLSCert, config.TLSKey)
 				if reconnErr != nil {
 					spinner.StopWithError("Failed to reconnect")
 					cli.PrintError("Exiting...")

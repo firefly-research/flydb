@@ -199,6 +199,9 @@ var (
 	// TLS options
 	noTLS       = flag.Bool("no-tls", false, "Disable TLS and use plain TCP connection")
 	tlsInsecure = flag.Bool("tls-insecure", false, "Skip TLS certificate verification (insecure)")
+	tlsCA       = flag.String("tls-ca", "", "Path to CA certificate file for TLS verification")
+	tlsCert     = flag.String("tls-cert", "", "Path to client certificate file for mutual TLS")
+	tlsKey      = flag.String("tls-key", "", "Path to client key file for mutual TLS")
 )
 
 // isRemoteMode returns true if remote connection mode is enabled
@@ -372,6 +375,9 @@ func printUsage() {
 	fmt.Println(cli.Highlight("TLS OPTIONS (remote mode):"))
 	fmt.Printf("  %-28s %s\n", cli.Info("--no-tls"), "Disable TLS (use plain TCP)")
 	fmt.Printf("  %-28s %s\n", cli.Info("--tls-insecure"), "Skip TLS certificate verification (insecure)")
+	fmt.Printf("  %-28s %s\n", cli.Info("--tls-ca <file>"), "Path to CA certificate file for TLS verification")
+	fmt.Printf("  %-28s %s\n", cli.Info("--tls-cert <file>"), "Path to client certificate file for mutual TLS")
+	fmt.Printf("  %-28s %s\n", cli.Info("--tls-key <file>"), "Path to client key file for mutual TLS")
 	fmt.Println()
 
 	fmt.Println(cli.Highlight("ENCRYPTION (local mode only):"))
@@ -743,7 +749,6 @@ func (d *Dumper) dumpSQL() error {
 	fmt.Fprintf(d.writer, "\n-- Dump completed\n")
 	return nil
 }
-
 
 // dumpTableSchema writes the CREATE TABLE statement for a table
 func (d *Dumper) dumpTableSchema(tableName string) error {
@@ -1487,8 +1492,6 @@ func isConnectionError(err error) bool {
 		strings.Contains(errStr, "timeout")
 }
 
-
-
 // =============================================================================
 // HA Client for Cluster Support
 // =============================================================================
@@ -1501,16 +1504,22 @@ type HAClient struct {
 	authUsername   string
 	authPassword   string
 	lastAuth       bool
-	useTLS         bool // Whether to use TLS for connections
-	tlsInsecure    bool // Whether to skip TLS certificate verification
+	useTLS         bool   // Whether to use TLS for connections
+	tlsInsecure    bool   // Whether to skip TLS certificate verification
+	tlsCA          string // Path to CA certificate file
+	tlsCert        string // Path to client certificate file
+	tlsKey         string // Path to client key file
 }
 
 // NewHAClient creates a new HA-aware client that can fail over between hosts.
-func NewHAClient(hosts []string, useTLS bool, tlsInsecure bool) *HAClient {
+func NewHAClient(hosts []string, useTLS bool, tlsInsecure bool, tlsCA, tlsCert, tlsKey string) *HAClient {
 	return &HAClient{
 		hosts:       hosts,
 		useTLS:      useTLS,
 		tlsInsecure: tlsInsecure,
+		tlsCA:       tlsCA,
+		tlsCert:     tlsCert,
+		tlsKey:      tlsKey,
 	}
 }
 
@@ -1531,12 +1540,38 @@ func (h *HAClient) Connect() error {
 			if h.tlsInsecure {
 				tlsConfig.InsecureSkipVerify = true
 			} else {
-				// Load system CA certificates
-				certPool, err := x509.SystemCertPool()
-				if err != nil {
+				// Load CA certificates
+				var certPool *x509.CertPool
+				if h.tlsCA != "" {
+					caData, err := os.ReadFile(h.tlsCA)
+					if err != nil {
+						lastErr = fmt.Errorf("failed to read CA certificate: %w", err)
+						continue
+					}
 					certPool = x509.NewCertPool()
+					if !certPool.AppendCertsFromPEM(caData) {
+						lastErr = fmt.Errorf("failed to append CA certificate")
+						continue
+					}
+				} else {
+					// Load system CA certificates
+					var err error
+					certPool, err = x509.SystemCertPool()
+					if err != nil {
+						certPool = x509.NewCertPool()
+					}
 				}
 				tlsConfig.RootCAs = certPool
+			}
+
+			// Load client certificate if provided
+			if h.tlsCert != "" && h.tlsKey != "" {
+				cert, err := tls.LoadX509KeyPair(h.tlsCert, h.tlsKey)
+				if err != nil {
+					lastErr = fmt.Errorf("failed to load client certificate/key: %w", err)
+					continue
+				}
+				tlsConfig.Certificates = []tls.Certificate{cert}
 			}
 
 			// Dial with TLS
@@ -1610,12 +1645,38 @@ func (h *HAClient) Reconnect() error {
 			if h.tlsInsecure {
 				tlsConfig.InsecureSkipVerify = true
 			} else {
-				// Load system CA certificates
-				certPool, err := x509.SystemCertPool()
-				if err != nil {
+				// Load CA certificates
+				var certPool *x509.CertPool
+				if h.tlsCA != "" {
+					caData, err := os.ReadFile(h.tlsCA)
+					if err != nil {
+						lastErr = fmt.Errorf("failed to read CA certificate: %w", err)
+						continue
+					}
 					certPool = x509.NewCertPool()
+					if !certPool.AppendCertsFromPEM(caData) {
+						lastErr = fmt.Errorf("failed to append CA certificate")
+						continue
+					}
+				} else {
+					// Load system CA certificates
+					var err error
+					certPool, err = x509.SystemCertPool()
+					if err != nil {
+						certPool = x509.NewCertPool()
+					}
 				}
 				tlsConfig.RootCAs = certPool
+			}
+
+			// Load client certificate if provided
+			if h.tlsCert != "" && h.tlsKey != "" {
+				cert, err := tls.LoadX509KeyPair(h.tlsCert, h.tlsKey)
+				if err != nil {
+					lastErr = fmt.Errorf("failed to load client certificate/key: %w", err)
+					continue
+				}
+				tlsConfig.Certificates = []tls.Certificate{cert}
 			}
 
 			// Dial with TLS
@@ -1804,7 +1865,7 @@ func connectRemote() (*HAClient, error) {
 		useTLS = false
 	}
 
-	client := NewHAClient(hosts, useTLS, *tlsInsecure)
+	client := NewHAClient(hosts, useTLS, *tlsInsecure, *tlsCA, *tlsCert, *tlsKey)
 	if err := client.Connect(); err != nil {
 		return nil, err
 	}
@@ -1830,7 +1891,6 @@ func connectRemote() (*HAClient, error) {
 
 	return client, nil
 }
-
 
 // =============================================================================
 // Remote Dumper for Network-Based Exports
@@ -2248,7 +2308,6 @@ func runRemoteExport() error {
 
 	return nil
 }
-
 
 // =============================================================================
 // Remote Import for Network-Based Imports

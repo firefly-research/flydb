@@ -401,6 +401,11 @@ print_help() {
     echo -e "    ${BOLD}--encryption${RESET}              Enable data-at-rest encryption (default: enabled)"
     echo -e "    ${BOLD}--no-encryption${RESET}           Disable data-at-rest encryption"
     echo -e "    ${BOLD}--encryption-passphrase <p>${RESET} Set encryption passphrase"
+    echo -e "    ${BOLD}--tls${RESET}                     Enable TLS encryption (default: enabled)"
+    echo -e "    ${BOLD}--no-tls${RESET}                  Disable TLS encryption"
+    echo -e "    ${BOLD}--tls-cert <path>${RESET}         Path to TLS certificate file"
+    echo -e "    ${BOLD}--tls-key <path>${RESET}          Path to TLS private key file"
+    echo -e "    ${BOLD}--tls-auto-gen${RESET}            Automatically generate TLS certificates"
     echo -e "    ${BOLD}--enable-audit${RESET}            Enable audit logging (01.26.17+)"
     echo -e "    ${BOLD}--disable-audit${RESET}           Disable audit logging (01.26.17+)"
     echo -e "    ${BOLD}--audit-retention <days>${RESET}  Audit log retention days (default: 90)"
@@ -3757,12 +3762,46 @@ print_post_install() {
     # Connect with SQL shell
     echo -e "  ${BOLD}Connect with SQL shell:${RESET}"
     echo ""
-    if [[ "$in_path" == true ]]; then
-        echo -e "    ${GREEN}fsql${RESET}"
+    local fsql_cmd="fsql"
+    if [[ "$in_path" != true ]]; then
+        fsql_cmd="${bin_dir}/fsql"
+    fi
+
+    if [[ "$TLS_ENABLED" == "true" ]]; then
+        if [[ "$TLS_AUTO_GEN" == "true" ]]; then
+            echo -e "    ${CYAN}# Option 1: Securely using the auto-generated CA certificate (recommended)${RESET}"
+            echo -e "    ${GREEN}${fsql_cmd} --tls-ca ${config_dir}/certs/server.crt${RESET}"
+            echo ""
+            echo -e "    ${CYAN}# Option 2: Skip verification (easier for development)${RESET}"
+            echo -e "    ${GREEN}${fsql_cmd} --tls-insecure${RESET}"
+        else
+            echo -e "    ${GREEN}${fsql_cmd}${RESET}"
+        fi
     else
-        echo -e "    ${GREEN}${bin_dir}/fsql${RESET}"
+        echo -e "    ${GREEN}${fsql_cmd} --no-tls${RESET}         ${DIM}(TLS is disabled on server)${RESET}"
     fi
     echo ""
+    echo -e "  ${CYAN}# Note: You will need to authenticate after connecting:${RESET}"
+    echo -e "  ${CYAN}# AUTH admin <password>${RESET}"
+    echo ""
+
+    # TLS Section (if enabled)
+    if [[ "$TLS_ENABLED" == "true" ]]; then
+        echo -e "  ${BOLD}TLS Security Details:${RESET}"
+        separator 70
+        echo ""
+        echo -e "    ${GREEN}✓${RESET} TLS encryption is enabled for all client connections"
+        if [[ "$TLS_AUTO_GEN" == "true" ]]; then
+            echo -e "    ${YELLOW}ℹ${RESET} Certificates are auto-generated and self-signed"
+            echo -e "    ${DIM}Cert Location: ${config_dir}/certs/${RESET}"
+            echo -e "    ${DIM}To use these certs with other clients, download the CA certificate.${RESET}"
+        else
+            echo -e "    ${BLUE}ℹ${RESET} Using custom certificates from:"
+            echo -e "    ${DIM}• Cert: ${TLS_CERT_FILE}${RESET}"
+            echo -e "    ${DIM}• Key:  ${TLS_KEY_FILE}${RESET}"
+        fi
+        echo ""
+    fi
 
     # Cluster-specific instructions
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
@@ -4225,6 +4264,53 @@ parse_args() {
             --encryption-passphrase=*)
                 ENCRYPTION_PASSPHRASE="${1#*=}"
                 ENCRYPTION_ENABLED="true"
+                shift
+                ;;
+            # TLS options
+            --tls)
+                TLS_ENABLED="true"
+                shift
+                ;;
+            --no-tls)
+                TLS_ENABLED="false"
+                shift
+                ;;
+            --tls-cert)
+                if [[ -n "${2:-}" ]]; then
+                    TLS_CERT_FILE="$2"
+                    TLS_ENABLED="true"
+                    TLS_AUTO_GEN="false"
+                    shift 2
+                else
+                    print_error "--tls-cert requires a file path"
+                    exit 1
+                fi
+                ;;
+            --tls-cert=*)
+                TLS_CERT_FILE="${1#*=}"
+                TLS_ENABLED="true"
+                TLS_AUTO_GEN="false"
+                shift
+                ;;
+            --tls-key)
+                if [[ -n "${2:-}" ]]; then
+                    TLS_KEY_FILE="$2"
+                    TLS_ENABLED="true"
+                    TLS_AUTO_GEN="false"
+                    shift 2
+                else
+                    print_error "--tls-key requires a file path"
+                    exit 1
+                fi
+                ;;
+            --tls-key=*)
+                TLS_KEY_FILE="${1#*=}"
+                TLS_ENABLED="true"
+                TLS_AUTO_GEN="false"
+                shift
+                ;;
+            --tls-auto-gen)
+                TLS_AUTO_GEN="true"
                 shift
                 ;;
             # Logging options
