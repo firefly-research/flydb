@@ -394,7 +394,7 @@ find_installations() {
     fi
 
     # All binaries that install.sh creates
-    local binary_names=("flydb" "flydb-shell" "flydb-dump" "fsql" "fdump")
+    local binary_names=("flydb" "flydb-shell" "flydb-dump" "flydb-discover" "fsql" "fdump")
 
     for dir in "${bin_locations[@]}"; do
         for bin in "${binary_names[@]}"; do

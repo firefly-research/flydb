@@ -82,6 +82,10 @@ REPLICATION_FACTOR="3"
 SYNC_TIMEOUT="5000"
 MAX_REPLICATION_LAG="10000"
 
+# Service Discovery configuration
+DISCOVERY_ENABLED="false"
+DISCOVERY_CLUSTER_ID=""
+
 # Storage configuration
 DATA_DIR=""
 BUFFER_POOL_SIZE="0"
@@ -768,6 +772,158 @@ install_downloaded_binaries() {
     cleanup_temp_dir
 
     echo ""
+}
+
+# =============================================================================
+# Service Discovery Functions
+# =============================================================================
+
+# Check if flydb-discover tool is available
+has_discovery_tool() {
+    command -v flydb-discover &> /dev/null || [[ -x "${SCRIPT_DIR}/bin/flydb-discover" ]] || [[ -x "${SCRIPT_DIR}/flydb-discover" ]]
+}
+
+# Discover FlyDB nodes on the network using mDNS
+discover_nodes_mdns() {
+    local timeout="${1:-5}"
+    local discover_cmd=""
+
+    if command -v flydb-discover &> /dev/null; then
+        discover_cmd="flydb-discover"
+    elif [[ -x "${SCRIPT_DIR}/bin/flydb-discover" ]]; then
+        discover_cmd="${SCRIPT_DIR}/bin/flydb-discover"
+    elif [[ -x "${SCRIPT_DIR}/flydb-discover" ]]; then
+        discover_cmd="${SCRIPT_DIR}/flydb-discover"
+    else
+        return 1
+    fi
+
+    "$discover_cmd" --timeout "$timeout" --quiet 2>/dev/null
+}
+
+# Interactive node discovery
+discover_cluster_nodes() {
+    print_section "Cluster Node Discovery"
+    echo -e "  ${DIM}FlyDB can automatically discover existing cluster nodes on your network.${RESET}"
+    echo ""
+
+    local discovered_nodes=""
+    local discovery_method=""
+
+    # Try mDNS discovery first
+    if has_discovery_tool; then
+        echo -e "  ${CYAN}Scanning for FlyDB nodes using mDNS...${RESET}"
+        discovered_nodes=$(discover_nodes_mdns 5)
+        if [[ -n "$discovered_nodes" ]]; then
+            discovery_method="mdns"
+        fi
+    fi
+
+    # Show results
+    if [[ -n "$discovered_nodes" ]]; then
+        echo ""
+        echo -e "  ${GREEN}${BOLD}✓ Found existing FlyDB nodes:${RESET}"
+        echo ""
+
+        local i=1
+        IFS=',' read -ra node_array <<< "$discovered_nodes"
+        for node in "${node_array[@]}"; do
+            echo -e "    ${CYAN}[$i]${RESET} $node"
+            ((i++))
+        done
+        echo ""
+
+        if prompt_yes_no "Use discovered nodes as cluster peers" "y"; then
+            CLUSTER_PEERS="$discovered_nodes"
+            print_success "Using discovered nodes: $discovered_nodes"
+            return 0
+        fi
+    else
+        echo -e "  ${YELLOW}No FlyDB nodes found on the network.${RESET}"
+        echo ""
+        echo -e "  ${DIM}This could mean:${RESET}"
+        echo -e "    ${DIM}- No cluster exists yet (you're setting up the first node)${RESET}"
+        echo -e "    ${DIM}- Existing nodes are on a different network${RESET}"
+        echo -e "    ${DIM}- mDNS/Bonjour is blocked by firewall${RESET}"
+        echo ""
+    fi
+
+    # Manual entry option
+    echo -e "  ${BOLD}Enter peer addresses manually:${RESET}"
+    echo -e "  ${DIM}Format: host1:port,host2:port (e.g., 192.168.1.10:7946,192.168.1.11:7946)${RESET}"
+    echo -e "  ${DIM}Leave empty if this is the first node in the cluster.${RESET}"
+    echo ""
+
+    CLUSTER_PEERS=$(prompt_value "Peer addresses" "")
+
+    return 0
+}
+
+# Test connectivity to a peer node
+test_peer_connectivity() {
+    local peer="$1"
+    local host="${peer%:*}"
+    local port="${peer##*:}"
+
+    # Try to connect with timeout
+    if command -v nc &> /dev/null; then
+        nc -z -w 2 "$host" "$port" 2>/dev/null
+        return $?
+    elif command -v timeout &> /dev/null; then
+        timeout 2 bash -c "echo >/dev/tcp/$host/$port" 2>/dev/null
+        return $?
+    else
+        # Fallback: just try to connect
+        (echo >/dev/tcp/$host/$port) 2>/dev/null
+        return $?
+    fi
+}
+
+# Validate connectivity to all configured peers
+validate_peer_connectivity() {
+    if [[ -z "$CLUSTER_PEERS" ]]; then
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Testing connectivity to peers...${RESET}"
+
+    local all_ok=true
+    IFS=',' read -ra peer_array <<< "$CLUSTER_PEERS"
+
+    for peer in "${peer_array[@]}"; do
+        peer=$(echo "$peer" | xargs)  # trim whitespace
+        if [[ -z "$peer" ]]; then
+            continue
+        fi
+
+        echo -n "    Testing $peer... "
+        if test_peer_connectivity "$peer"; then
+            echo -e "${GREEN}✓ OK${RESET}"
+        else
+            echo -e "${RED}✗ UNREACHABLE${RESET}"
+            all_ok=false
+        fi
+    done
+
+    if [[ "$all_ok" == false ]]; then
+        echo ""
+        print_warning "Some peers are unreachable. This may cause issues when starting the cluster."
+        echo -e "  ${DIM}Possible causes:${RESET}"
+        echo -e "    ${DIM}- Peer nodes are not running yet${RESET}"
+        echo -e "    ${DIM}- Firewall blocking port 7946${RESET}"
+        echo -e "    ${DIM}- Incorrect peer addresses${RESET}"
+        echo ""
+
+        if ! prompt_yes_no "Continue anyway" "y"; then
+            return 1
+        fi
+    else
+        echo ""
+        print_success "All peers are reachable"
+    fi
+
+    return 0
 }
 
 # =============================================================================
@@ -2077,6 +2233,14 @@ build_binaries() {
         exit 1
     fi
 
+    spinner_start "Building flydb-discover tool"
+    if go build -o flydb-discover ./cmd/flydb-discover 2>/dev/null; then
+        spinner_success "Built flydb-discover tool"
+        INSTALLED_FILES+=("./flydb-discover")
+    else
+        print_warning "Failed to build flydb-discover (optional)"
+    fi
+
     echo ""
 }
 
@@ -2152,6 +2316,17 @@ install_binaries() {
         INSTALLED_FILES+=("$bin_dir/fdump")
     else
         spinner_error "Failed to create fdump symlink"
+    fi
+
+    # Install flydb-discover (optional)
+    if [[ -f "flydb-discover" ]]; then
+        spinner_start "Installing flydb-discover"
+        if $sudo_cmd cp flydb-discover "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb-discover"; then
+            spinner_success "Installed ${bin_dir}/flydb-discover"
+            INSTALLED_FILES+=("$bin_dir/flydb-discover")
+        else
+            print_warning "Failed to install flydb-discover (optional)"
+        fi
     fi
 
     echo ""
@@ -2392,6 +2567,18 @@ raft_election_timeout_ms = ${RAFT_ELECTION_TIMEOUT}
 # Raft heartbeat interval in milliseconds
 # Leader sends heartbeats at this interval to maintain authority
 raft_heartbeat_interval_ms = ${RAFT_HEARTBEAT_INTERVAL}
+
+# =============================================================================
+# Service Discovery Configuration
+# =============================================================================
+
+# Enable mDNS-based service discovery for automatic cluster formation
+# When enabled, nodes advertise themselves and can discover peers automatically
+discovery_enabled = ${DISCOVERY_ENABLED:-false}
+
+# Cluster ID for discovery (nodes with same cluster_id will discover each other)
+# Leave empty to use the default cluster ID
+discovery_cluster_id = "${DISCOVERY_CLUSTER_ID:-}"
 
 # =============================================================================
 # Compression Configuration (01.26.13+)
