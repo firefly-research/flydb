@@ -161,6 +161,10 @@ type Config struct {
 	RaftElectionTimeout  int  `toml:"raft_election_timeout_ms" json:"raft_election_timeout_ms"` // Raft election timeout in ms
 	RaftHeartbeatInterval int `toml:"raft_heartbeat_interval_ms" json:"raft_heartbeat_interval_ms"` // Raft heartbeat interval in ms
 
+	// Service Discovery configuration
+	DiscoveryEnabled   bool   `toml:"discovery_enabled" json:"discovery_enabled"`       // Enable mDNS-based service discovery
+	DiscoveryClusterID string `toml:"discovery_cluster_id" json:"discovery_cluster_id"` // Cluster ID for discovery filtering
+
 	// Compression configuration
 	EnableCompression      bool   `toml:"enable_compression" json:"enable_compression"`           // Enable compression for WAL and replication
 	CompressionAlgorithm   string `toml:"compression_algorithm" json:"compression_algorithm"`     // gzip, lz4, snappy, or zstd
@@ -235,6 +239,10 @@ func DefaultConfig() *Config {
 		EnableRaft:            true,  // Enable Raft by default for cluster mode
 		RaftElectionTimeout:   1000,  // 1s
 		RaftHeartbeatInterval: 150,   // 150ms
+
+		// Service Discovery
+		DiscoveryEnabled:   false, // Disabled by default
+		DiscoveryClusterID: "",    // Empty = use default cluster ID
 
 		// Compression
 		EnableCompression:    false,  // Disabled by default for compatibility
@@ -770,6 +778,10 @@ func applyConfigValue(cfg *Config, key, value string) error {
 			return fmt.Errorf("invalid max_replication_lag_ms value: %s", value)
 		}
 		cfg.MaxReplicationLag = ms
+	case "discovery_enabled":
+		cfg.DiscoveryEnabled = strings.ToLower(value) == "true" || value == "1"
+	case "discovery_cluster_id":
+		cfg.DiscoveryClusterID = value
 
 	default:
 		// Ignore unknown keys for forward compatibility
@@ -854,6 +866,15 @@ func (c *Config) ToTOML() string {
 	sb.WriteString(fmt.Sprintf("enable_raft = %v\n", c.EnableRaft))
 	sb.WriteString(fmt.Sprintf("raft_election_timeout_ms = %d\n", c.RaftElectionTimeout))
 	sb.WriteString(fmt.Sprintf("raft_heartbeat_interval_ms = %d\n\n", c.RaftHeartbeatInterval))
+
+	// Service Discovery configuration
+	sb.WriteString("# Service Discovery Configuration\n")
+	sb.WriteString("# Enable mDNS-based service discovery for automatic cluster formation\n")
+	sb.WriteString("# When enabled, nodes advertise themselves and can discover peers automatically\n")
+	sb.WriteString(fmt.Sprintf("discovery_enabled = %v\n", c.DiscoveryEnabled))
+	sb.WriteString("# Cluster ID for discovery (nodes with same cluster_id will discover each other)\n")
+	sb.WriteString("# Leave empty to use the default cluster ID\n")
+	sb.WriteString(fmt.Sprintf("discovery_cluster_id = \"%s\"\n\n", c.DiscoveryClusterID))
 
 	// Compression configuration (01.26.13+)
 	sb.WriteString("# Compression Configuration (01.26.13+)\n")
