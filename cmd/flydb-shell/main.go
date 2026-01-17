@@ -29,26 +29,26 @@ Architecture:
 
 The CLI follows a simple synchronous request-response model:
 
-  1. Read user input from stdin
-  2. Parse and optionally transform the command
-  3. Send the command to the server over TCP
-  4. Read and display the server's response
-  5. Repeat
+ 1. Read user input from stdin
+ 2. Parse and optionally transform the command
+ 3. Send the command to the server over TCP
+ 4. Read and display the server's response
+ 5. Repeat
 
 Command Types:
 ==============
 
 The CLI supports two types of commands:
 
-  1. Local Commands (prefixed with \):
-     - \q or \quit : Exit the CLI
-     - \h or \help : Display help information
+ 1. Local Commands (prefixed with \):
+    - \q or \quit : Exit the CLI
+    - \h or \help : Display help information
 
-  2. Server Commands:
-     - PING        : Test server connectivity
-     - AUTH <u> <p>: Authenticate with username and password
-     - SQL <stmt>  : Execute a SQL statement
-     - WATCH <tbl> : Subscribe to INSERT events on a table
+ 2. Server Commands:
+    - PING        : Test server connectivity
+    - AUTH <u> <p>: Authenticate with username and password
+    - SQL <stmt>  : Execute a SQL statement
+    - WATCH <tbl> : Subscribe to INSERT events on a table
 
 Smart Command Detection:
 ========================
@@ -61,21 +61,21 @@ This allows users to type natural SQL without the "SQL " prefix.
 Usage Examples:
 ===============
 
-  Connect to local server:
-    fsql
+	Connect to local server:
+	  fsql
 
-  Connect to remote server:
-    fsql -h 192.168.1.100 -p 8889
+	Connect to remote server:
+	  fsql -h 192.168.1.100 -p 8889
 
-  Example session:
-    flydb> AUTH admin admin
-    AUTH OK (admin)
-    flydb> CREATE TABLE users (id INT, name TEXT)
-    CREATE TABLE OK
-    flydb> INSERT INTO users VALUES (1, 'Alice')
-    INSERT OK
-    flydb> SELECT name FROM users
-    Alice
+	Example session:
+	  flydb> AUTH admin admin
+	  AUTH OK (admin)
+	  flydb> CREATE TABLE users (id INT, name TEXT)
+	  CREATE TABLE OK
+	  flydb> INSERT INTO users VALUES (1, 'Alice')
+	  INSERT OK
+	  flydb> SELECT name FROM users
+	  Alice
 */
 package main
 
@@ -127,17 +127,17 @@ const (
 // This struct encapsulates all connection parameters, making it easy
 // to pass configuration between functions and extend in the future.
 type CLIConfig struct {
-	Host     string           // Server hostname or IP address (supports comma-separated for HA)
-	Hosts    []string         // Parsed list of hosts for HA cluster connections
-	Port     string           // Server port number (binary protocol)
-	Database string           // Database to connect to (empty = use server default)
-	Verbose  bool             // Enable verbose output
-	Debug    bool             // Enable debug mode
-	Format   cli.OutputFormat // Output format (table, json, plain)
-	Execute  string           // Command to execute and exit
-	TargetPrimary bool        // When true, always connect to primary/leader (for writes)
-	UseTLS        bool        // When true, use TLS for connection
-	TLSInsecure   bool        // When true, skip TLS certificate verification
+	Host          string           // Server hostname or IP address (supports comma-separated for HA)
+	Hosts         []string         // Parsed list of hosts for HA cluster connections
+	Port          string           // Server port number (binary protocol)
+	Database      string           // Database to connect to (empty = use server default)
+	Verbose       bool             // Enable verbose output
+	Debug         bool             // Enable debug mode
+	Format        cli.OutputFormat // Output format (table, json, plain)
+	Execute       string           // Command to execute and exit
+	TargetPrimary bool             // When true, always connect to primary/leader (for writes)
+	UseTLS        bool             // When true, use TLS for connection
+	TLSInsecure   bool             // When true, skip TLS certificate verification
 }
 
 // REPLState holds the runtime state for the REPL session.
@@ -288,10 +288,10 @@ func isNonSQLCommand(input string) bool {
 
 	// Server commands that don't require semicolons
 	nonSQLCommands := map[string]bool{
-		"PING":   true,
-		"AUTH":   true,
-		"USE":    true,
-		"WATCH":  true,
+		"PING":    true,
+		"AUTH":    true,
+		"USE":     true,
+		"WATCH":   true,
 		"UNWATCH": true,
 	}
 
@@ -353,7 +353,7 @@ func requiresSemicolon(input string) bool {
 		"REVOKE":     true,
 		"CALL":       true,
 		"WITH":       true,
-		"INSPECT": true,
+		"INSPECT":    true,
 		"SQL":        true,
 		"EXPLAIN":    true,
 		"ANALYZE":    true,
@@ -396,14 +396,14 @@ func NewBinaryClient(conn net.Conn, serverAddr string) *BinaryClient {
 // hosts and automatically fails over when the current connection fails.
 type HAClient struct {
 	*BinaryClient
-	hosts           []string      // List of host:port addresses to try
-	currentHostIdx  int           // Index of currently connected host
-	targetPrimary   bool          // If true, only connect to primary/leader
-	authUsername    string        // Cached auth credentials for reconnection
-	authPassword    string        // Cached auth credentials for reconnection
-	lastAuth        bool          // Whether we successfully authenticated
-	useTLS          bool          // Whether to use TLS for connections
-	tlsInsecure     bool          // Whether to skip TLS certificate verification
+	hosts          []string // List of host:port addresses to try
+	currentHostIdx int      // Index of currently connected host
+	targetPrimary  bool     // If true, only connect to primary/leader
+	authUsername   string   // Cached auth credentials for reconnection
+	authPassword   string   // Cached auth credentials for reconnection
+	lastAuth       bool     // Whether we successfully authenticated
+	useTLS         bool     // Whether to use TLS for connections
+	tlsInsecure    bool     // Whether to skip TLS certificate verification
 }
 
 // NewHAClient creates a new HA-aware client that can fail over between hosts.
@@ -811,17 +811,13 @@ func parseFlags() CLIFlags {
 
 // printUsage prints comprehensive help information.
 func printUsage() {
-	fmt.Println()
-	fmt.Println("  " + cli.Highlight("FlyDB CLI - Interactive Database Client") + " " + cli.Dimmed("(v"+banner.Version+")"))
-	fmt.Println("  " + cli.Separator(50))
-	fmt.Println()
+	banner.Print()
 
-	fmt.Println()
 	fmt.Println("    fsql [flags]")
 	fmt.Println("    fsql -e \"<command>\"")
 	fmt.Println()
 
-fmt.Println("  " + cli.Highlight("Flags"))
+	fmt.Println("  " + cli.Highlight("Flags"))
 	fmt.Println()
 	fmt.Printf("    %s, %s <host>      Server hostname(s), comma-separated for HA cluster\n", cli.Info("-H"), cli.Info("--host"))
 	fmt.Printf("    %s, %s <port>      Server port number (default: 8889)\n", cli.Info("-p"), cli.Info("--port"))
@@ -835,6 +831,8 @@ fmt.Println("  " + cli.Highlight("Flags"))
 	fmt.Printf("    %s, %s <cmd>    Execute a command and exit\n", cli.Info("-e"), cli.Info("--execute"))
 	fmt.Printf("    %s, %s <file>    Path to configuration file\n", cli.Info("-c"), cli.Info("--config"))
 	fmt.Printf("        %s    Prefer connecting to primary in cluster\n", cli.Info("--target-primary"))
+	fmt.Printf("        %s             Disable TLS and use plain TCP connection\n", cli.Info("--no-tls"))
+	fmt.Printf("        %s        Skip TLS certificate verification (insecure)\n", cli.Info("--tls-insecure"))
 	fmt.Println()
 
 	fmt.Println("  " + cli.Highlight("Examples"))
@@ -856,6 +854,12 @@ fmt.Println("  " + cli.Highlight("Flags"))
 	fmt.Println()
 	fmt.Println("    " + cli.Dimmed("# Query a specific database"))
 	fmt.Println("    " + cli.Success("fsql -d mydb -e \"SELECT * FROM users\""))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("# Connect with TLS (enabled by default)"))
+	fmt.Println("    " + cli.Success("fsql -H example.com"))
+	fmt.Println()
+	fmt.Println("    " + cli.Dimmed("# Connect skipping TLS verification (for self-signed certs)"))
+	fmt.Println("    " + cli.Success("fsql -H example.com --tls-insecure"))
 	fmt.Println()
 
 	fmt.Println("  " + cli.Highlight("Interactive Commands"))
@@ -2247,6 +2251,17 @@ func printStatus(config CLIConfig, client *BinaryClient) {
 	}
 	fmt.Printf("    %s %s\n", cli.Dimmed("Database:"), cli.Success(dbName))
 	fmt.Printf("    %s %s\n", cli.Dimmed("Protocol:"), "Binary")
+
+	tlsStatus := cli.Error("Disabled")
+	if config.UseTLS {
+		if config.TLSInsecure {
+			tlsStatus = cli.Warning("Enabled (Insecure)")
+		} else {
+			tlsStatus = cli.Success("Enabled")
+		}
+	}
+	fmt.Printf("    %s %s\n", cli.Dimmed("TLS:"), tlsStatus)
+
 	fmt.Printf("    %s %s\n", cli.Dimmed("Format:"), string(config.Format))
 
 	// Show session settings
