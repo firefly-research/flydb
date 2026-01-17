@@ -335,29 +335,28 @@ print_help() {
     echo -e "${BOLD}USAGE:${RESET}"
     echo "    $0 [OPTIONS]"
     echo ""
-    echo "    # Installation from source (required - no pre-built binaries yet)"
-    echo "    git clone https://github.com/${GITHUB_REPO}.git"
-    echo "    cd flydb"
-    echo "    ./install.sh --from-source"
+    echo "    # Quick installation (auto-clones and builds from source)"
+    echo "    curl -sSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/install.sh | bash"
+    echo ""
+    echo "    # Or clone first, then install"
+    echo "    git clone https://github.com/${GITHUB_REPO}.git && cd flydb && ./install.sh"
     echo ""
     echo -e "${BOLD}MODES:${RESET}"
     echo "    Interactive (default):  Run without arguments for guided installation"
     echo "    Non-interactive:        Use --yes with other options for scripted installs"
     echo ""
     echo -e "${BOLD}INSTALLATION SOURCE:${RESET}"
-    echo "    By default, the script auto-detects whether to build from source or"
-    echo "    download pre-built binaries:"
-    echo "    - If run from a FlyDB source directory with Go installed: builds from source"
-    echo "    - Otherwise: attempts to download pre-built binaries from GitHub releases"
+    echo "    The installer automatically builds FlyDB from source:"
+    echo "    - If run from a FlyDB source directory: builds from local source"
+    echo "    - Otherwise: clones the repository to a temp directory and builds"
     echo ""
-    echo "    ${YELLOW}NOTE:${RESET} Pre-built binaries are not yet available. You must build from source."
-    echo "    Clone the repository and run: ./install.sh --from-source"
+    echo "    ${GREEN}✓${RESET} No pre-built binaries needed - always builds fresh from source"
+    echo "    ${GREEN}✓${RESET} Requires: Go 1.21+ and Git"
     echo ""
     echo -e "${BOLD}INSTALLATION OPTIONS:${RESET}"
     echo -e "    ${BOLD}--prefix <path>${RESET}           Installation directory (default: /usr/local or ~/.local)"
     echo -e "    ${BOLD}--version <version>${RESET}       Specific FlyDB version (default: ${FLYDB_VERSION})"
-    echo -e "    ${BOLD}--from-source${RESET}             Force building from source (requires Go 1.21+)"
-    echo -e "    ${BOLD}--from-binary${RESET}             Force downloading pre-built binaries"
+    echo -e "    ${BOLD}--from-source${RESET}             Build from local source directory (requires Go 1.21+)"
     echo -e "    ${BOLD}--no-service${RESET}              Skip system service installation"
     echo -e "    ${BOLD}--no-config${RESET}               Skip configuration file creation"
     echo -e "    ${BOLD}--init-db${RESET}                 Initialize a new database during installation"
@@ -619,11 +618,9 @@ detect_install_mode() {
             exit 1
         fi
     else
-        # Not in source directory - try to download pre-built binaries
-        # (will fail with helpful message if binaries aren't available)
+        # Not in source directory - will clone and build
         RESOLVED_INSTALL_MODE="binary"
-        print_warning "Not in FlyDB source directory - will attempt to download binaries"
-        print_info "Note: Pre-built binaries are not yet available. Clone the repo to build from source."
+        print_info "Not in source directory - will clone repository and build from source"
     fi
 }
 
@@ -657,73 +654,105 @@ cleanup_temp_dir() {
     fi
 }
 
-# Download and extract pre-built binaries
-download_binaries() {
-    print_step "Downloading FlyDB binaries..."
+# Clone repository and build from source (used when not in source directory)
+clone_and_build() {
+    print_step "Cloning FlyDB repository and building from source..."
 
-    local version="${SPECIFIC_VERSION:-$FLYDB_VERSION}"
-    version="${version#v}"
+    # Check if git is available
+    if ! command -v git &>/dev/null; then
+        print_error "Git is not installed"
+        echo ""
+        print_info "Please install Git:"
+        echo "  • macOS: brew install git"
+        echo "  • Ubuntu/Debian: sudo apt-get install git"
+        echo "  • RHEL/CentOS: sudo yum install git"
+        echo ""
+        exit 1
+    fi
 
-    local download_url
-    download_url=$(get_download_url)
+    # Check if Go is available
+    if ! command -v go &>/dev/null; then
+        print_error "Go is not installed"
+        echo ""
+        print_info "Please install Go 1.21 or later:"
+        echo "  • macOS: brew install go"
+        echo "  • Linux: https://go.dev/doc/install"
+        echo ""
+        exit 1
+    fi
+
+    # Verify Go version
+    local go_version
+    go_version=$(go version | awk '{print $3}' | sed 's/go//')
+    local go_major
+    go_major=$(echo "$go_version" | cut -d. -f1)
+    local go_minor
+    go_minor=$(echo "$go_version" | cut -d. -f2)
+
+    if [[ "$go_major" -lt 1 ]] || [[ "$go_major" -eq 1 && "$go_minor" -lt 21 ]]; then
+        print_error "Go 1.21 or later is required (found: $go_version)"
+        echo ""
+        print_info "Please upgrade Go:"
+        echo "  • macOS: brew upgrade go"
+        echo "  • Linux: https://go.dev/doc/install"
+        echo ""
+        exit 1
+    fi
 
     create_temp_dir
 
-    local archive_path="$TEMP_DIR/flydb.tar.gz"
+    local clone_dir="$TEMP_DIR/flydb"
 
-    spinner_start "Downloading FlyDB v${version} for ${OS}/${ARCH}"
+    spinner_start "Cloning FlyDB repository from GitHub"
 
-    local http_code
-    http_code=$(curl -fsSL -w "%{http_code}" -o "$archive_path" "$download_url" 2>/dev/null) || true
-
-    if [[ "$http_code" != "200" ]] || [[ ! -f "$archive_path" ]]; then
-        spinner_error "Failed to download binaries (HTTP $http_code)"
+    # Clone the repository
+    if ! git clone --quiet --depth 1 --branch main "https://github.com/${GITHUB_REPO}.git" "$clone_dir" 2>/dev/null; then
+        spinner_error "Failed to clone repository"
         echo ""
-        print_error "Could not download from: $download_url"
+        print_error "Could not clone from: https://github.com/${GITHUB_REPO}.git"
         echo ""
-        print_warning "Pre-built binaries are not available for this version/platform."
-        echo ""
-        print_info "FlyDB must be built from source. Please use one of these options:"
-        echo ""
-        echo "  ${BOLD}Option 1: Clone and build from source${RESET}"
-        echo "    git clone https://github.com/${GITHUB_REPO}.git"
-        echo "    cd flydb"
-        echo "    ./install.sh --from-source"
-        echo ""
-        echo "  ${BOLD}Option 2: If you're already in the source directory${RESET}"
-        echo "    ./install.sh --from-source"
-        echo ""
-        echo "  ${BOLD}Requirements:${RESET}"
-        echo "    • Go 1.21 or later"
-        echo "    • Git (for cloning)"
+        print_info "Please check:"
+        echo "  • Your internet connection"
+        echo "  • Repository access permissions"
         echo ""
         cleanup_temp_dir
         exit 1
     fi
 
-    spinner_success "Downloaded FlyDB v${version}"
+    spinner_success "Cloned repository"
 
-    spinner_start "Extracting binaries"
+    # Build from the cloned source
+    spinner_start "Building FlyDB binaries (this may take a few minutes)"
 
-    if ! tar -xzf "$archive_path" -C "$TEMP_DIR" 2>/dev/null; then
-        spinner_error "Failed to extract archive"
+    cd "$clone_dir" || {
+        spinner_error "Failed to enter source directory"
+        cleanup_temp_dir
+        exit 1
+    }
+
+    # Build all binaries
+    if ! make build-all >/dev/null 2>&1; then
+        spinner_error "Build failed"
+        echo ""
+        print_error "Failed to build FlyDB"
+        echo ""
+        print_info "Try building manually:"
+        echo "  cd $clone_dir"
+        echo "  make build-all"
+        echo ""
         cleanup_temp_dir
         exit 1
     fi
 
-    # Verify extracted binaries exist
-    if [[ ! -f "$TEMP_DIR/flydb" ]] || [[ ! -f "$TEMP_DIR/flydb-shell" ]]; then
-        spinner_error "Archive does not contain expected binaries"
-        cleanup_temp_dir
-        exit 1
-    fi
-
-    spinner_success "Extracted binaries"
+    spinner_success "Built FlyDB successfully"
     echo ""
+
+    # Return to original directory
+    cd - >/dev/null || exit 1
 }
 
-# Install binaries from downloaded files
-install_downloaded_binaries() {
+# Install binaries from cloned source
+install_cloned_binaries() {
     print_step "Installing binaries..."
 
     INSTALL_STARTED=true
@@ -731,6 +760,7 @@ install_downloaded_binaries() {
     local bin_dir="${PREFIX}/bin"
     local sudo_cmd
     sudo_cmd=$(get_sudo_cmd "$bin_dir")
+    local clone_dir="$TEMP_DIR/flydb"
 
     # Create bin directory
     if [[ ! -d "$bin_dir" ]]; then
@@ -749,7 +779,7 @@ install_downloaded_binaries() {
 
     # Install flydb
     spinner_start "Installing flydb"
-    if $sudo_cmd cp "$TEMP_DIR/flydb" "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb"; then
+    if $sudo_cmd cp "$clone_dir/bin/flydb" "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb"; then
         spinner_success "Installed ${bin_dir}/flydb"
         INSTALLED_FILES+=("$bin_dir/flydb")
     else
@@ -761,7 +791,7 @@ install_downloaded_binaries() {
 
     # Install flydb-shell
     spinner_start "Installing flydb-shell"
-    if $sudo_cmd cp "$TEMP_DIR/flydb-shell" "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb-shell"; then
+    if $sudo_cmd cp "$clone_dir/bin/flydb-shell" "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb-shell"; then
         spinner_success "Installed ${bin_dir}/flydb-shell"
         INSTALLED_FILES+=("$bin_dir/flydb-shell")
     else
@@ -773,7 +803,7 @@ install_downloaded_binaries() {
 
     # Install flydb-dump
     spinner_start "Installing flydb-dump"
-    if $sudo_cmd cp "$TEMP_DIR/flydb-dump" "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb-dump"; then
+    if $sudo_cmd cp "$clone_dir/bin/flydb-dump" "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb-dump"; then
         spinner_success "Installed ${bin_dir}/flydb-dump"
         INSTALLED_FILES+=("$bin_dir/flydb-dump")
     else
@@ -781,6 +811,17 @@ install_downloaded_binaries() {
         cleanup_temp_dir
         rollback
         exit 1
+    fi
+
+    # Install flydb-discover (optional, for cluster mode)
+    if [[ -f "$clone_dir/bin/flydb-discover" ]]; then
+        spinner_start "Installing flydb-discover"
+        if $sudo_cmd cp "$clone_dir/bin/flydb-discover" "$bin_dir/" && $sudo_cmd chmod +x "$bin_dir/flydb-discover"; then
+            spinner_success "Installed ${bin_dir}/flydb-discover"
+            INSTALLED_FILES+=("$bin_dir/flydb-discover")
+        else
+            spinner_warning "Failed to install flydb-discover (optional)"
+        fi
     fi
 
     # Create fsql symlink for convenience
@@ -3767,17 +3808,17 @@ main() {
         exit 1
     fi
 
-    # Build or download binaries based on installation mode
+    # Build or clone+build binaries based on installation mode
     if [[ "$RESOLVED_INSTALL_MODE" == "source" ]]; then
-        # Build from source
+        # Build from source (already in source directory)
         build_binaries
         # Install binaries from local build
         install_binaries
     else
-        # Download pre-built binaries
-        download_binaries
-        # Install downloaded binaries
-        install_downloaded_binaries
+        # Clone repository and build from source
+        clone_and_build
+        # Install binaries from cloned source
+        install_cloned_binaries
     fi
 
     # Create config file
