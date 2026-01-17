@@ -127,7 +127,7 @@ const (
 	MigrationPending MigrationState = iota
 	MigrationInProgress
 	MigrationCompleted
-	MigrationFailed
+	MigrationFailedOld // Renamed to avoid conflict with metadata.go
 )
 
 // NewPartitioner creates a new partitioner

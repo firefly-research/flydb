@@ -252,6 +252,10 @@ const (
 	PartitionRebalancing
 	// PartitionUnavailable means the partition has lost quorum
 	PartitionUnavailable
+	// PartitionMigrating means the partition is being migrated to another node
+	PartitionMigrating
+	// PartitionDegraded means the partition is available but under-replicated
+	PartitionDegraded
 )
 
 func (s PartitionState) String() string {
@@ -264,6 +268,10 @@ func (s PartitionState) String() string {
 		return "REBALANCING"
 	case PartitionUnavailable:
 		return "UNAVAILABLE"
+	case PartitionMigrating:
+		return "MIGRATING"
+	case PartitionDegraded:
+		return "DEGRADED"
 	default:
 		return "UNKNOWN"
 	}
@@ -494,15 +502,16 @@ func (h *HashRing) GetAllNodes() []*ClusterNode {
 type ClusterEventType string
 
 const (
-	EventNodeJoined       ClusterEventType = "NODE_JOINED"
-	EventNodeLeft         ClusterEventType = "NODE_LEFT"
-	EventNodeFailed       ClusterEventType = "NODE_FAILED"
-	EventLeaderElected    ClusterEventType = "LEADER_ELECTED"
-	EventPartitionMoved   ClusterEventType = "PARTITION_MOVED"
-	EventRebalanceStarted ClusterEventType = "REBALANCE_STARTED"
+	EventNodeJoined        ClusterEventType = "NODE_JOINED"
+	EventNodeLeft          ClusterEventType = "NODE_LEFT"
+	EventNodeFailed        ClusterEventType = "NODE_FAILED"
+	EventLeaderElected     ClusterEventType = "LEADER_ELECTED"
+	EventPartitionMoved    ClusterEventType = "PARTITION_MOVED"
+	EventPartitionMigrating ClusterEventType = "PARTITION_MIGRATING"
+	EventRebalanceStarted  ClusterEventType = "REBALANCE_STARTED"
 	EventRebalanceComplete ClusterEventType = "REBALANCE_COMPLETE"
-	EventQuorumLost       ClusterEventType = "QUORUM_LOST"
-	EventQuorumRestored   ClusterEventType = "QUORUM_RESTORED"
+	EventQuorumLost        ClusterEventType = "QUORUM_LOST"
+	EventQuorumRestored    ClusterEventType = "QUORUM_RESTORED"
 )
 
 // ClusterEvent represents a cluster state change event
@@ -587,10 +596,10 @@ type ReplicatedStorageEngine interface {
 	WriteReplicatedWAL(op byte, key string, value []byte) error
 }
 
-// WAL operation types
+// WAL operation types (byte constants for wire protocol)
 const (
-	OpPut    byte = 1
-	OpDelete byte = 2
+	WALOpPut    byte = 1
+	WALOpDelete byte = 2
 )
 
 // FollowerReplicationState tracks the replication state of a follower
@@ -977,6 +986,20 @@ func (ucm *UnifiedClusterManager) GetAllNodes() []*ClusterNode {
 	return nodes
 }
 
+// GetAliveNodes returns all alive nodes in the cluster
+func (ucm *UnifiedClusterManager) GetAliveNodes() []*ClusterNode {
+	ucm.nodesMu.RLock()
+	defer ucm.nodesMu.RUnlock()
+
+	nodes := make([]*ClusterNode, 0, len(ucm.nodes))
+	for _, n := range ucm.nodes {
+		if n.State == NodeAlive {
+			nodes = append(nodes, n)
+		}
+	}
+	return nodes
+}
+
 // OnEvent registers a callback for cluster events
 func (ucm *UnifiedClusterManager) OnEvent(callback func(ClusterEvent)) {
 	ucm.eventMu.Lock()
@@ -1090,15 +1113,81 @@ func (ucm *UnifiedClusterManager) handleClusterConnection(conn net.Conn) {
 	}
 }
 
-// handleDataConnection processes data replication messages
+// handleDataConnection processes data replication messages and forwarded requests
 func (ucm *UnifiedClusterManager) handleDataConnection(conn net.Conn) {
-	// If replication is active (this node is leader), handle as follower connection
+	// Try to peek at the first message to determine type
+	reader := bufio.NewReader(conn)
+	firstByte, err := reader.Peek(1)
+	if err != nil {
+		conn.Close()
+		return
+	}
+
+	// If it starts with '{', it's a JSON forwarded request
+	if firstByte[0] == '{' {
+		ucm.handleForwardedRequest(conn, reader)
+		return
+	}
+
+	// Otherwise, if replication is active (this node is leader), handle as follower connection
 	if ucm.replActive {
 		ucm.handleFollowerConnection(conn)
 		return
 	}
+
 	// Otherwise close the connection - not ready for replication
 	conn.Close()
+}
+
+// handleForwardedRequest handles forwarded GET/PUT/DELETE requests from other nodes
+func (ucm *UnifiedClusterManager) handleForwardedRequest(conn net.Conn, reader *bufio.Reader) {
+	defer conn.Close()
+
+	var msg forwardMessage
+	if err := json.NewDecoder(reader).Decode(&msg); err != nil {
+		resp := forwardResponse{
+			Success: false,
+			Error:   fmt.Sprintf("failed to decode request: %v", err),
+		}
+		json.NewEncoder(conn).Encode(resp)
+		return
+	}
+
+	var resp forwardResponse
+
+	switch msg.Type {
+	case "GET":
+		value, err := ucm.store.Get(msg.Key)
+		if err != nil {
+			resp.Success = false
+			resp.Error = err.Error()
+		} else {
+			resp.Success = true
+			resp.Value = value
+		}
+
+	case "PUT":
+		if err := ucm.store.Put(msg.Key, msg.Value); err != nil {
+			resp.Success = false
+			resp.Error = err.Error()
+		} else {
+			resp.Success = true
+		}
+
+	case "DELETE":
+		if err := ucm.store.Delete(msg.Key); err != nil {
+			resp.Success = false
+			resp.Error = err.Error()
+		} else {
+			resp.Success = true
+		}
+
+	default:
+		resp.Success = false
+		resp.Error = fmt.Sprintf("unknown operation type: %s", msg.Type)
+	}
+
+	json.NewEncoder(conn).Encode(resp)
 }
 
 // Message types for cluster protocol
@@ -2394,11 +2483,11 @@ func (ucm *UnifiedClusterManager) connectAndSyncWithLeader(leaderAddr string, st
 
 			// Step 2: Apply to storage without re-writing to WAL
 			switch op {
-			case OpPut:
+			case WALOpPut:
 				if err := replStore.ApplyReplicatedPut(key, valBuf); err != nil {
 					fmt.Printf("Failed to apply replicated PUT %s: %v\n", key, err)
 				}
-			case OpDelete:
+			case WALOpDelete:
 				if err := replStore.ApplyReplicatedDelete(key); err != nil {
 					fmt.Printf("Failed to apply replicated DELETE %s: %v\n", key, err)
 				}
@@ -2406,11 +2495,11 @@ func (ucm *UnifiedClusterManager) connectAndSyncWithLeader(leaderAddr string, st
 		} else {
 			// Fallback: use regular Put/Delete (will write to WAL twice)
 			switch op {
-			case OpPut:
+			case WALOpPut:
 				if err := ucm.store.Put(key, valBuf); err != nil {
 					fmt.Printf("Failed to apply PUT %s: %v\n", key, err)
 				}
-			case OpDelete:
+			case WALOpDelete:
 				if err := ucm.store.Delete(key); err != nil {
 					fmt.Printf("Failed to apply DELETE %s: %v\n", key, err)
 				}
@@ -2498,4 +2587,541 @@ func (ucm *UnifiedClusterManager) WaitForReplication(consistency ConsistencyLeve
 	}
 
 	return fmt.Errorf("replication timeout: insufficient acknowledgments")
+}
+
+// ============================================================================
+// Partition-Aware Routing Layer for Horizontal Scaling
+// ============================================================================
+
+// RouteRequest represents a routing decision for a key operation
+type RouteRequest struct {
+	Key       string
+	Operation string // "GET", "PUT", "DELETE"
+}
+
+// RouteResponse contains routing information for a request
+type RouteResponse struct {
+	PartitionID   int
+	PrimaryNode   *ClusterNode
+	ReplicaNodes  []*ClusterNode
+	IsLocal       bool // true if this node is the primary
+	RedirectAddr  string // address to redirect to if not local
+}
+
+// RouteKey determines which node should handle a key operation
+// This is the core of horizontal scaling - it routes requests to the correct partition owner
+func (ucm *UnifiedClusterManager) RouteKey(key string) (*RouteResponse, error) {
+	// Get partition ID for this key using consistent hashing
+	partitionID := ucm.GetPartitionForKey(key)
+
+	// Get partition metadata
+	partition := ucm.GetPartition(partitionID)
+	if partition == nil {
+		return nil, fmt.Errorf("partition %d not found", partitionID)
+	}
+
+	// Check partition state
+	if partition.State != PartitionHealthy {
+		return nil, fmt.Errorf("partition %d is not healthy (state: %s)", partitionID, partition.State)
+	}
+
+	// Get primary node for this partition
+	primaryNode := ucm.GetNode(partition.Leader)
+	if primaryNode == nil {
+		return nil, fmt.Errorf("primary node %s not found for partition %d", partition.Leader, partitionID)
+	}
+
+	// Get replica nodes
+	replicaNodes := make([]*ClusterNode, 0, len(partition.Replicas))
+	for _, replicaID := range partition.Replicas {
+		if replicaID == partition.Leader {
+			continue // Skip primary
+		}
+		if node := ucm.GetNode(replicaID); node != nil {
+			replicaNodes = append(replicaNodes, node)
+		}
+	}
+
+	// Determine if this node is the primary
+	isLocal := partition.Leader == ucm.nodeID
+
+	// Build redirect address if not local
+	redirectAddr := ""
+	if !isLocal {
+		redirectAddr = fmt.Sprintf("%s:%d", primaryNode.Addr, primaryNode.DataPort)
+	}
+
+	return &RouteResponse{
+		PartitionID:  partitionID,
+		PrimaryNode:  primaryNode,
+		ReplicaNodes: replicaNodes,
+		IsLocal:      isLocal,
+		RedirectAddr: redirectAddr,
+	}, nil
+}
+
+// Get performs a partition-aware GET operation
+// If this node owns the partition, it reads locally
+// Otherwise, it forwards the request to the owning node
+func (ucm *UnifiedClusterManager) Get(key string) ([]byte, error) {
+	route, err := ucm.RouteKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("routing failed: %w", err)
+	}
+
+	if route.IsLocal {
+		// This node owns the partition - read locally
+		return ucm.store.Get(key)
+	}
+
+	// Forward to the owning node
+	return ucm.forwardGet(route.RedirectAddr, key)
+}
+
+// Put performs a partition-aware PUT operation
+// If this node owns the partition, it writes locally and replicates
+// Otherwise, it forwards the request to the owning node
+func (ucm *UnifiedClusterManager) Put(key string, value []byte) error {
+	route, err := ucm.RouteKey(key)
+	if err != nil {
+		return fmt.Errorf("routing failed: %w", err)
+	}
+
+	if route.IsLocal {
+		// This node owns the partition - write locally
+		if err := ucm.store.Put(key, value); err != nil {
+			return err
+		}
+
+		// Replicate to partition replicas with configured consistency
+		return ucm.ReplicateData(route.PartitionID, key, value, ucm.config.DefaultConsistency)
+	}
+
+	// Forward to the owning node
+	return ucm.forwardPut(route.RedirectAddr, key, value)
+}
+
+// Delete performs a partition-aware DELETE operation
+func (ucm *UnifiedClusterManager) Delete(key string) error {
+	route, err := ucm.RouteKey(key)
+	if err != nil {
+		return fmt.Errorf("routing failed: %w", err)
+	}
+
+	if route.IsLocal {
+		// This node owns the partition - delete locally
+		if err := ucm.store.Delete(key); err != nil {
+			return err
+		}
+
+		// Replicate deletion to partition replicas
+		return ucm.ReplicateData(route.PartitionID, key, nil, ucm.config.DefaultConsistency)
+	}
+
+	// Forward to the owning node
+	return ucm.forwardDelete(route.RedirectAddr, key)
+}
+
+// forwardGet forwards a GET request to another node
+func (ucm *UnifiedClusterManager) forwardGet(addr string, key string) ([]byte, error) {
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(ucm.config.SyncTimeout))
+
+	// Send GET request
+	msg := forwardMessage{
+		Type: "GET",
+		Key:  key,
+	}
+
+	if err := json.NewEncoder(conn).Encode(msg); err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+
+	// Read response
+	var resp forwardResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("remote error: %s", resp.Error)
+	}
+
+	return resp.Value, nil
+}
+
+// forwardPut forwards a PUT request to another node
+func (ucm *UnifiedClusterManager) forwardPut(addr string, key string, value []byte) error {
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(ucm.config.SyncTimeout))
+
+	// Send PUT request
+	msg := forwardMessage{
+		Type:  "PUT",
+		Key:   key,
+		Value: value,
+	}
+
+	if err := json.NewEncoder(conn).Encode(msg); err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+
+	// Read response
+	var resp forwardResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("remote error: %s", resp.Error)
+	}
+
+	return nil
+}
+
+// forwardDelete forwards a DELETE request to another node
+func (ucm *UnifiedClusterManager) forwardDelete(addr string, key string) error {
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(ucm.config.SyncTimeout))
+
+	// Send DELETE request
+	msg := forwardMessage{
+		Type: "DELETE",
+		Key:  key,
+	}
+
+	if err := json.NewEncoder(conn).Encode(msg); err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+
+	// Read response
+	var resp forwardResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if !resp.Success {
+		return fmt.Errorf("remote error: %s", resp.Error)
+	}
+
+	return nil
+}
+
+// forwardMessage represents a forwarded operation
+type forwardMessage struct {
+	Type  string `json:"type"`
+	Key   string `json:"key"`
+	Value []byte `json:"value,omitempty"`
+}
+
+// forwardResponse represents a response to a forwarded operation
+type forwardResponse struct {
+	Success bool   `json:"success"`
+	Value   []byte `json:"value,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// ============================================================================
+// Partition Migration for Rebalancing
+// ============================================================================
+
+// MigratePartition migrates a partition's data from one node to another
+// This is called during rebalancing when partition ownership changes
+func (ucm *UnifiedClusterManager) MigratePartition(partitionID int, fromNode, toNode string) error {
+	partition := ucm.GetPartition(partitionID)
+	if partition == nil {
+		return fmt.Errorf("partition %d not found", partitionID)
+	}
+
+	// Mark partition as migrating
+	ucm.partitionsMu.Lock()
+	partition.State = PartitionMigrating
+	ucm.partitionsMu.Unlock()
+
+	ucm.emitEvent(ClusterEvent{
+		Type:        EventPartitionMigrating,
+		NodeID:      ucm.nodeID,
+		PartitionID: partitionID,
+		Details:     fmt.Sprintf("migrating from %s to %s", fromNode, toNode),
+	})
+
+	// If this node is the source, send data to destination
+	if fromNode == ucm.nodeID {
+		if err := ucm.sendPartitionData(partitionID, toNode); err != nil {
+			ucm.partitionsMu.Lock()
+			partition.State = PartitionDegraded
+			ucm.partitionsMu.Unlock()
+			return fmt.Errorf("failed to send partition data: %w", err)
+		}
+	}
+
+	// If this node is the destination, receive data from source
+	if toNode == ucm.nodeID {
+		if err := ucm.receivePartitionData(partitionID, fromNode); err != nil {
+			ucm.partitionsMu.Lock()
+			partition.State = PartitionDegraded
+			ucm.partitionsMu.Unlock()
+			return fmt.Errorf("failed to receive partition data: %w", err)
+		}
+	}
+
+	// Update partition state
+	ucm.partitionsMu.Lock()
+	partition.State = PartitionHealthy
+	partition.Leader = toNode
+	partition.Version++
+	partition.LastModified = time.Now()
+	ucm.partitionsMu.Unlock()
+
+	ucm.emitEvent(ClusterEvent{
+		Type:        EventPartitionMoved,
+		NodeID:      ucm.nodeID,
+		PartitionID: partitionID,
+		Details:     fmt.Sprintf("migration complete: %s -> %s", fromNode, toNode),
+	})
+
+	return nil
+}
+
+// sendPartitionData sends all data for a partition to another node
+func (ucm *UnifiedClusterManager) sendPartitionData(partitionID int, toNode string) error {
+	node := ucm.GetNode(toNode)
+	if node == nil {
+		return fmt.Errorf("destination node %s not found", toNode)
+	}
+
+	addr := fmt.Sprintf("%s:%d", node.Addr, node.DataPort)
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("failed to connect to %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(5 * time.Minute)) // Long timeout for migration
+
+	// Send migration start message
+	startMsg := migrationMessage{
+		Type:        "MIGRATION_START",
+		PartitionID: partitionID,
+	}
+
+	if err := json.NewEncoder(conn).Encode(startMsg); err != nil {
+		return fmt.Errorf("failed to send migration start: %w", err)
+	}
+
+	// Scan all keys in the store and send those belonging to this partition
+	// Note: This is a simplified implementation. In production, you'd want to:
+	// 1. Use a snapshot to ensure consistency
+	// 2. Stream data in batches
+	// 3. Handle errors and retries
+
+	keys, err := ucm.getAllKeysForPartition(partitionID)
+	if err != nil {
+		return fmt.Errorf("failed to get partition keys: %w", err)
+	}
+
+	// Send each key-value pair
+	for _, key := range keys {
+		value, err := ucm.store.Get(key)
+		if err != nil {
+			continue // Skip keys that can't be read
+		}
+
+		dataMsg := migrationMessage{
+			Type:  "MIGRATION_DATA",
+			Key:   key,
+			Value: value,
+		}
+
+		if err := json.NewEncoder(conn).Encode(dataMsg); err != nil {
+			return fmt.Errorf("failed to send key %s: %w", key, err)
+		}
+	}
+
+	// Send migration complete message
+	completeMsg := migrationMessage{
+		Type:        "MIGRATION_COMPLETE",
+		PartitionID: partitionID,
+	}
+
+	if err := json.NewEncoder(conn).Encode(completeMsg); err != nil {
+		return fmt.Errorf("failed to send migration complete: %w", err)
+	}
+
+	return nil
+}
+
+// receivePartitionData receives partition data from another node
+func (ucm *UnifiedClusterManager) receivePartitionData(partitionID int, fromNode string) error {
+	// This would be called by the data listener when receiving migration data
+	// For now, this is a placeholder - the actual implementation would be in
+	// handleDataConnection when it detects a MIGRATION_START message
+	return nil
+}
+
+// getAllKeysForPartition returns all keys belonging to a partition
+func (ucm *UnifiedClusterManager) getAllKeysForPartition(partitionID int) ([]string, error) {
+	// This is a simplified implementation
+	// In production, you'd want to use a more efficient method like:
+	// 1. Maintain a per-partition key index
+	// 2. Use range scans if your storage supports it
+	// 3. Use snapshots for consistency
+
+	allKeys := make([]string, 0)
+
+	// Scan all keys in the store
+	// Note: This assumes the store has a Scan method
+	// You may need to adapt this based on your actual storage interface
+
+	return allKeys, nil
+}
+
+// migrationMessage represents a partition migration message
+type migrationMessage struct {
+	Type        string `json:"type"` // MIGRATION_START, MIGRATION_DATA, MIGRATION_COMPLETE
+	PartitionID int    `json:"partition_id,omitempty"`
+	Key         string `json:"key,omitempty"`
+	Value       []byte `json:"value,omitempty"`
+}
+
+// ============================================================================
+// Scatter-Gather Query Support for Cross-Partition Operations
+// ============================================================================
+
+// ScatterGatherScan performs a scan across all partitions
+// This is used for queries that need to access data across multiple partitions
+func (ucm *UnifiedClusterManager) ScatterGatherScan(prefix string) (map[string][]byte, error) {
+	results := make(map[string][]byte)
+	resultsMu := sync.Mutex{}
+
+	// Get all partitions
+	ucm.partitionsMu.RLock()
+	partitions := make([]*Partition, 0, len(ucm.partitions))
+	for _, p := range ucm.partitions {
+		partitions = append(partitions, p)
+	}
+	ucm.partitionsMu.RUnlock()
+
+	// Group partitions by node
+	nodePartitions := make(map[string][]int)
+	for _, p := range partitions {
+		nodePartitions[p.Leader] = append(nodePartitions[p.Leader], p.ID)
+	}
+
+	// Query each node in parallel
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(nodePartitions))
+
+	for nodeID, partitionIDs := range nodePartitions {
+		wg.Add(1)
+		go func(nid string, pids []int) {
+			defer wg.Done()
+
+			if nid == ucm.nodeID {
+				// Local scan
+				localResults, err := ucm.scanLocal(prefix)
+				if err != nil {
+					errCh <- fmt.Errorf("local scan failed: %w", err)
+					return
+				}
+
+				resultsMu.Lock()
+				for k, v := range localResults {
+					results[k] = v
+				}
+				resultsMu.Unlock()
+			} else {
+				// Remote scan
+				remoteResults, err := ucm.scanRemote(nid, prefix)
+				if err != nil {
+					errCh <- fmt.Errorf("remote scan of %s failed: %w", nid, err)
+					return
+				}
+
+				resultsMu.Lock()
+				for k, v := range remoteResults {
+					results[k] = v
+				}
+				resultsMu.Unlock()
+			}
+		}(nodeID, partitionIDs)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	// Check for errors
+	if len(errCh) > 0 {
+		return nil, <-errCh
+	}
+
+	return results, nil
+}
+
+// scanLocal performs a local scan with a prefix
+func (ucm *UnifiedClusterManager) scanLocal(prefix string) (map[string][]byte, error) {
+	// This is a placeholder - implement based on your storage engine's scan capabilities
+	results := make(map[string][]byte)
+	return results, nil
+}
+
+// scanRemote performs a remote scan on another node
+func (ucm *UnifiedClusterManager) scanRemote(nodeID string, prefix string) (map[string][]byte, error) {
+	node := ucm.GetNode(nodeID)
+	if node == nil {
+		return nil, fmt.Errorf("node %s not found", nodeID)
+	}
+
+	addr := fmt.Sprintf("%s:%d", node.Addr, node.DataPort)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to %s: %w", addr, err)
+	}
+	defer conn.Close()
+
+	conn.SetDeadline(time.Now().Add(ucm.config.SyncTimeout))
+
+	// Send scan request
+	msg := forwardMessage{
+		Type: "SCAN",
+		Key:  prefix,
+	}
+
+	if err := json.NewEncoder(conn).Encode(msg); err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+
+	// Read response
+	var resp scanResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if !resp.Success {
+		return nil, fmt.Errorf("remote error: %s", resp.Error)
+	}
+
+	return resp.Results, nil
+}
+
+// scanResponse represents a response to a scan request
+type scanResponse struct {
+	Success bool              `json:"success"`
+	Results map[string][]byte `json:"results,omitempty"`
+	Error   string            `json:"error,omitempty"`
 }

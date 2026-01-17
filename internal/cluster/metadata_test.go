@@ -18,7 +18,6 @@ package cluster
 
 import (
 	"testing"
-	"time"
 )
 
 // ============================================================================
@@ -56,7 +55,7 @@ func TestClusterMetadataStore_NodeMetadata(t *testing.T) {
 		},
 		Load: NodeLoad{
 			CPUUsage:    0.5,
-			MemoryUsage: 0.3,
+			MemoryUsage: 5 * 1024 * 1024 * 1024, // 5 GB
 			Connections: 100,
 			QPS:         1000,
 		},
@@ -67,11 +66,14 @@ func TestClusterMetadataStore_NodeMetadata(t *testing.T) {
 		State:      NodeAlive,
 	}
 	
-	// Update node metadata
-	store.UpdateNode(nodeMetadata)
-	
+	// Add node metadata
+	store.AddNode(nodeMetadata)
+
 	// Retrieve node metadata
-	retrieved := store.GetNode("node1")
+	retrieved, ok := store.GetNode("node1")
+	if !ok {
+		t.Fatal("GetNode returned false")
+	}
 	if retrieved == nil {
 		t.Fatal("GetNode returned nil")
 	}
@@ -102,11 +104,14 @@ func TestClusterMetadataStore_PartitionMetadata(t *testing.T) {
 		DataSize: 1024 * 1024,
 	}
 	
-	// Update partition metadata
-	store.UpdatePartition(partitionMetadata)
-	
+	// Add partition metadata
+	store.AddPartition(partitionMetadata)
+
 	// Retrieve partition metadata
-	retrieved := store.GetPartition(0)
+	retrieved, ok := store.GetPartition(0)
+	if !ok {
+		t.Fatal("GetPartition returned false")
+	}
 	if retrieved == nil {
 		t.Fatal("GetPartition returned nil")
 	}
@@ -127,12 +132,12 @@ func TestClusterMetadataStore_Versioning(t *testing.T) {
 	
 	initialVersion := store.GetVersion()
 	
-	// Update should increment version
+	// Add should increment version
 	nodeMetadata := &NodeMetadata{
 		ID:   "node1",
 		Addr: "127.0.0.1:7000",
 	}
-	store.UpdateNode(nodeMetadata)
+	store.AddNode(nodeMetadata)
 	
 	newVersion := store.GetVersion()
 	if newVersion <= initialVersion {
@@ -144,18 +149,38 @@ func TestClusterMetadataStore_RoutingTable(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := DefaultClusterConfig("node1", "127.0.0.1:7000")
 	store := NewClusterMetadataStore(config, tmpDir)
-	
-	// Update routing table
-	store.UpdateRoutingTable(0, "node1", []string{"node1", "node2"})
-	
+
+	// Add a partition which will update the routing table
+	partitionMetadata := &PartitionMetadata{
+		ID:       0,
+		Version:  1,
+		Leader:   "node1",
+		Replicas: []string{"node1", "node2"},
+		State:    PartitionHealthy,
+		Health:   HealthHealthy,
+	}
+	store.AddPartition(partitionMetadata)
+
+	// Get routing table
+	rt := store.GetRoutingTable()
+	if rt == nil {
+		t.Fatal("GetRoutingTable returned nil")
+	}
+
 	// Get primary node
-	primary := store.GetPrimaryNode(0)
+	primary, ok := rt.GetPrimaryNode(0)
+	if !ok {
+		t.Fatal("GetPrimaryNode returned false")
+	}
 	if primary != "node1" {
 		t.Errorf("Expected primary 'node1', got '%s'", primary)
 	}
-	
+
 	// Get replica nodes
-	replicas := store.GetReplicaNodes(0)
+	replicas, ok := rt.GetReplicas(0)
+	if !ok {
+		t.Fatal("GetReplicas returned false")
+	}
 	if len(replicas) != 2 {
 		t.Errorf("Expected 2 replicas, got %d", len(replicas))
 	}

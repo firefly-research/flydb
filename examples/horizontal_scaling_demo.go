@@ -5,8 +5,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/genc-murat/FlyDB/config"
-	"github.com/genc-murat/FlyDB/engine"
+	"flydb/internal/config"
+	"flydb/internal/engine"
 )
 
 // This example demonstrates FlyDB's horizontal scaling capabilities
