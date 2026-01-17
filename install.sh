@@ -658,46 +658,8 @@ cleanup_temp_dir() {
 clone_and_build() {
     print_step "Cloning FlyDB repository and building from source..."
 
-    # Check if git is available
-    if ! command -v git &>/dev/null; then
-        print_error "Git is not installed"
-        echo ""
-        print_info "Please install Git:"
-        echo "  • macOS: brew install git"
-        echo "  • Ubuntu/Debian: sudo apt-get install git"
-        echo "  • RHEL/CentOS: sudo yum install git"
-        echo ""
-        exit 1
-    fi
-
-    # Check if Go is available
-    if ! command -v go &>/dev/null; then
-        print_error "Go is not installed"
-        echo ""
-        print_info "Please install Go 1.21 or later:"
-        echo "  • macOS: brew install go"
-        echo "  • Linux: https://go.dev/doc/install"
-        echo ""
-        exit 1
-    fi
-
-    # Verify Go version
-    local go_version
-    go_version=$(go version | awk '{print $3}' | sed 's/go//')
-    local go_major
-    go_major=$(echo "$go_version" | cut -d. -f1)
-    local go_minor
-    go_minor=$(echo "$go_version" | cut -d. -f2)
-
-    if [[ "$go_major" -lt 1 ]] || [[ "$go_major" -eq 1 && "$go_minor" -lt 21 ]]; then
-        print_error "Go 1.21 or later is required (found: $go_version)"
-        echo ""
-        print_info "Please upgrade Go:"
-        echo "  • macOS: brew upgrade go"
-        echo "  • Linux: https://go.dev/doc/install"
-        echo ""
-        exit 1
-    fi
+    # Prerequisites are already checked by check_prerequisites()
+    # Just proceed with cloning and building
 
     create_temp_dir
 
@@ -1039,10 +1001,8 @@ check_prerequisites() {
     local errors=0
 
     # Check for required commands based on installation mode
-    local required_commands=("curl" "tar")
-    if [[ "$RESOLVED_INSTALL_MODE" == "source" ]]; then
-        required_commands+=("go")
-    fi
+    # Both modes need Go and Git now (source builds locally, binary clones and builds)
+    local required_commands=("go" "git")
 
     for cmd in "${required_commands[@]}"; do
         if command -v "$cmd" &>/dev/null; then
@@ -1053,8 +1013,8 @@ check_prerequisites() {
         fi
     done
 
-    # Check Go version if building from source
-    if [[ "$RESOLVED_INSTALL_MODE" == "source" ]] && command -v go &>/dev/null; then
+    # Check Go version (required for both modes)
+    if command -v go &>/dev/null; then
         local go_version
         go_version=$(go version | grep -oE 'go[0-9]+\.[0-9]+' | sed 's/go//')
         local go_major go_minor
