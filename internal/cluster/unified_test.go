@@ -190,16 +190,16 @@ func TestHashRingGetNodes(t *testing.T) {
 // TestNewUnifiedClusterManager tests creating a new unified cluster manager
 func TestNewUnifiedClusterManager(t *testing.T) {
 	config := ClusterConfig{
-		NodeID:             "test-node",
-		NodeAddr:           "localhost",
-		ClusterPort:        0, // Use random port
-		DataPort:           0,
-		PartitionCount:     16,
-		ReplicationFactor:  3,
-		VirtualNodes:       100,
-		HeartbeatInterval:  time.Second,
-		ElectionTimeout:    5 * time.Second,
-		SyncTimeout:        10 * time.Second,
+		NodeID:              "test-node",
+		NodeAddr:            "localhost",
+		ClusterPort:         0, // Use random port
+		DataPort:            0,
+		PartitionCount:      16,
+		ReplicationFactor:   3,
+		VirtualNodes:        100,
+		HeartbeatInterval:   time.Second,
+		ElectionTimeout:     5 * time.Second,
+		SyncTimeout:         10 * time.Second,
 		EnableAutoRebalance: true,
 	}
 
@@ -394,6 +394,16 @@ func (m *mockStore) Get(key string) ([]byte, error) {
 		return v, nil
 	}
 	return nil, nil
+}
+
+func (m *mockStore) Scan(prefix string) (map[string][]byte, error) {
+	results := make(map[string][]byte)
+	for k, v := range m.data {
+		if prefix == "" || (len(k) >= len(prefix) && k[:len(prefix)] == prefix) {
+			results[k] = v
+		}
+	}
+	return results, nil
 }
 
 // TestSetWALAndStore tests setting WAL and store on the cluster manager
@@ -600,8 +610,8 @@ func TestWaitForReplicationTimeout(t *testing.T) {
 	}
 }
 
-// TestStartReplicationMasterWithoutWAL tests error when WAL not set
-func TestStartReplicationMasterWithoutWAL(t *testing.T) {
+// TestStartReplicationLeaderWithoutWAL tests error when WAL not set
+func TestStartReplicationLeaderWithoutWAL(t *testing.T) {
 	config := ClusterConfig{
 		NodeID:         "test-node",
 		NodeAddr:       "localhost",
@@ -611,12 +621,10 @@ func TestStartReplicationMasterWithoutWAL(t *testing.T) {
 
 	ucm := NewUnifiedClusterManager(config)
 
-	// TODO: Update this test - StartReplicationMaster method signature changed
-	_ = ucm
-	// err := ucm.StartReplicationMaster(":0")
-	// if err == nil {
-	// 	t.Error("StartReplicationMaster should error without WAL")
-	// }
+	err := ucm.StartReplicationLeader(":0")
+	if err == nil {
+		t.Error("StartReplicationLeader should error without WAL")
+	}
 }
 
 // TestStartReplicationFollowerWithoutWAL tests error when WAL not set

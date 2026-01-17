@@ -283,13 +283,13 @@ type LeastLoadedStrategy struct {
 }
 
 type NodeLoadMetrics struct {
-	NodeID       string
-	CPUUsage     float64
-	MemoryUsage  float64
-	Connections  int
-	QPS          int
-	LastUpdated  time.Time
-	LoadScore    float64 // Composite score: lower is better
+	NodeID      string
+	CPUUsage    float64
+	MemoryUsage float64
+	Connections int
+	QPS         int
+	LastUpdated time.Time
+	LoadScore   float64 // Composite score: lower is better
 }
 
 func NewLeastLoadedStrategy(ucm *UnifiedClusterManager) *LeastLoadedStrategy {
@@ -421,16 +421,16 @@ func (s *LeastLoadedStrategy) UpdateMetrics(metrics *ClusterMetrics) {
 
 // LocalityAwareStrategy prefers nodes in the same datacenter/rack
 type LocalityAwareStrategy struct {
-	ucm            *UnifiedClusterManager
+	ucm             *UnifiedClusterManager
 	localDatacenter string
 	localRack       string
 	localZone       string
-	mu             sync.RWMutex
+	mu              sync.RWMutex
 }
 
 func NewLocalityAwareStrategy(ucm *UnifiedClusterManager, datacenter, rack, zone string) *LocalityAwareStrategy {
 	return &LocalityAwareStrategy{
-		ucm:            ucm,
+		ucm:             ucm,
 		localDatacenter: datacenter,
 		localRack:       rack,
 		localZone:       zone,
@@ -526,19 +526,24 @@ func (s *LocalityAwareStrategy) UpdateMetrics(metrics *ClusterMetrics) {
 }
 
 func (s *LocalityAwareStrategy) isSameZone(node *ClusterNode) bool {
-	// Would check node.Zone == s.localZone
-	// For now, simplified
-	return false
+	if s.localZone == "" || node.Metadata == nil {
+		return false
+	}
+	return node.Metadata["zone"] == s.localZone
 }
 
 func (s *LocalityAwareStrategy) isSameRack(node *ClusterNode) bool {
-	// Would check node.Rack == s.localRack
-	return false
+	if s.localRack == "" || node.Metadata == nil {
+		return false
+	}
+	return node.Metadata["rack"] == s.localRack
 }
 
 func (s *LocalityAwareStrategy) isSameDatacenter(node *ClusterNode) bool {
-	// Would check node.Datacenter == s.localDatacenter
-	return false
+	if s.localDatacenter == "" || node.Metadata == nil {
+		return false
+	}
+	return node.Metadata["datacenter"] == s.localDatacenter
 }
 
 // ============================================================================
@@ -634,9 +639,9 @@ type RoutingManager struct {
 	mu       sync.RWMutex
 
 	// Metrics collection
-	requestCount  uint64
-	errorCount    uint64
-	lastUpdate    time.Time
+	requestCount uint64
+	errorCount   uint64
+	lastUpdate   time.Time
 }
 
 func NewRoutingManager(ucm *UnifiedClusterManager, strategyType RoutingStrategyType) *RoutingManager {
@@ -693,4 +698,3 @@ func (rm *RoutingManager) GetStats() map[string]interface{} {
 		"last_update":   rm.lastUpdate,
 	}
 }
-

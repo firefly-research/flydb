@@ -57,22 +57,25 @@ Architecture:
 Key Concepts:
 =============
 
-1. Partitions: Data is divided into partitions using consistent hashing.
-   Each partition has a primary owner and configurable replicas.
+ 1. Partitions: Data is divided into partitions using consistent hashing.
+    Each partition has a primary owner and configurable replicas.
 
-2. Partition Groups: Related partitions are grouped for efficient management.
-   Each group has a leader responsible for coordinating writes.
+ 2. Partition Groups: Related partitions are grouped for efficient management.
+    Each group has a leader responsible for coordinating writes.
 
-3. Replication Factor: Configurable number of copies for each partition.
-   Default is 3 for production deployments.
+ 3. Replication Factor: Configurable number of copies for each partition.
+    Default is 3 for production deployments.
 
 4. Consistency Levels:
-   - EVENTUAL: Writes return immediately, replicated asynchronously
-   - QUORUM: Writes wait for majority acknowledgment
-   - ALL: Writes wait for all replicas to acknowledge
 
-5. Failover: Automatic leader election within partition groups.
-   Data remains available as long as quorum is maintained.
+  - EVENTUAL: Writes return immediately, replicated asynchronously
+
+  - QUORUM: Writes wait for majority acknowledgment
+
+  - ALL: Writes wait for all replicas to acknowledge
+
+    5. Failover: Automatic leader election within partition groups.
+    Data remains available as long as quorum is maintained.
 */
 package cluster
 
@@ -351,7 +354,6 @@ func (s NodeState) String() string {
 	}
 }
 
-
 // HashRing implements consistent hashing for partition distribution
 type HashRing struct {
 	mu           sync.RWMutex
@@ -506,21 +508,20 @@ func (h *HashRing) GetAllNodes() []*ClusterNode {
 	return nodes
 }
 
-
 // ClusterEventType represents the type of cluster event
 type ClusterEventType string
 
 const (
-	EventNodeJoined        ClusterEventType = "NODE_JOINED"
-	EventNodeLeft          ClusterEventType = "NODE_LEFT"
-	EventNodeFailed        ClusterEventType = "NODE_FAILED"
-	EventLeaderElected     ClusterEventType = "LEADER_ELECTED"
-	EventPartitionMoved    ClusterEventType = "PARTITION_MOVED"
+	EventNodeJoined         ClusterEventType = "NODE_JOINED"
+	EventNodeLeft           ClusterEventType = "NODE_LEFT"
+	EventNodeFailed         ClusterEventType = "NODE_FAILED"
+	EventLeaderElected      ClusterEventType = "LEADER_ELECTED"
+	EventPartitionMoved     ClusterEventType = "PARTITION_MOVED"
 	EventPartitionMigrating ClusterEventType = "PARTITION_MIGRATING"
-	EventRebalanceStarted  ClusterEventType = "REBALANCE_STARTED"
-	EventRebalanceComplete ClusterEventType = "REBALANCE_COMPLETE"
-	EventQuorumLost        ClusterEventType = "QUORUM_LOST"
-	EventQuorumRestored    ClusterEventType = "QUORUM_RESTORED"
+	EventRebalanceStarted   ClusterEventType = "REBALANCE_STARTED"
+	EventRebalanceComplete  ClusterEventType = "REBALANCE_COMPLETE"
+	EventQuorumLost         ClusterEventType = "QUORUM_LOST"
+	EventQuorumRestored     ClusterEventType = "QUORUM_RESTORED"
 )
 
 // ClusterEvent represents a cluster state change event
@@ -589,6 +590,8 @@ type StorageEngine interface {
 	Delete(key string) error
 	// Get retrieves a value
 	Get(key string) ([]byte, error)
+	// Scan retrieves all keys with a given prefix
+	Scan(prefix string) (map[string][]byte, error)
 }
 
 // ReplicatedStorageEngine extends StorageEngine with methods for cluster replication.
@@ -637,8 +640,8 @@ type UnifiedClusterManager struct {
 	term uint64
 
 	// Raft consensus engine (replaces Bully algorithm)
-	raftNode    *RaftNode
-	useRaft     bool // Enable Raft-based consensus
+	raftNode *RaftNode
+	useRaft  bool // Enable Raft-based consensus
 
 	// Hash ring for consistent hashing
 	ring *HashRing
@@ -656,15 +659,19 @@ type UnifiedClusterManager struct {
 	replicationStateMu sync.RWMutex
 
 	// WAL-based replication
-	wal              WALInterface
-	store            StorageEngine
-	followers        map[string]*FollowerReplicationState
-	followersMu      sync.RWMutex
-	replListener     net.Listener
-	replPollInterval time.Duration
-	replActive       bool           // true when this node is leader and accepting follower connections
-	followerStopCh   chan struct{}  // channel to stop follower replication loop on leader change
-	followerStopMu   sync.Mutex     // protects followerStopCh
+	wal                WALInterface
+	store              StorageEngine
+	followers          map[string]*FollowerReplicationState
+	followersMu        sync.RWMutex
+	partitionKeys      map[int]map[string]struct{} // Per-partition key index
+	partitionKeysMu    sync.RWMutex
+	migrationSignals   map[int]chan struct{}
+	migrationSignalsMu sync.Mutex
+	replListener       net.Listener
+	replPollInterval   time.Duration
+	replActive         bool          // true when this node is leader and accepting follower connections
+	followerStopCh     chan struct{} // channel to stop follower replication loop on leader change
+	followerStopMu     sync.Mutex    // protects followerStopCh
 
 	// Metrics
 	metrics *ClusterMetrics
@@ -726,6 +733,8 @@ func NewUnifiedClusterManager(config ClusterConfig) *UnifiedClusterManager {
 		nodes:            make(map[string]*ClusterNode),
 		replicationState: make(map[int]*PartitionReplicationState),
 		followers:        make(map[string]*FollowerReplicationState),
+		partitionKeys:    make(map[int]map[string]struct{}),
+		migrationSignals: make(map[int]chan struct{}),
 		replPollInterval: 100 * time.Millisecond,
 		metrics:          &ClusterMetrics{TotalPartitions: config.PartitionCount},
 		eventCh:          make(chan ClusterEvent, 1000),
@@ -767,6 +776,34 @@ func (ucm *UnifiedClusterManager) SetWAL(wal WALInterface) {
 // SetStore sets the storage engine for applying replicated operations
 func (ucm *UnifiedClusterManager) SetStore(store StorageEngine) {
 	ucm.store = store
+	if store != nil {
+		// Populate partition key index from existing data
+		results, err := store.Scan("")
+		if err == nil {
+			for key := range results {
+				ucm.addKeyToPartitionIndex(key)
+			}
+		}
+	}
+}
+
+func (ucm *UnifiedClusterManager) addKeyToPartitionIndex(key string) {
+	partitionID := ucm.GetPartitionForKey(key)
+	ucm.partitionKeysMu.Lock()
+	defer ucm.partitionKeysMu.Unlock()
+	if ucm.partitionKeys[partitionID] == nil {
+		ucm.partitionKeys[partitionID] = make(map[string]struct{})
+	}
+	ucm.partitionKeys[partitionID][key] = struct{}{}
+}
+
+func (ucm *UnifiedClusterManager) removeKeyFromPartitionIndex(key string) {
+	partitionID := ucm.GetPartitionForKey(key)
+	ucm.partitionKeysMu.Lock()
+	defer ucm.partitionKeysMu.Unlock()
+	if ucm.partitionKeys[partitionID] != nil {
+		delete(ucm.partitionKeys[partitionID], key)
+	}
 }
 
 // SetRaftNode sets the Raft consensus node for leader election
@@ -1007,6 +1044,12 @@ func (ucm *UnifiedClusterManager) GetAliveNodes() []*ClusterNode {
 			nodes = append(nodes, n)
 		}
 	}
+
+	// Sort nodes by ID for deterministic behavior (e.g., for round-robin)
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].ID < nodes[j].ID
+	})
+
 	return nodes
 }
 
@@ -1191,6 +1234,52 @@ func (ucm *UnifiedClusterManager) handleForwardedRequest(conn net.Conn, reader *
 		} else {
 			resp.Success = true
 		}
+
+	case "SCAN":
+		results, err := ucm.scanLocal(msg.Key)
+		if err != nil {
+			resp.Success = false
+			resp.Error = err.Error()
+		} else {
+			resp.Success = true
+			// Unify SCAN response with scanResponse if needed,
+			// but for now we can just encode the whole thing
+			scanResp := scanResponse{
+				Success: true,
+				Results: results,
+			}
+			json.NewEncoder(conn).Encode(scanResp)
+			return
+		}
+
+	case "MIGRATION_START":
+		// Handle migration start
+		fmt.Printf("Node %s starting migration for partition %d\n", ucm.nodeID, msg.PartitionID)
+		ucm.migrationSignalsMu.Lock()
+		ucm.migrationSignals[msg.PartitionID] = make(chan struct{})
+		ucm.migrationSignalsMu.Unlock()
+		resp.Success = true
+
+	case "MIGRATION_DATA":
+		// Handle migration data
+		if err := ucm.store.Put(msg.Key, msg.Value); err != nil {
+			resp.Success = false
+			resp.Error = err.Error()
+		} else {
+			ucm.addKeyToPartitionIndex(msg.Key)
+			resp.Success = true
+		}
+
+	case "MIGRATION_COMPLETE":
+		// Handle migration complete
+		fmt.Printf("Node %s completed migration for partition %d\n", ucm.nodeID, msg.PartitionID)
+		ucm.migrationSignalsMu.Lock()
+		if ch, ok := ucm.migrationSignals[msg.PartitionID]; ok {
+			close(ch)
+			delete(ucm.migrationSignals, msg.PartitionID)
+		}
+		ucm.migrationSignalsMu.Unlock()
+		resp.Success = true
 
 	default:
 		resp.Success = false
@@ -1782,7 +1871,7 @@ func (ucm *UnifiedClusterManager) applyClusterState(state clusterState) {
 		ucm.roleMu.Lock()
 		ucm.role = RoleFollower
 		ucm.roleMu.Unlock()
-		
+
 		// Start a goroutine to wait for leader discovery or timeout
 		go ucm.waitForLeaderOrElect()
 	}
@@ -2131,16 +2220,16 @@ func (ucm *UnifiedClusterManager) GetClusterHealth() string {
 
 // ClusterStatus provides a snapshot of the cluster state for external consumers
 type ClusterStatus struct {
-	NodeID           string            `json:"node_id"`
-	Role             string            `json:"role"`
-	Term             uint64            `json:"term"`
-	Health           string            `json:"health"`
-	TotalNodes       int               `json:"total_nodes"`
-	HealthyNodes     int               `json:"healthy_nodes"`
-	TotalPartitions  int               `json:"total_partitions"`
-	HealthyPartitions int              `json:"healthy_partitions"`
-	LeaderPartitions int               `json:"leader_partitions"`
-	Nodes            []NodeStatus      `json:"nodes"`
+	NodeID            string       `json:"node_id"`
+	Role              string       `json:"role"`
+	Term              uint64       `json:"term"`
+	Health            string       `json:"health"`
+	TotalNodes        int          `json:"total_nodes"`
+	HealthyNodes      int          `json:"healthy_nodes"`
+	TotalPartitions   int          `json:"total_partitions"`
+	HealthyPartitions int          `json:"healthy_partitions"`
+	LeaderPartitions  int          `json:"leader_partitions"`
+	Nodes             []NodeStatus `json:"nodes"`
 }
 
 // NodeStatus provides status information for a single node
@@ -2556,10 +2645,12 @@ func (ucm *UnifiedClusterManager) connectAndSyncWithLeader(leaderAddr string, st
 				if err := replStore.ApplyReplicatedPut(key, valBuf); err != nil {
 					fmt.Printf("Failed to apply replicated PUT %s: %v\n", key, err)
 				}
+				ucm.addKeyToPartitionIndex(key)
 			case WALOpDelete:
 				if err := replStore.ApplyReplicatedDelete(key); err != nil {
 					fmt.Printf("Failed to apply replicated DELETE %s: %v\n", key, err)
 				}
+				ucm.removeKeyFromPartitionIndex(key)
 			}
 		} else {
 			// Fallback: use regular Put/Delete (will write to WAL twice)
@@ -2568,10 +2659,12 @@ func (ucm *UnifiedClusterManager) connectAndSyncWithLeader(leaderAddr string, st
 				if err := ucm.store.Put(key, valBuf); err != nil {
 					fmt.Printf("Failed to apply PUT %s: %v\n", key, err)
 				}
+				ucm.addKeyToPartitionIndex(key)
 			case WALOpDelete:
 				if err := ucm.store.Delete(key); err != nil {
 					fmt.Printf("Failed to apply DELETE %s: %v\n", key, err)
 				}
+				ucm.removeKeyFromPartitionIndex(key)
 			}
 		}
 	}
@@ -2670,11 +2763,11 @@ type RouteRequest struct {
 
 // RouteResponse contains routing information for a request
 type RouteResponse struct {
-	PartitionID   int
-	PrimaryNode   *ClusterNode
-	ReplicaNodes  []*ClusterNode
-	IsLocal       bool // true if this node is the primary
-	RedirectAddr  string // address to redirect to if not local
+	PartitionID  int
+	PrimaryNode  *ClusterNode
+	ReplicaNodes []*ClusterNode
+	IsLocal      bool   // true if this node is the primary
+	RedirectAddr string // address to redirect to if not local
 }
 
 // RouteKey determines which node should handle a key operation
@@ -2762,6 +2855,9 @@ func (ucm *UnifiedClusterManager) Put(key string, value []byte) error {
 			return err
 		}
 
+		// Update partition key index
+		ucm.addKeyToPartitionIndex(key)
+
 		// Replicate to partition replicas with configured consistency
 		return ucm.ReplicateData(route.PartitionID, key, value, ucm.config.DefaultConsistency)
 	}
@@ -2782,6 +2878,9 @@ func (ucm *UnifiedClusterManager) Delete(key string) error {
 		if err := ucm.store.Delete(key); err != nil {
 			return err
 		}
+
+		// Update partition key index
+		ucm.removeKeyFromPartitionIndex(key)
 
 		// Replicate deletion to partition replicas
 		return ucm.ReplicateData(route.PartitionID, key, nil, ucm.config.DefaultConsistency)
@@ -2893,9 +2992,10 @@ func (ucm *UnifiedClusterManager) forwardDelete(addr string, key string) error {
 
 // forwardMessage represents a forwarded operation
 type forwardMessage struct {
-	Type  string `json:"type"`
-	Key   string `json:"key"`
-	Value []byte `json:"value,omitempty"`
+	Type        string `json:"type"` // GET, PUT, DELETE, SCAN, MIGRATION_START, MIGRATION_DATA, MIGRATION_COMPLETE
+	PartitionID int    `json:"partition_id,omitempty"`
+	Key         string `json:"key,omitempty"`
+	Value       []byte `json:"value,omitempty"`
 }
 
 // forwardResponse represents a response to a forwarded operation
@@ -2984,7 +3084,7 @@ func (ucm *UnifiedClusterManager) sendPartitionData(partitionID int, toNode stri
 	conn.SetDeadline(time.Now().Add(5 * time.Minute)) // Long timeout for migration
 
 	// Send migration start message
-	startMsg := migrationMessage{
+	startMsg := forwardMessage{
 		Type:        "MIGRATION_START",
 		PartitionID: partitionID,
 	}
@@ -3011,7 +3111,7 @@ func (ucm *UnifiedClusterManager) sendPartitionData(partitionID int, toNode stri
 			continue // Skip keys that can't be read
 		}
 
-		dataMsg := migrationMessage{
+		dataMsg := forwardMessage{
 			Type:  "MIGRATION_DATA",
 			Key:   key,
 			Value: value,
@@ -3023,7 +3123,7 @@ func (ucm *UnifiedClusterManager) sendPartitionData(partitionID int, toNode stri
 	}
 
 	// Send migration complete message
-	completeMsg := migrationMessage{
+	completeMsg := forwardMessage{
 		Type:        "MIGRATION_COMPLETE",
 		PartitionID: partitionID,
 	}
@@ -3037,35 +3137,41 @@ func (ucm *UnifiedClusterManager) sendPartitionData(partitionID int, toNode stri
 
 // receivePartitionData receives partition data from another node
 func (ucm *UnifiedClusterManager) receivePartitionData(partitionID int, fromNode string) error {
-	// This would be called by the data listener when receiving migration data
-	// For now, this is a placeholder - the actual implementation would be in
-	// handleDataConnection when it detects a MIGRATION_START message
-	return nil
+	ucm.migrationSignalsMu.Lock()
+	ch, ok := ucm.migrationSignals[partitionID]
+	if !ok {
+		// If it's not there, it might not have started yet.
+		// In a production system, we'd wait with a timeout for it to start.
+		ch = make(chan struct{})
+		ucm.migrationSignals[partitionID] = ch
+	}
+	ucm.migrationSignalsMu.Unlock()
+
+	// Wait for migration to complete
+	select {
+	case <-ch:
+		return nil
+	case <-time.After(10 * time.Minute):
+		return fmt.Errorf("migration timed out for partition %d", partitionID)
+	}
 }
 
 // getAllKeysForPartition returns all keys belonging to a partition
 func (ucm *UnifiedClusterManager) getAllKeysForPartition(partitionID int) ([]string, error) {
-	// This is a simplified implementation
-	// In production, you'd want to use a more efficient method like:
-	// 1. Maintain a per-partition key index
-	// 2. Use range scans if your storage supports it
-	// 3. Use snapshots for consistency
+	ucm.partitionKeysMu.RLock()
+	defer ucm.partitionKeysMu.RUnlock()
 
-	allKeys := make([]string, 0)
+	keysMap, ok := ucm.partitionKeys[partitionID]
+	if !ok {
+		return []string{}, nil
+	}
 
-	// Scan all keys in the store
-	// Note: This assumes the store has a Scan method
-	// You may need to adapt this based on your actual storage interface
+	keys := make([]string, 0, len(keysMap))
+	for k := range keysMap {
+		keys = append(keys, k)
+	}
 
-	return allKeys, nil
-}
-
-// migrationMessage represents a partition migration message
-type migrationMessage struct {
-	Type        string `json:"type"` // MIGRATION_START, MIGRATION_DATA, MIGRATION_COMPLETE
-	PartitionID int    `json:"partition_id,omitempty"`
-	Key         string `json:"key,omitempty"`
-	Value       []byte `json:"value,omitempty"`
+	return keys, nil
 }
 
 // ============================================================================
@@ -3144,9 +3250,10 @@ func (ucm *UnifiedClusterManager) ScatterGatherScan(prefix string) (map[string][
 
 // scanLocal performs a local scan with a prefix
 func (ucm *UnifiedClusterManager) scanLocal(prefix string) (map[string][]byte, error) {
-	// This is a placeholder - implement based on your storage engine's scan capabilities
-	results := make(map[string][]byte)
-	return results, nil
+	if ucm.store == nil {
+		return nil, fmt.Errorf("store not configured")
+	}
+	return ucm.store.Scan(prefix)
 }
 
 // scanRemote performs a remote scan on another node

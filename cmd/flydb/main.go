@@ -22,51 +22,51 @@ FlyDB Server Architecture Overview:
 
 The FlyDB server is designed with a layered architecture that separates concerns:
 
-  1. Storage Layer (internal/storage):
-     - UnifiedStorageEngine: Disk-based storage with intelligent buffer pool caching
-     - BufferPool: LRU-K page caching with auto-sizing based on available memory
-     - HeapFile: 8KB slotted pages for efficient variable-length record storage
-     - WAL: Write-Ahead Log for durability and crash recovery
+ 1. Storage Layer (internal/storage):
+    - UnifiedStorageEngine: Disk-based storage with intelligent buffer pool caching
+    - BufferPool: LRU-K page caching with auto-sizing based on available memory
+    - HeapFile: 8KB slotted pages for efficient variable-length record storage
+    - WAL: Write-Ahead Log for durability and crash recovery
 
-  2. SQL Layer (internal/sql):
-     - Lexer: Tokenizes SQL input into tokens
-     - Parser: Builds Abstract Syntax Tree (AST) from tokens
-     - Executor: Executes AST nodes against the storage engine
-     - Catalog: Manages table schemas
+ 2. SQL Layer (internal/sql):
+    - Lexer: Tokenizes SQL input into tokens
+    - Parser: Builds Abstract Syntax Tree (AST) from tokens
+    - Executor: Executes AST nodes against the storage engine
+    - Catalog: Manages table schemas
 
-  3. Server Layer (internal/server):
-     - TCP Server: Handles client connections and command dispatch
-     - Replicator: Implements Cluster replication
+ 3. Server Layer (internal/server):
+    - TCP Server: Handles client connections and command dispatch
+    - Replicator: Implements Cluster replication
 
-  4. Auth Layer (internal/auth):
-     - AuthManager: Handles user authentication and authorization
-     - Row-Level Security (RLS): Fine-grained access control
+ 4. Auth Layer (internal/auth):
+    - AuthManager: Handles user authentication and authorization
+    - Row-Level Security (RLS): Fine-grained access control
 
 Startup Flow:
 =============
 
-  1. Parse command-line flags and load configuration
-  2. Initialize the storage engine (auto-sizes buffer pool, replays WAL)
-  3. Create the Replicator based on the server role (cluster/standalone)
-  4. Start replication in a background goroutine
-  5. Create and start the TCP server to accept client connections
+ 1. Parse command-line flags and load configuration
+ 2. Initialize the storage engine (auto-sizes buffer pool, replays WAL)
+ 3. Create the Replicator based on the server role (cluster/standalone)
+ 4. Start replication in a background goroutine
+ 5. Create and start the TCP server to accept client connections
 
 Command-Line Flags:
 ===================
 
-  -port      : TCP port for client connections (default: 8889)
-  -repl-port : TCP port for replication (cluster only, default: 9999)
-  -role      : Server role - "standalone" or "cluster" (default: standalone)
-  -data-dir  : Directory for database storage (default: ./data)
+	-port      : TCP port for client connections (default: 8889)
+	-repl-port : TCP port for replication (cluster only, default: 9999)
+	-role      : Server role - "standalone" or "cluster" (default: standalone)
+	-data-dir  : Directory for database storage (default: ./data)
 
 Usage Examples:
 ===============
 
-  Start a standalone server:
-    ./flydb -data-dir ./data
+	Start a standalone server:
+	  ./flydb -data-dir ./data
 
-  Start a cluster node:
-    ./flydb -port 8889 -repl-port 9999 -role cluster -data-dir ./data
+	Start a cluster node:
+	  ./flydb -port 8889 -repl-port 9999 -role cluster -data-dir ./data
 */
 package main
 
@@ -583,6 +583,10 @@ func main() {
 	// This architecture provides read scalability and fault tolerance.
 	replLog := logging.NewLogger("replication")
 
+	// Initialize cluster manager and discovery service if needed
+	var clusterMgr *cluster.UnifiedClusterManager
+	var discoveryService *cluster.DiscoveryService
+
 	switch cfg.Role {
 	case "standalone":
 		// Standalone Mode: No replication, single server for development.
@@ -624,7 +628,7 @@ func main() {
 			clusterConfig.DefaultConsistency = cluster.ConsistencyOne
 		}
 
-		clusterMgr := cluster.NewUnifiedClusterManager(clusterConfig)
+		clusterMgr = cluster.NewUnifiedClusterManager(clusterConfig)
 
 		// Wire up WAL and storage for integrated replication
 		clusterMgr.SetWAL(unified.WAL())
@@ -643,16 +647,16 @@ func main() {
 		// Set up callback for follower transitions - start integrated replication follower
 		clusterMgr.SetFollowerCallback(func(leaderID string) {
 			replLog.Info("This node is now a FOLLOWER", "leader", leaderID)
-			
+
 			// Get leader node to find its data port
 			leaderNode := clusterMgr.GetNode(leaderID)
 			if leaderNode == nil {
 				replLog.Error("Failed to find leader node details", "leader_id", leaderID)
 				return
 			}
-			
+
 			leaderAddr := fmt.Sprintf("%s:%d", leaderNode.Addr, leaderNode.DataPort)
-			
+
 			go func() {
 				if err := clusterMgr.StartReplicationFollower(leaderAddr); err != nil {
 					replLog.Error("Replication follower error", "error", err)
@@ -685,7 +689,6 @@ func main() {
 		})
 
 		// Start service discovery if enabled
-		var discoveryService *cluster.DiscoveryService
 		if cfg.DiscoveryEnabled {
 			discoveryConfig := cluster.DiscoveryConfig{
 				NodeID:      clusterConfig.NodeID,
@@ -693,7 +696,7 @@ func main() {
 				ClusterAddr: fmt.Sprintf("%s:%d", getHostname(), cfg.ClusterPort),
 				RaftAddr:    fmt.Sprintf("%s:%d", getHostname(), cfg.ReplPort),
 				HTTPAddr:    fmt.Sprintf("%s:%d", getHostname(), cfg.Port),
-				Version:     "1.0.0", // TODO: Get from build info
+				Version:     banner.Version,
 				Enabled:     true,
 			}
 			discoveryService = cluster.NewDiscoveryService(discoveryConfig)
@@ -834,10 +837,11 @@ func main() {
 		}))
 
 		// Register cluster health check if in cluster mode
-		if cfg.Role == "cluster" {
+		if cfg.Role == "cluster" && clusterMgr != nil {
 			healthChecker.RegisterCheck("cluster", health.ClusterCheck(func() (bool, string) {
-				// TODO: Add actual cluster health check when cluster manager is available
-				return true, "cluster healthy"
+				status := clusterMgr.GetStatus()
+				healthy := status.Health == "HEALTHY"
+				return healthy, fmt.Sprintf("cluster status: %s", status.Health)
 			}))
 		}
 

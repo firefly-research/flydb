@@ -253,24 +253,49 @@ func TestLeastLoadedRouting_SkipsUnhealthy(t *testing.T) {
 func TestLocalityAwareRouting_PrefersLocalNode(t *testing.T) {
 	ucm := createTestClusterManager(t, 3)
 
-	// Set different datacenters
-	ucm.nodes["A"].Metadata["datacenter"] = "dc1"
-	ucm.nodes["B"].Metadata["datacenter"] = "dc2"
-	ucm.nodes["C"].Metadata["datacenter"] = "dc1"
+	// A: dc2/rack1/zone-x (remote)
+	// B: dc1/rack1/zone-b (same dc, same rack, diff zone)
+	// C: dc1/rack1/zone-a (same dc, same rack, same zone) - LOCAL
 
+	// Set local context to match C's location
 	strategy := NewLocalityAwareStrategy(ucm, "dc1", "rack1", "zone-a")
 
-	// Test that it can route requests (locality checking is not fully implemented yet)
-	node, err := strategy.SelectNode("key", OpRead)
+	// Set different metadata for nodes
+	ucm.nodes["A"].Metadata = map[string]string{"datacenter": "dc2", "rack": "rack1", "zone": "zone-x"}
+	ucm.nodes["B"].Metadata = map[string]string{"datacenter": "dc1", "rack": "rack1", "zone": "zone-b"}
+	ucm.nodes["C"].Metadata = map[string]string{"datacenter": "dc1", "rack": "rack1", "zone": "zone-a"}
+
+	// Set all partitions to have A as leader and B, C as replicas
+	for _, p := range ucm.partitions {
+		p.Leader = "A"
+		p.Replicas = []string{"B", "C"}
+	}
+
+	// For reads, it should prefer the local node C (same zone)
+	node, err := strategy.SelectNode("any-key", OpRead)
 	if err != nil {
 		t.Fatalf("SelectNode failed: %v", err)
 	}
 
-	if node == nil {
-		t.Error("SelectNode returned nil node")
+	if node == nil || node.ID != "C" {
+		t.Errorf("Expected node C (local zone), got %v", node)
 	}
 
-	// TODO: Once locality checking is fully implemented, test that it prefers local nodes
+	// Change strategy to zone-b, it should prefer B
+	strategyB := NewLocalityAwareStrategy(ucm, "dc1", "rack1", "zone-b")
+	nodeB, _ := strategyB.SelectNode("any-key", OpRead)
+	if nodeB == nil || nodeB.ID != "B" {
+		t.Errorf("Expected node B (local zone-b), got %v", nodeB)
+	}
+
+	// Change strategy to something that only matches DC, but not rack or zone
+	strategyDC1 := NewLocalityAwareStrategy(ucm, "dc1", "rack2", "zone-c")
+	nodeDC1, _ := strategyDC1.SelectNode("any-key", OpRead)
+	// Both B and C are in dc1. It should pick the first one it finds that matches the highest priority.
+	// In our case, same DC is priority 3.
+	if nodeDC1 == nil || (nodeDC1.ID != "B" && nodeDC1.ID != "C") {
+		t.Errorf("Expected node from dc1 (B or C), got %v", nodeDC1)
+	}
 }
 
 // ============================================================================
@@ -359,4 +384,3 @@ func BenchmarkHybridRouting(b *testing.B) {
 		strategy.SelectNode("user:12345", OpRead)
 	}
 }
-

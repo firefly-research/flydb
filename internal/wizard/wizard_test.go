@@ -170,12 +170,12 @@ func TestSaveConfigToFile(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	wizardCfg := &Config{
-		Port:       "7777",
-		ReplPort:   "7779",
-		Role:       "cluster",
-		DBPath:     "/tmp/test.fdb",
-		LogLevel:   "debug",
-		LogJSON:    true,
+		Port:     "7777",
+		ReplPort: "7779",
+		Role:     "cluster",
+		DBPath:   "/tmp/test.fdb",
+		LogLevel: "debug",
+		LogJSON:  true,
 	}
 
 	configPath := filepath.Join(tmpDir, "test.conf")
@@ -215,14 +215,15 @@ func TestLoadExistingConfig(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	configContent := `role = "cluster"
-port = 9000
-replication_port = 9002
-db_path = "/tmp/test.fdb"
-log_level = "debug"
-`
+	configContent := `{
+  "role": "cluster",
+  "port": 9000,
+  "replication_port": 9002,
+  "db_path": "/tmp/test.fdb",
+  "log_level": "debug"
+}`
 
-	configPath := filepath.Join(tmpDir, "flydb.conf")
+	configPath := filepath.Join(tmpDir, "flydb.json")
 	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
 		t.Fatalf("Failed to write config file: %v", err)
 	}

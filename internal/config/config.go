@@ -47,6 +47,7 @@ Encryption is ENABLED by default for security. When encryption is enabled, you M
 provide a passphrase. There are two ways to set the passphrase:
  1. Environment variable: Set FLYDB_ENCRYPTION_PASSPHRASE before starting FlyDB
  2. Interactive wizard: Run FlyDB without arguments and enter passphrase when prompted
+
 To disable encryption, set "encryption_enabled": false in your config file.
 
 Migration Note for Existing Users:
@@ -81,8 +82,8 @@ import (
 
 // Environment variable names for configuration.
 const (
-	EnvPort     = "FLYDB_PORT"
-	EnvReplPort = "FLYDB_REPL_PORT"
+	EnvPort                 = "FLYDB_PORT"
+	EnvReplPort             = "FLYDB_REPL_PORT"
 	EnvClusterPort          = "FLYDB_CLUSTER_PORT"
 	EnvRole                 = "FLYDB_ROLE"
 	EnvClusterPeers         = "FLYDB_CLUSTER_PEERS"
@@ -208,29 +209,29 @@ type Config struct {
 	MaxReplicationLag int    `toml:"max_replication_lag_ms" json:"max_replication_lag_ms"` // Max acceptable replication lag in ms
 
 	// Raft consensus configuration
-	EnableRaft           bool `toml:"enable_raft" json:"enable_raft"`                         // Enable Raft-based consensus (replaces Bully)
-	RaftElectionTimeout  int  `toml:"raft_election_timeout_ms" json:"raft_election_timeout_ms"` // Raft election timeout in ms
-	RaftHeartbeatInterval int `toml:"raft_heartbeat_interval_ms" json:"raft_heartbeat_interval_ms"` // Raft heartbeat interval in ms
+	EnableRaft            bool `toml:"enable_raft" json:"enable_raft"`                               // Enable Raft-based consensus (replaces Bully)
+	RaftElectionTimeout   int  `toml:"raft_election_timeout_ms" json:"raft_election_timeout_ms"`     // Raft election timeout in ms
+	RaftHeartbeatInterval int  `toml:"raft_heartbeat_interval_ms" json:"raft_heartbeat_interval_ms"` // Raft heartbeat interval in ms
 
 	// Service Discovery configuration
 	DiscoveryEnabled   bool   `toml:"discovery_enabled" json:"discovery_enabled"`       // Enable mDNS-based service discovery
 	DiscoveryClusterID string `toml:"discovery_cluster_id" json:"discovery_cluster_id"` // Cluster ID for discovery filtering
 
 	// Compression configuration
-	EnableCompression      bool   `toml:"enable_compression" json:"enable_compression"`           // Enable compression for WAL and replication
-	CompressionAlgorithm   string `toml:"compression_algorithm" json:"compression_algorithm"`     // gzip, lz4, snappy, or zstd
-	CompressionMinSize     int    `toml:"compression_min_size" json:"compression_min_size"`       // Minimum size to compress (bytes)
+	EnableCompression    bool   `toml:"enable_compression" json:"enable_compression"`       // Enable compression for WAL and replication
+	CompressionAlgorithm string `toml:"compression_algorithm" json:"compression_algorithm"` // gzip, lz4, snappy, or zstd
+	CompressionMinSize   int    `toml:"compression_min_size" json:"compression_min_size"`   // Minimum size to compress (bytes)
 
 	// Performance configuration
-	EnableZeroCopy         bool `toml:"enable_zero_copy" json:"enable_zero_copy"`               // Enable zero-copy buffer pooling
-	BufferPoolSizeBytes    int  `toml:"buffer_pool_size_bytes" json:"buffer_pool_size_bytes"`   // Buffer pool size in bytes (0 = auto)
+	EnableZeroCopy      bool `toml:"enable_zero_copy" json:"enable_zero_copy"`             // Enable zero-copy buffer pooling
+	BufferPoolSizeBytes int  `toml:"buffer_pool_size_bytes" json:"buffer_pool_size_bytes"` // Buffer pool size in bytes (0 = auto)
 
 	// Storage configuration
 	DBPath         string `toml:"db_path" json:"db_path"`
-	DataDir        string `toml:"data_dir" json:"data_dir"`               // Directory for multi-database storage
-	StorageEngine  string `toml:"storage_engine" json:"storage_engine"`   // Deprecated: FlyDB now uses disk storage exclusively
+	DataDir        string `toml:"data_dir" json:"data_dir"`                 // Directory for multi-database storage
+	StorageEngine  string `toml:"storage_engine" json:"storage_engine"`     // Deprecated: FlyDB now uses disk storage exclusively
 	BufferPoolSize int    `toml:"buffer_pool_size" json:"buffer_pool_size"` // Buffer pool size in pages (0 = auto-size based on available memory)
-	CheckpointSecs int    `toml:"checkpoint_secs" json:"checkpoint_secs"` // Checkpoint interval in seconds (0 = disabled)
+	CheckpointSecs int    `toml:"checkpoint_secs" json:"checkpoint_secs"`   // Checkpoint interval in seconds (0 = disabled)
 
 	// Multi-database configuration
 	DefaultDatabase  string `toml:"default_database" json:"default_database"`   // Default database for new connections
@@ -253,16 +254,16 @@ type Config struct {
 	LogJSON  bool   `toml:"log_json" json:"log_json"`
 
 	// Audit trail configuration
-	AuditEnabled        bool `toml:"audit_enabled" json:"audit_enabled"`               // Enable audit logging
-	AuditLogDDL         bool `toml:"audit_log_ddl" json:"audit_log_ddl"`               // Log DDL operations
-	AuditLogDML         bool `toml:"audit_log_dml" json:"audit_log_dml"`               // Log DML operations
-	AuditLogSelect      bool `toml:"audit_log_select" json:"audit_log_select"`         // Log SELECT queries (can be verbose)
-	AuditLogAuth        bool `toml:"audit_log_auth" json:"audit_log_auth"`             // Log authentication events
-	AuditLogAdmin       bool `toml:"audit_log_admin" json:"audit_log_admin"`           // Log administrative operations
-	AuditLogCluster     bool `toml:"audit_log_cluster" json:"audit_log_cluster"`       // Log cluster events
-	AuditRetentionDays  int  `toml:"audit_retention_days" json:"audit_retention_days"` // Days to retain audit logs (0 = forever)
-	AuditBufferSize     int  `toml:"audit_buffer_size" json:"audit_buffer_size"`       // Event buffer size
-	AuditFlushInterval  int  `toml:"audit_flush_interval_sec" json:"audit_flush_interval_sec"` // Flush interval in seconds
+	AuditEnabled       bool `toml:"audit_enabled" json:"audit_enabled"`                       // Enable audit logging
+	AuditLogDDL        bool `toml:"audit_log_ddl" json:"audit_log_ddl"`                       // Log DDL operations
+	AuditLogDML        bool `toml:"audit_log_dml" json:"audit_log_dml"`                       // Log DML operations
+	AuditLogSelect     bool `toml:"audit_log_select" json:"audit_log_select"`                 // Log SELECT queries (can be verbose)
+	AuditLogAuth       bool `toml:"audit_log_auth" json:"audit_log_auth"`                     // Log authentication events
+	AuditLogAdmin      bool `toml:"audit_log_admin" json:"audit_log_admin"`                   // Log administrative operations
+	AuditLogCluster    bool `toml:"audit_log_cluster" json:"audit_log_cluster"`               // Log cluster events
+	AuditRetentionDays int  `toml:"audit_retention_days" json:"audit_retention_days"`         // Days to retain audit logs (0 = forever)
+	AuditBufferSize    int  `toml:"audit_buffer_size" json:"audit_buffer_size"`               // Event buffer size
+	AuditFlushInterval int  `toml:"audit_flush_interval_sec" json:"audit_flush_interval_sec"` // Flush interval in seconds
 
 	// Observability configuration
 	Observability ObservabilityConfig `toml:"observability" json:"observability"`
@@ -293,8 +294,8 @@ func DefaultConfig() *Config {
 		ElectionTimeout:   1000, // 1s
 		MinQuorum:         0,    // 0 = auto-calculate based on cluster size
 		EnablePreVote:     true,
-		PartitionCount:    256,  // Number of data partitions
-		ReplicationFactor: 3,    // Number of replicas per partition
+		PartitionCount:    256, // Number of data partitions
+		ReplicationFactor: 3,   // Number of replicas per partition
 
 		// Replication
 		ReplicationMode:   "async",
@@ -302,9 +303,9 @@ func DefaultConfig() *Config {
 		MaxReplicationLag: 10000, // 10s
 
 		// Raft consensus
-		EnableRaft:            true,  // Enable Raft by default for cluster mode
-		RaftElectionTimeout:   1000,  // 1s
-		RaftHeartbeatInterval: 150,   // 150ms
+		EnableRaft:            true, // Enable Raft by default for cluster mode
+		RaftElectionTimeout:   1000, // 1s
+		RaftHeartbeatInterval: 150,  // 150ms
 
 		// Service Discovery
 		DiscoveryEnabled:   false, // Disabled by default
@@ -337,10 +338,10 @@ func DefaultConfig() *Config {
 		EncryptionPassphrase: "",
 
 		// TLS
-		TLSEnabled:  true,  // TLS enabled by default for security
-		TLSCertFile: "",    // Auto-determined based on user privileges
-		TLSKeyFile:  "",    // Auto-determined based on user privileges
-		TLSAutoGen:  true,  // Auto-generate self-signed certificates if not found
+		TLSEnabled:  true, // TLS enabled by default for security
+		TLSCertFile: "",   // Auto-determined based on user privileges
+		TLSKeyFile:  "",   // Auto-determined based on user privileges
+		TLSAutoGen:  true, // Auto-generate self-signed certificates if not found
 
 		// Logging
 		LogLevel: "info",
@@ -361,17 +362,17 @@ func DefaultConfig() *Config {
 		// Observability
 		Observability: ObservabilityConfig{
 			Metrics: MetricsConfig{
-				Enabled: false,  // Disabled by default
+				Enabled: false,   // Disabled by default
 				Addr:    ":9194", // Prometheus metrics endpoint (9194 = 9094 + 100 to avoid FlyMQ conflict)
 			},
 			Health: HealthConfig{
-				Enabled: true,   // Enabled by default for K8s probes
+				Enabled: true,    // Enabled by default for K8s probes
 				Addr:    ":9195", // Health check endpoint (9195 = 9095 + 100)
 			},
 			Admin: AdminConfig{
-				Enabled:     false, // Disabled by default
+				Enabled:     false,   // Disabled by default
 				Addr:        ":9196", // Admin API endpoint (9196 = 9096 + 100)
-				AuthEnabled: true,  // Require auth when enabled
+				AuthEnabled: true,    // Require auth when enabled
 			},
 		},
 	}
@@ -463,12 +464,17 @@ func (c *Config) Validate() error {
 
 	// Validate role
 	switch c.Role {
-	case "standalone", "cluster":
-		// Valid roles
+	case "standalone":
+		// Valid
+	case "cluster":
+		// Cluster mode requires at least one peer for discovery
+		// (unless discovery service is enabled, but standard config should have seeds)
+		if len(c.ClusterPeers) == 0 && !c.DiscoveryEnabled {
+			errs = append(errs, "cluster mode requires at least one peer in cluster_peers")
+		}
 	default:
 		errs = append(errs, fmt.Sprintf("invalid role: %s (must be standalone or cluster)", c.Role))
 	}
-
 
 	// Validate replication mode
 	switch strings.ToLower(c.ReplicationMode) {
@@ -775,8 +781,6 @@ func (m *Manager) Reload() error {
 
 	return nil
 }
-
-
 
 // String returns a string representation of the configuration.
 func (c *Config) String() string {
