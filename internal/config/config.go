@@ -326,15 +326,15 @@ func DefaultConfig() *Config {
 		Observability: ObservabilityConfig{
 			Metrics: MetricsConfig{
 				Enabled: false,  // Disabled by default
-				Addr:    ":9094", // Prometheus metrics endpoint
+				Addr:    ":9194", // Prometheus metrics endpoint (9194 = 9094 + 100 to avoid FlyMQ conflict)
 			},
 			Health: HealthConfig{
 				Enabled: true,   // Enabled by default for K8s probes
-				Addr:    ":9095", // Health check endpoint
+				Addr:    ":9195", // Health check endpoint (9195 = 9095 + 100)
 			},
 			Admin: AdminConfig{
 				Enabled:     false, // Disabled by default
-				Addr:        ":9096", // Admin API endpoint
+				Addr:        ":9196", // Admin API endpoint (9196 = 9096 + 100)
 				AuthEnabled: true,  // Require auth when enabled
 			},
 		},

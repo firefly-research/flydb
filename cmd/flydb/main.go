@@ -84,7 +84,9 @@ import (
 	"flydb/internal/banner"
 	"flydb/internal/cluster"
 	"flydb/internal/config"
+	"flydb/internal/health"
 	"flydb/internal/logging"
+	"flydb/internal/metrics"
 	"flydb/internal/server"
 	"flydb/internal/storage"
 	flydbtls "flydb/internal/tls"
@@ -815,6 +817,45 @@ func main() {
 		log.Info("TLS enabled", "cert", certPath, "key", keyPath)
 	}
 
+	// Initialize observability servers
+	var metricsServer *metrics.Server
+	var healthServer *health.Server
+
+	// Start metrics server if enabled
+	if cfg.Observability.Metrics.Enabled {
+		metricsServer = metrics.NewServer(&cfg.Observability.Metrics)
+		if err := metricsServer.Start(); err != nil {
+			log.Error("Failed to start metrics server", "error", err)
+		}
+	}
+
+	// Start health check server if enabled
+	if cfg.Observability.Health.Enabled {
+		healthChecker := health.NewChecker(banner.Version)
+
+		// Register storage health check
+		healthChecker.RegisterCheck("storage", health.StorageCheck(func() error {
+			// Simple check: can we access the database manager?
+			if dbManager == nil {
+				return fmt.Errorf("database manager not initialized")
+			}
+			return nil
+		}))
+
+		// Register cluster health check if in cluster mode
+		if cfg.Role == "cluster" {
+			healthChecker.RegisterCheck("cluster", health.ClusterCheck(func() (bool, string) {
+				// TODO: Add actual cluster health check when cluster manager is available
+				return true, "cluster healthy"
+			}))
+		}
+
+		healthServer = health.NewServer(&cfg.Observability.Health, healthChecker)
+		if err := healthServer.Start(); err != nil {
+			log.Error("Failed to start health server", "error", err)
+		}
+	}
+
 	// Set up graceful shutdown handling
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -829,6 +870,18 @@ func main() {
 		// Stop the server gracefully
 		if err := srv.Stop(); err != nil {
 			log.Error("Error during shutdown", "error", err)
+		}
+
+		// Stop observability servers
+		if metricsServer != nil {
+			if err := metricsServer.Stop(); err != nil {
+				log.Error("Error stopping metrics server", "error", err)
+			}
+		}
+		if healthServer != nil {
+			if err := healthServer.Stop(); err != nil {
+				log.Error("Error stopping health server", "error", err)
+			}
 		}
 
 		// Close the database manager
