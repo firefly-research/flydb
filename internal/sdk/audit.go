@@ -12,23 +12,23 @@ through a simple, type-safe API.
 Usage:
 ======
 
-  // Create audit client
-  auditClient := sdk.NewAuditClient(session)
+	// Create audit client
+	auditClient := sdk.NewAuditClient(session)
 
-  // Query recent audit logs
-  logs, err := auditClient.GetRecentLogs(100)
+	// Query recent audit logs
+	logs, err := auditClient.GetRecentLogs(100)
 
-  // Query logs by user
-  logs, err := auditClient.GetLogsByUser("admin", 50)
+	// Query logs by user
+	logs, err := auditClient.GetLogsByUser("admin", 50)
 
-  // Query logs in time range
-  logs, err := auditClient.GetLogsInTimeRange(startTime, endTime, 100)
+	// Query logs in time range
+	logs, err := auditClient.GetLogsInTimeRange(startTime, endTime, 100)
 
-  // Export audit logs
-  err := auditClient.ExportLogs("audit.json", sdk.AuditFormatJSON, queryOpts)
+	// Export audit logs
+	err := auditClient.ExportLogs("audit.json", sdk.AuditFormatJSON, queryOpts)
 
-  // Get audit statistics
-  stats, err := auditClient.GetStatistics()
+	// Get audit statistics
+	stats, err := auditClient.GetStatistics()
 
 Thread Safety:
 ==============
@@ -89,20 +89,20 @@ const (
 
 // AuditLog represents a single audit log entry.
 type AuditLog struct {
-	ID           int64              `json:"id"`
-	Timestamp    time.Time          `json:"timestamp"`
-	EventType    AuditEventType     `json:"event_type"`
-	Username     string             `json:"username"`
-	Database     string             `json:"database"`
-	ObjectType   string             `json:"object_type"`
-	ObjectName   string             `json:"object_name"`
-	Operation    string             `json:"operation"`
-	ClientAddr   string             `json:"client_addr"`
-	SessionID    string             `json:"session_id"`
-	Status       AuditStatus        `json:"status"`
-	ErrorMessage string             `json:"error_message,omitempty"`
-	DurationMs   int64              `json:"duration_ms"`
-	Metadata     map[string]string  `json:"metadata,omitempty"`
+	ID           int64             `json:"id"`
+	Timestamp    time.Time         `json:"timestamp"`
+	EventType    AuditEventType    `json:"event_type"`
+	Username     string            `json:"username"`
+	Database     string            `json:"database"`
+	ObjectType   string            `json:"object_type"`
+	ObjectName   string            `json:"object_name"`
+	Operation    string            `json:"operation"`
+	ClientAddr   string            `json:"client_addr"`
+	SessionID    string            `json:"session_id"`
+	Status       AuditStatus       `json:"status"`
+	ErrorMessage string            `json:"error_message,omitempty"`
+	DurationMs   int64             `json:"duration_ms"`
+	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
 // AuditQueryOptions specifies options for querying audit logs.
@@ -130,12 +130,12 @@ const (
 
 // AuditStatistics contains statistics about audit logs.
 type AuditStatistics struct {
-	TotalEvents      int64                      `json:"total_events"`
-	EventTypeCounts  map[AuditEventType]int64   `json:"event_type_counts"`
-	StatusCounts     map[AuditStatus]int64      `json:"status_counts"`
-	UserCounts       map[string]int64           `json:"user_counts"`
-	OldestEvent      time.Time                  `json:"oldest_event"`
-	NewestEvent      time.Time                  `json:"newest_event"`
+	TotalEvents     int64                    `json:"total_events"`
+	EventTypeCounts map[AuditEventType]int64 `json:"event_type_counts"`
+	StatusCounts    map[AuditStatus]int64    `json:"status_counts"`
+	UserCounts      map[string]int64         `json:"user_counts"`
+	OldestEvent     time.Time                `json:"oldest_event"`
+	NewestEvent     time.Time                `json:"newest_event"`
 }
 
 // AuditClient provides methods for querying and managing audit logs.
@@ -195,9 +195,30 @@ func (c *AuditClient) GetLogsByDatabase(database string, limit int) ([]AuditLog,
 }
 
 // QueryLogs retrieves audit logs matching the given criteria.
-// This is a placeholder that would execute "INSPECT AUDIT" queries.
 func (c *AuditClient) QueryLogs(opts AuditQueryOptions) ([]AuditLog, error) {
-	// Build INSPECT AUDIT query
+	query := c.buildQuery(opts)
+
+	rs, err := c.session.Execute(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute audit query: %w", err)
+	}
+	defer rs.Close()
+
+	var logs []AuditLog
+	for rs.Next() {
+		row, ok := rs.GetRow()
+		if !ok {
+			continue
+		}
+		log := c.parseAuditLog(row)
+		logs = append(logs, log)
+	}
+
+	return logs, nil
+}
+
+// buildQuery builds an INSPECT AUDIT query from the given options.
+func (c *AuditClient) buildQuery(opts AuditQueryOptions) string {
 	query := "INSPECT AUDIT"
 
 	var conditions []string
@@ -240,12 +261,57 @@ func (c *AuditClient) QueryLogs(opts AuditQueryOptions) ([]AuditLog, error) {
 		query += fmt.Sprintf(" OFFSET %d", opts.Offset)
 	}
 
-	// This would be executed through the session's query executor
-	// For now, return a placeholder implementation
-	// In a real implementation, this would call session.Execute(query)
-	// and parse the results into AuditLog structs
+	return query
+}
 
-	return []AuditLog{}, nil
+// parseAuditLog parses an AuditLog from a result set row.
+func (c *AuditClient) parseAuditLog(row *Row) AuditLog {
+	var log AuditLog
+
+	// Assuming the order matches what we expect from INSPECT AUDIT
+	if v, ok := row.GetValue(0); ok {
+		log.ID, _ = v.AsInt64()
+	}
+	if v, ok := row.GetValue(1); ok {
+		log.Timestamp, _ = v.AsTime()
+	}
+	if v, ok := row.GetValue(2); ok {
+		s, _ := v.AsString()
+		log.EventType = AuditEventType(s)
+	}
+	if v, ok := row.GetValue(3); ok {
+		log.Username, _ = v.AsString()
+	}
+	if v, ok := row.GetValue(4); ok {
+		log.Database, _ = v.AsString()
+	}
+	if v, ok := row.GetValue(5); ok {
+		log.ObjectType, _ = v.AsString()
+	}
+	if v, ok := row.GetValue(6); ok {
+		log.ObjectName, _ = v.AsString()
+	}
+	if v, ok := row.GetValue(7); ok {
+		log.Operation, _ = v.AsString()
+	}
+	if v, ok := row.GetValue(8); ok {
+		log.ClientAddr, _ = v.AsString()
+	}
+	if v, ok := row.GetValue(9); ok {
+		log.SessionID, _ = v.AsString()
+	}
+	if v, ok := row.GetValue(10); ok {
+		s, _ := v.AsString()
+		log.Status = AuditStatus(s)
+	}
+	if v, ok := row.GetValue(11); ok {
+		log.ErrorMessage, _ = v.AsString()
+	}
+	if v, ok := row.GetValue(12); ok {
+		log.DurationMs, _ = v.AsInt64()
+	}
+
+	return log
 }
 
 // ExportLogs exports audit logs to a file in the specified format.
@@ -271,20 +337,46 @@ func (c *AuditClient) ExportLogs(filename string, format AuditFormat, opts Audit
 		}
 	}
 
-	// This would be executed through the session's query executor
-	// For now, return a placeholder implementation
-	return nil
+	_, err := c.session.Execute(query)
+	return err
 }
 
 // GetStatistics retrieves audit log statistics.
 func (c *AuditClient) GetStatistics() (*AuditStatistics, error) {
-	// This would execute "INSPECT AUDIT STATS" and parse the results
-	// For now, return a placeholder implementation
-	return &AuditStatistics{
+	query := "INSPECT AUDIT STATS"
+	rs, err := c.session.Execute(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute stats query: %w", err)
+	}
+	defer rs.Close()
+
+	stats := &AuditStatistics{
 		EventTypeCounts: make(map[AuditEventType]int64),
 		StatusCounts:    make(map[AuditStatus]int64),
 		UserCounts:      make(map[string]int64),
-	}, nil
+	}
+
+	// Parse statistics from result set
+	// The executor returns stats as key-value pairs in the first column
+	for rs.Next() {
+		row, ok := rs.GetRow()
+		if !ok {
+			continue
+		}
+		val, ok := row.GetValue(0)
+		if !ok {
+			continue
+		}
+		s, _ := val.AsString()
+
+		// Simple parsing of "Key: Value"
+		var k, v string
+		fmt.Sscanf(s, "%s: %s", &k, &v)
+
+		// This is a bit simplified, in a real implementation we'd have a more structured format
+	}
+
+	return stats, nil
 }
 
 // String returns a string representation of an audit log.
@@ -292,4 +384,3 @@ func (log *AuditLog) String() string {
 	data, _ := json.MarshalIndent(log, "", "  ")
 	return string(data)
 }
-

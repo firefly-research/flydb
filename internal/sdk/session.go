@@ -289,7 +289,7 @@ type PreparedStatement struct {
 // ParameterInfo describes a parameter in a prepared statement.
 type ParameterInfo struct {
 	Index     int
-	Name      string   // For named parameters
+	Name      string // For named parameters
 	Type      DataType
 	Precision int
 	Scale     int
@@ -348,6 +348,15 @@ func (s *Session) GetDatabase() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.Database
+}
+
+// Execute runs a SQL query and returns a ResultSet.
+func (s *Session) Execute(query string) (*ResultSet, error) {
+	s.Touch()
+	// Placeholder: In a real SDK, this would send the query to the server
+	// and return the response as a ResultSet.
+	// For now, return an empty result set.
+	return NewResultSet(generateID("rs"), NewResultSetMetadata(nil)), nil
 }
 
 // ConnectionConfig represents connection configuration for ODBC/JDBC drivers.
