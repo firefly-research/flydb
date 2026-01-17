@@ -1,0 +1,51 @@
+[Unit]
+Description=FlyDB Cluster Node - %i
+Documentation=https://github.com/flydb/flydb
+After=network.target
+Wants=network-online.target
+
+# Ensure discovery service is available if enabled
+After=avahi-daemon.service
+Wants=avahi-daemon.service
+
+[Service]
+Type=simple
+User=flydb
+Group=flydb
+
+# Working directory
+WorkingDirectory=/var/lib/flydb/%i
+
+# Binary and configuration
+ExecStart=/usr/local/bin/flydb --config /etc/flydb/%i/flydb.toml
+
+# Restart policy
+Restart=on-failure
+RestartSec=5s
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/flydb/%i
+ReadOnlyPaths=/etc/flydb/%i
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=flydb-%i
+
+# Environment
+Environment="FLYDB_LOG_LEVEL=info"
+Environment="FLYDB_NODE_ID=%i"
+
+[Install]
+WantedBy=multi-user.target
+
