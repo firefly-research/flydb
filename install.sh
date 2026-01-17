@@ -286,6 +286,11 @@ ensure_clean_prompt() {
 # =============================================================================
 
 print_banner() {
+    # Clear screen for a clean start (only in interactive mode)
+    if [[ -t 1 ]] && [[ "$AUTO_CONFIRM" != true ]]; then
+        clear 2>/dev/null || true
+    fi
+
     echo ""
     echo -e "${CYAN}${BOLD}       _____.__            .______.${RESET}"
     echo -e "${CYAN}${BOLD}     _/ ____\\  | ___.__. __| _/\\_ |__${RESET}"
@@ -294,8 +299,12 @@ print_banner() {
     echo -e "${CYAN}${BOLD}      |__|  |____/ ____\\____ |  |___  /${RESET}"
     echo -e "${CYAN}${BOLD}                 \\/         \\/      \\/${RESET}"
     echo ""
-    echo -e "  ${WHITE}High-Performance Embedded SQL Database${RESET}"
-    echo -e "  ${DIM}Installation Script v${SCRIPT_VERSION}${RESET}"
+    echo -e "  ${GREEN}${BOLD}FlyDB Installer${RESET} ${DIM}v${SCRIPT_VERSION}${RESET}"
+    echo -e "  ${DIM}High-Performance Embedded SQL Database${RESET}"
+    echo ""
+    echo -e "  ${CYAN}✓${RESET} Full SQL with ACID          ${CYAN}✓${RESET} Zero external dependencies"
+    echo -e "  ${CYAN}✓${RESET} Multi-database support       ${CYAN}✓${RESET} Built-in encryption & TLS"
+    echo -e "  ${CYAN}✓${RESET} Cluster with auto-failover   ${CYAN}✓${RESET} Production-ready defaults"
     echo ""
 }
 

@@ -269,10 +269,6 @@ func main() {
 		cfgMgr.LoadFromEnv()
 		cfg = cfgMgr.Get()
 	} else {
-		// Display the startup banner with version and copyright information.
-		// This provides visual feedback that the server is starting.
-		banner.Print()
-
 		// Apply command-line flags to configuration (highest priority)
 		// Only apply flags that were explicitly set by the user
 		flag.Visit(func(f *flag.Flag) {
@@ -332,6 +328,12 @@ func main() {
 
 	// Update the global configuration
 	cfgMgr.Set(cfg)
+
+	// Display comprehensive startup banner with configuration (only when not in wizard mode)
+	// The wizard already displays its own banner and configuration summary
+	if !useWizard {
+		banner.PrintServerWithConfig(cfg)
+	}
 
 	// Configure the logging system.
 	logging.SetGlobalLevel(logging.ParseLevel(cfg.LogLevel))

@@ -97,6 +97,11 @@ ICON_SHIELD="🛡"
 # =============================================================================
 
 print_banner() {
+    # Clear screen for a clean start (only in interactive mode)
+    if [[ -t 1 ]] && [[ "$AUTO_CONFIRM" != true ]]; then
+        clear 2>/dev/null || true
+    fi
+
     echo ""
     echo -e "${RED}${BOLD}       _____.__            .______."
     echo -e "     _/ ____\\  | ___.__. __| _/\\_ |__"
@@ -105,7 +110,10 @@ print_banner() {
     echo -e "      |__|  |____/ ____\\____ |  |___  /"
     echo -e "                 \\/         \\/      \\/${RESET}"
     echo ""
-    echo -e "  ${RED}${BOLD}Uninstallation Script${RESET} ${DIM}v${SCRIPT_VERSION}${RESET}"
+    echo -e "  ${YELLOW}${BOLD}FlyDB Uninstaller${RESET} ${DIM}v${SCRIPT_VERSION}${RESET}"
+    echo ""
+    echo -e "  ${DIM}This tool will safely remove FlyDB from your system.${RESET}"
+    echo -e "  ${DIM}You will be prompted before any destructive actions.${RESET}"
     echo ""
 }
 
