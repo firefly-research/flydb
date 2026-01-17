@@ -105,6 +105,10 @@ SELECT * FROM users WHERE name LIKE 'A%';
   - [Encryption at Rest](#encryption-at-rest-1)
   - [Row-Level Security](#row-level-security)
   - [TLS Troubleshooting](#tls-troubleshooting)
+- [Observability](#observability)
+  - [Prometheus Metrics](#prometheus-metrics)
+  - [Health Endpoints](#health-endpoints)
+  - [Environment Variables](#environment-variables-1)
 - [Replication & Clustering](#replication--clustering)
   - [Unified Architecture](#unified-architecture)
   - [Start a Cluster](#start-a-cluster)
@@ -734,15 +738,45 @@ The wizard prompts for all relevant settings based on your selected mode and dis
 
 ### Configuration File
 
-FlyDB supports TOML configuration files for easier deployment and management. The configuration file is automatically loaded from these locations (in order of precedence):
+FlyDB supports both **JSON** and **TOML** configuration files for easier deployment and management. The format is auto-detected based on file extension (`.json` or `.conf`/`.toml`).
+
+The configuration file is automatically loaded from these locations (in order of precedence):
 
 1. Path specified by `--config` flag
 2. Path specified by `FLYDB_CONFIG_FILE` environment variable
-3. `/etc/flydb/flydb.conf` (system-wide)
-4. `~/.config/flydb/flydb.conf` (user-specific)
-5. `./flydb.conf` (current directory)
+3. `/etc/flydb/flydb.json` or `/etc/flydb/flydb.conf` (system-wide)
+4. `~/.config/flydb/flydb.json` or `~/.config/flydb/flydb.conf` (user-specific)
+5. `./flydb.json` or `./flydb.conf` (current directory)
 
-Example configuration file:
+**Example JSON configuration** (recommended):
+
+```json
+{
+  "role": "standalone",
+  "port": 8889,
+  "replication_port": 9999,
+  "data_dir": "/var/lib/flydb",
+  "default_database": "default",
+  "default_encoding": "UTF8",
+  "tls_enabled": true,
+  "tls_auto_gen": true,
+  "encryption_enabled": true,
+  "log_level": "info",
+  "log_json": false,
+  "observability": {
+    "metrics": {
+      "enabled": false,
+      "addr": ":9194"
+    },
+    "health": {
+      "enabled": true,
+      "addr": ":9195"
+    }
+  }
+}
+```
+
+**Example TOML configuration** (legacy, still supported):
 
 ```toml
 # Server role: standalone or cluster
@@ -1040,6 +1074,140 @@ export FLYDB_TLS_ENABLED=true
 # Connect with TLS
 flydb-shell --host localhost --port 8889 --tls-insecure
 ```
+
+---
+
+## Observability
+
+FlyDB provides comprehensive observability features for monitoring, health checks, and metrics collection.
+
+### Prometheus Metrics
+
+FlyDB exposes Prometheus-compatible metrics for monitoring query performance, connections, storage, and cluster health.
+
+**Enable metrics:**
+
+```bash
+# Via environment variable
+FLYDB_METRICS_ENABLED=true flydb
+
+# Via JSON config
+{
+  "observability": {
+    "metrics": {
+      "enabled": true,
+      "addr": ":9194"
+    }
+  }
+}
+```
+
+**Available metrics:**
+
+- `flydb_queries_total` - Total queries executed
+- `flydb_queries_by_type_total{type="SELECT|INSERT|UPDATE|DELETE"}` - Queries by type
+- `flydb_query_latency_avg_microseconds` - Average query latency
+- `flydb_connections_active` - Current active connections
+- `flydb_databases_count` - Number of databases
+- `flydb_transactions_active` - Active transactions
+- `flydb_storage_size_bytes` - Total storage size
+- `flydb_replication_lag_ms` - Replication lag (cluster mode)
+- `flydb_cluster_nodes` - Number of cluster nodes
+- `flydb_is_leader` - Is this node the leader (1=yes, 0=no)
+
+**Prometheus scrape configuration:**
+
+```yaml
+scrape_configs:
+  - job_name: 'flydb'
+    static_configs:
+      - targets: ['localhost:9194']
+```
+
+### Health Endpoints
+
+FlyDB provides health check endpoints for Kubernetes liveness and readiness probes.
+
+**Endpoints:**
+
+- `GET /health` - Overall health check
+- `GET /health/live` - Liveness probe (is the process running?)
+- `GET /health/ready` - Readiness probe (is the service ready for traffic?)
+
+**Enable health checks:**
+
+```bash
+# Via environment variable (enabled by default)
+FLYDB_HEALTH_ENABLED=true flydb
+
+# Via JSON config
+{
+  "observability": {
+    "health": {
+      "enabled": true,
+      "addr": ":9195"
+    }
+  }
+}
+```
+
+**Kubernetes deployment example:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flydb
+spec:
+  template:
+    spec:
+      containers:
+      - name: flydb
+        image: flydb:latest
+        ports:
+        - containerPort: 8889
+          name: flydb
+        - containerPort: 9195
+          name: health
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 9195
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 9195
+          initialDelaySeconds: 5
+          periodSeconds: 10
+```
+
+**Health response format:**
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-01-17T10:52:16Z",
+  "version": "01.26.14",
+  "checks": [
+    {
+      "name": "storage",
+      "status": "healthy",
+      "latency_ms": 0
+    }
+  ]
+}
+```
+
+### Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `FLYDB_METRICS_ENABLED` | Enable Prometheus metrics endpoint | `false` |
+| `FLYDB_METRICS_ADDR` | Metrics server address | `:9194` |
+| `FLYDB_HEALTH_ENABLED` | Enable health check endpoints | `true` |
+| `FLYDB_HEALTH_ADDR` | Health server address | `:9195` |
 
 ---
 
