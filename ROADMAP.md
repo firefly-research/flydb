@@ -2,8 +2,8 @@
 
 This document outlines the development roadmap for FlyDB, including completed features and planned enhancements.
 
-**Version:** 01.26.15
-**Last Updated:** January 14, 2026
+**Version:** 01.26.16
+**Last Updated:** January 17, 2026
 
 ---
 
@@ -142,7 +142,8 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | Row-Level Security (RLS) | Predicate-based row filtering | 01.26.1 |
 | Built-in Admin Account | Bootstrap operations | 01.26.1 |
 | Secure Admin Password Setup | Generated or user-specified on first run | 01.26.1 |
-| Environment Variable Config | FLYDB_ADMIN_PASSWORD for automated deployments | 01.26.1 |
+| Environment Variable Config | FLYDB_ADMIN_PASSWORD for automated deployments (first-time setup only) | 01.26.1 |
+| Admin Password Immutability | Admin password immutable after creation, prevents accidental changes | 01.26.16 |
 | TLS Transport Security | TLS 1.2+ encryption for all client-server connections (enabled by default) | 01.26.15 |
 | Auto-Generated Certificates | Self-signed certificate generation using ECDSA (P-256/P-384) | 01.26.15 |
 | Certificate Management | Validation, expiration checking, and 30-day renewal warnings | 01.26.15 |
@@ -150,6 +151,9 @@ This document outlines the development roadmap for FlyDB, including completed fe
 | TLS Configuration | Flexible TLS settings via CLI flags, environment variables, and config file | 01.26.15 |
 | Custom Certificates | Support for production certificates from trusted CAs | 01.26.15 |
 | Backward Compatibility | Optional TLS disable for legacy deployments | 01.26.15 |
+| Cluster Encryption Validation | SHA-256 hash validation ensures all cluster nodes use same encryption key | 01.26.16 |
+| Encryption Key Mismatch Detection | Automatic rejection of nodes with different encryption passphrases | 01.26.16 |
+| Encryption Passphrase Documentation | Comprehensive warnings that passphrase is NOT stored in config file | 01.26.16 |
 
 ### Distributed Features
 
@@ -441,6 +445,7 @@ storage:
 
 | Version | Release Date | Highlights |
 |---------|--------------|------------|
+| 01.26.16 | January 17, 2026 | Cluster encryption validation, first-run UX improvements, admin password immutability |
 | 01.26.15 | January 14, 2026 | TLS transport security enabled by default with auto-generated certificates |
 | 01.26.14 | January 13, 2026 | Cluster mode fixes, HA client connections, remote flydb-dump support |
 | 01.26.13 | January 12, 2026 | Raft consensus, enhanced replication, zero-copy messaging, async disk I/O |

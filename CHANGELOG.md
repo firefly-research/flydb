@@ -7,6 +7,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [01.26.16] - 2026-01-17
+
+### Security & User Experience Improvements
+
+This release focuses on critical security enhancements for cluster mode encryption, improved first-run experience, and comprehensive documentation of encryption passphrase handling.
+
+### Added
+
+#### Cluster Encryption Key Validation
+
+**CRITICAL SECURITY FEATURE**: Prevents data corruption in encrypted clusters by ensuring all nodes use the same encryption passphrase.
+
+- **Encryption Key Hash Exchange**: Nodes exchange SHA-256 hash of encryption key during cluster join handshake
+- **Automatic Validation**: Nodes with mismatched encryption keys are automatically rejected from the cluster
+- **Clear Error Messages**: Detailed error messages with recovery instructions when encryption key mismatch is detected
+- **Fail-Fast Behavior**: Validation happens during join (before data exchange) to prevent silent failures
+- **Security**: Only SHA-256 hash is exchanged between nodes, never the passphrase itself
+
+**Implementation Details**:
+- Added `ComputeEncryptionKeyHash()` function in `internal/storage/encryption.go`
+- Added `EncryptionKeyHash` field to `ClusterNode` and `ClusterConfig` structs
+- Added `msgJoinRejected` message type (0x06) for cluster join rejection
+- Updated `handleJoinRequest()` to validate encryption key hash before accepting nodes
+- Updated `joinCluster()` to handle rejection with detailed error display
+- Encryption key hash populated in cluster config during initialization
+
+**Error Messages**:
+
+Server side (existing cluster node):
+```
+❌ REJECTED node node2:9998: Encryption key mismatch!
+   Local encryption hash:  a1b2c3d4e5f6...
+   Remote encryption hash: f6e5d4c3b2a1...
+   All cluster nodes MUST use the same FLYDB_ENCRYPTION_PASSPHRASE
+```
+
+Client side (joining node):
+```
+═══════════════════════════════════════════════════════════════
+❌ FATAL: Cluster join REJECTED - Encryption key mismatch!
+═══════════════════════════════════════════════════════════════
+
+  Seed node: node1:9998
+  Reason: Encryption key mismatch: All cluster nodes must use the same encryption passphrase
+
+  All cluster nodes MUST use the SAME encryption passphrase!
+
+  To fix this:
+  1. Ensure all nodes use the same FLYDB_ENCRYPTION_PASSPHRASE
+  2. Restart this node with the correct passphrase
+
+  Current encryption key hash (this node):
+    f6e5d4c3b2a1...
+
+═══════════════════════════════════════════════════════════════
+```
+
+**Benefits**:
+- ✓ Prevents silent data corruption in encrypted clusters
+- ✓ Clear, actionable error messages for troubleshooting
+- ✓ Fails fast (during join, not during replication)
+- ✓ Secure (only hash is exchanged, not passphrase)
+- ✓ Well-documented in installer and README
+
+**Files Changed**:
+- `internal/storage/encryption.go`: Added `ComputeEncryptionKeyHash()` function
+- `internal/cluster/unified.go`: Added encryption key validation logic
+- `cmd/flydb/main.go`: Populate encryption key hash in cluster config
+- `install.sh`: Added RED warnings for cluster mode encryption requirements
+- `README.md`: Added "CRITICAL FOR CLUSTER MODE" section with examples
+- `flydb.json.example`: Added cluster encryption warning comment
+
+#### First-Run Experience Improvements
+
+**Professional first-run output with proper message ordering and security enhancements**:
+
+- **Fixed Message Ordering**: Admin credentials now appear BEFORE log separator, not buried in logs
+- **Duplicate Prevention**: Removed duplicate admin credential prints and server ready messages
+- **Highlighted Credentials**: Admin password displayed in prominent box with clear warnings
+- **Log Separator Positioning**: `--- LOGS START HERE ---` now appears after all first-run messages
+
+**New Output Order**:
+1. ✓ Banner + Configuration
+2. ✓ Admin Credentials (if first-time setup)
+3. ✓ Server Ready Message
+4. ✓ Connection Info
+5. ✓ `--- LOGS START HERE ---`
+6. ✓ Server logs begin...
+
+**Admin Password Security**:
+- **Immutable Password**: Admin password is now immutable after first creation
+- **Environment Variable Scope**: `FLYDB_ADMIN_PASSWORD` only used during first-time setup
+- **Clear Warnings**: Warning logged if env var is set but admin already exists
+- **Security Benefits**:
+  - ✓ Prevents unauthorized password changes via environment variable
+  - ✓ Explicit warning when env var is ignored
+  - ✓ Clear documentation of immutability
+  - ✓ Suggests proper password change method (ALTER USER)
+
+**Files Changed**:
+- `cmd/flydb/main.go`: Improved first-run message ordering and admin password handling
+- `internal/banner/banner.go`: Removed log separator from banner (called separately)
+- `internal/auth/auth.go`: Added documentation about password immutability
+- `README.md`: Added admin password recovery section
+
+#### Encryption Passphrase Documentation
+
+**Prominent warnings that encryption passphrase is NOT stored in configuration file**:
+
+- **Install Script Warnings**: RED warnings in multiple places during installation
+  - Security configuration wizard
+  - Configuration review section
+  - Post-installation instructions
+- **Configuration Example**: Added `_encryption_note` and `_encryption_cluster_note` to `flydb.json.example`
+- **README Updates**: Added ⚠️ IMPORTANT warnings in encryption section
+- **Environment Variable Docs**: Updated `FLYDB_ENCRYPTION_PASSPHRASE` description
+
+**Why This Matters**:
+- Prevents users from expecting passphrase in config file
+- Reduces support requests about "where is my passphrase?"
+- Emphasizes security best practice (env vars for secrets)
+- Makes it clear that losing passphrase = losing data access
+- Consistent messaging across installer, config, and docs
+
+**Security Best Practice**:
+Storing encryption passphrases in config files is a security risk. Environment variables are the proper way to provide secrets to applications, as they:
+- Don't get committed to version control
+- Don't get backed up with config files
+- Can be managed by secret management systems
+- Are ephemeral and process-scoped
+
+**Files Changed**:
+- `install.sh`: Added prominent warnings in wizard and post-install output
+- `flydb.json.example`: Added encryption notes
+- `README.md`: Added encryption passphrase warnings and recovery documentation
+
+### Fixed
+
+- **First-Run Output**: Admin credentials no longer buried in logs
+- **Duplicate Messages**: Removed duplicate admin credential and server ready messages
+- **Admin Password Security**: Environment variable no longer overrides existing admin password
+- **Cluster Encryption**: Nodes with different encryption keys are now rejected during join
+
+### Changed
+
+- **Admin Password Behavior**: `FLYDB_ADMIN_PASSWORD` environment variable now only works during first-time setup
+- **Log Separator Position**: Moved to appear after all first-run messages
+- **Encryption Documentation**: Significantly expanded with cluster-specific warnings
+
+### Security
+
+- **Cluster Encryption Validation**: Critical security fix preventing data corruption in encrypted clusters
+- **Admin Password Immutability**: Prevents accidental password changes via environment variable
+- **Encryption Key Hash Exchange**: Secure validation using SHA-256 hash (passphrase never exchanged)
+
+---
+
 ## [01.26.15] - 2026-01-14
 
 ### Advanced Horizontal Scaling & TLS Transport Security
