@@ -2132,6 +2132,60 @@ func handleLocalCommand(cmd string, config CLIConfig, client *BinaryClient) {
 			cli.PrintInfo("Already in normal mode.")
 		}
 
+	case "\\audit":
+		// Show recent audit logs (shortcut for INSPECT AUDIT)
+		response, err := processCommand(client, "INSPECT AUDIT LIMIT 50", config)
+		if err != nil {
+			printErrorMessage(err.Error())
+			return
+		}
+		printResponseWithFormat(response, config.Format)
+
+	case "\\audit-user":
+		// Show audit logs for a specific user
+		if arg == "" {
+			cli.PrintWarning("Usage: \\audit-user <username>")
+			return
+		}
+		query := fmt.Sprintf("INSPECT AUDIT WHERE username = '%s' LIMIT 50", arg)
+		response, err := processCommand(client, query, config)
+		if err != nil {
+			printErrorMessage(err.Error())
+			return
+		}
+		printResponseWithFormat(response, config.Format)
+
+	case "\\audit-export":
+		// Export audit logs to a file
+		if arg == "" {
+			cli.PrintWarning("Usage: \\audit-export <filename> [format]")
+			fmt.Println(cli.Dimmed("  Formats: json, csv, sql (default: json)"))
+			return
+		}
+		parts := strings.Fields(arg)
+		filename := parts[0]
+		format := "json"
+		if len(parts) > 1 {
+			format = parts[1]
+		}
+		query := fmt.Sprintf("EXPORT AUDIT TO '%s' FORMAT %s", filename, format)
+		response, err := processCommand(client, query, config)
+		if err != nil {
+			printErrorMessage(err.Error())
+			return
+		}
+		cli.PrintSuccess("Audit logs exported to: %s", filename)
+		printResponseWithFormat(response, config.Format)
+
+	case "\\audit-stats":
+		// Show audit statistics
+		response, err := processCommand(client, "INSPECT AUDIT STATS", config)
+		if err != nil {
+			printErrorMessage(err.Error())
+			return
+		}
+		printResponseWithFormat(response, config.Format)
+
 	default:
 		// Unknown local command - inform the user with suggestions.
 		cli.PrintWarning("Unknown command: %s", cmd)
@@ -2253,6 +2307,10 @@ func printHelp() {
 	fmt.Printf("    %s, %s     Show current database\n", cli.Info("\\cd"), cli.Info("\\current"))
 	fmt.Printf("    %s               Enter SQL mode (all input = SQL)\n", cli.Info("\\sql"))
 	fmt.Printf("    %s            Return to normal mode\n", cli.Info("\\normal"))
+	fmt.Printf("    %s             Show recent audit logs\n", cli.Info("\\audit"))
+	fmt.Printf("    %s <user>  Show audit logs for user\n", cli.Info("\\audit-user"))
+	fmt.Printf("    %s <file>  Export audit logs to file\n", cli.Info("\\audit-export"))
+	fmt.Printf("    %s        Show audit statistics\n", cli.Info("\\audit-stats"))
 	fmt.Println()
 
 	// Server Commands
@@ -2306,6 +2364,8 @@ func printHelp() {
 	fmt.Printf("    %s <name>  Detailed info for a database\n", cli.Info("INSPECT DATABASE"))
 	fmt.Printf("    %s           List all RBAC roles\n", cli.Info("INSPECT ROLES"))
 	fmt.Printf("    %s <name>     Detailed info for a role\n", cli.Info("INSPECT ROLE"))
+	fmt.Printf("    %s [WHERE ...] Show audit trail logs\n", cli.Info("INSPECT AUDIT"))
+	fmt.Printf("    %s          Show audit statistics\n", cli.Info("INSPECT AUDIT STATS"))
 	fmt.Println()
 
 	// Database Management

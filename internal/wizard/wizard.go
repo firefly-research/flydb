@@ -129,6 +129,16 @@ type Config struct {
 	// Performance configuration (01.26.13+)
 	EnableZeroCopy      bool // Enable zero-copy buffer pooling
 	BufferPoolSizeBytes int  // Buffer pool size in bytes (0 = auto)
+
+	// Audit trail configuration (01.26.17+)
+	AuditEnabled       bool // Enable audit logging
+	AuditLogDDL        bool // Log DDL operations
+	AuditLogDML        bool // Log DML operations
+	AuditLogSelect     bool // Log SELECT queries
+	AuditLogAuth       bool // Log authentication events
+	AuditLogAdmin      bool // Log administrative operations
+	AuditLogCluster    bool // Log cluster events
+	AuditRetentionDays int  // Days to retain audit logs (0 = forever)
 }
 
 // DefaultConfig returns the default configuration values.
@@ -185,6 +195,16 @@ func DefaultConfig() Config {
 		// Performance defaults (01.26.13+)
 		EnableZeroCopy:      true, // Enabled by default
 		BufferPoolSizeBytes: 0,    // Auto-size
+
+		// Audit trail defaults (01.26.17+)
+		AuditEnabled:       true,  // Enabled by default for security
+		AuditLogDDL:        true,  // Log DDL operations
+		AuditLogDML:        true,  // Log DML operations
+		AuditLogSelect:     false, // Don't log SELECT by default (verbose)
+		AuditLogAuth:       true,  // Log authentication events
+		AuditLogAdmin:      true,  // Log administrative operations
+		AuditLogCluster:    true,  // Log cluster events
+		AuditRetentionDays: 90,    // Keep logs for 90 days
 	}
 }
 
@@ -240,6 +260,16 @@ func FromConfig(cfg *config.Config) Config {
 		// Performance configuration (01.26.13+)
 		EnableZeroCopy:      cfg.EnableZeroCopy,
 		BufferPoolSizeBytes: cfg.BufferPoolSizeBytes,
+
+		// Audit trail configuration (01.26.17+)
+		AuditEnabled:       cfg.AuditEnabled,
+		AuditLogDDL:        cfg.AuditLogDDL,
+		AuditLogDML:        cfg.AuditLogDML,
+		AuditLogSelect:     cfg.AuditLogSelect,
+		AuditLogAuth:       cfg.AuditLogAuth,
+		AuditLogAdmin:      cfg.AuditLogAdmin,
+		AuditLogCluster:    cfg.AuditLogCluster,
+		AuditRetentionDays: cfg.AuditRetentionDays,
 	}
 }
 
@@ -302,6 +332,18 @@ func (c *Config) ToConfig() *config.Config {
 		// Performance configuration (01.26.13+)
 		EnableZeroCopy:      c.EnableZeroCopy,
 		BufferPoolSizeBytes: c.BufferPoolSizeBytes,
+
+		// Audit trail configuration (01.26.17+)
+		AuditEnabled:       c.AuditEnabled,
+		AuditLogDDL:        c.AuditLogDDL,
+		AuditLogDML:        c.AuditLogDML,
+		AuditLogSelect:     c.AuditLogSelect,
+		AuditLogAuth:       c.AuditLogAuth,
+		AuditLogAdmin:      c.AuditLogAdmin,
+		AuditLogCluster:    c.AuditLogCluster,
+		AuditRetentionDays: c.AuditRetentionDays,
+		AuditBufferSize:    1000, // Default buffer size
+		AuditFlushInterval: 5,    // Default flush interval
 	}
 }
 
