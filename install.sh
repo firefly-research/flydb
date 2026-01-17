@@ -1260,6 +1260,85 @@ prompt_address() {
 }
 
 # =============================================================================
+# Helper Functions for Configuration
+# =============================================================================
+
+# Generate a secure random passphrase/key
+generate_secure_passphrase() {
+    local length="${1:-32}"
+
+    # Try openssl first (most common)
+    if command -v openssl &>/dev/null; then
+        openssl rand -base64 "$length" 2>/dev/null | tr -d '\n' | head -c "$length"
+        return 0
+    fi
+
+    # Fallback to /dev/urandom with base64
+    if [[ -r /dev/urandom ]]; then
+        head -c "$length" /dev/urandom 2>/dev/null | base64 | tr -d '\n' | head -c "$length"
+        return 0
+    fi
+
+    # Last resort: use date and random
+    echo "$(date +%s)${RANDOM}${RANDOM}" | sha256sum 2>/dev/null | cut -d' ' -f1 | head -c "$length"
+}
+
+# Generate encryption key (hex format, 64 chars = 32 bytes)
+generate_encryption_key() {
+    if command -v openssl &>/dev/null; then
+        openssl rand -hex 32 2>/dev/null
+        return 0
+    fi
+
+    if [[ -r /dev/urandom ]]; then
+        head -c 32 /dev/urandom 2>/dev/null | xxd -p -c 64 | tr -d '\n'
+        return 0
+    fi
+
+    # Fallback
+    echo "$(date +%s)${RANDOM}${RANDOM}${RANDOM}${RANDOM}" | sha256sum 2>/dev/null | cut -d' ' -f1
+}
+
+# Prompt for a value with default
+prompt_value() {
+    local prompt_text="$1"
+    local default="$2"
+    prompt "$prompt_text" "$default"
+}
+
+# Prompt for a number with validation
+prompt_number() {
+    local prompt_text="$1"
+    local default="$2"
+    local min="${3:-0}"
+    local result
+
+    while true; do
+        result=$(prompt "$prompt_text" "$default")
+        if [[ "$result" =~ ^[0-9]+$ ]] && [[ "$result" -ge "$min" ]]; then
+            echo "$result"
+            return 0
+        fi
+        print_error "Invalid number. Please enter a value >= $min."
+    done
+}
+
+# Print a section header
+print_section() {
+    echo ""
+    echo -e "  ${BOLD}$1${RESET}"
+    echo ""
+}
+
+# Clear screen if in interactive mode
+clear_screen_if_interactive() {
+    if [[ -t 1 ]] && [[ "$AUTO_CONFIRM" != true ]]; then
+        clear 2>/dev/null || true
+    fi
+}
+
+
+# =============================================================================
 # Interactive Wizard - Step Functions
 # =============================================================================
 
@@ -2069,6 +2148,355 @@ preview_final_configuration() {
 
 # =============================================================================
 # Main Interactive Wizard
+
+# =============================================================================
+# Configuration Summary and Section Editing
+# =============================================================================
+
+show_configuration_summary() {
+    clear_screen_if_interactive
+
+    echo ""
+    echo -e "  ${GREEN}${BOLD}CONFIGURATION SUMMARY${RESET}"
+    echo -e "  ${DIM}Review your settings. Select a section number to modify, or confirm to proceed.${RESET}"
+    echo ""
+
+    # Section 1: Deployment
+    echo -e "  ${WHITE}${BOLD}[${CYAN}1${WHITE}]${RESET} ${BOLD}DEPLOYMENT${RESET}"
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        echo -e "      Mode:              ${GREEN}Cluster${RESET} ${DIM}(high availability)${RESET}"
+        if [[ -n "$CLUSTER_PEERS" ]]; then
+            echo -e "      Peers:             ${CYAN}${CLUSTER_PEERS}${RESET}"
+        else
+            echo -e "      Peers:             ${YELLOW}Bootstrap mode (first node)${RESET}"
+        fi
+        echo -e "      Replication:       ${CYAN}${REPLICATION_MODE}${RESET}"
+    else
+        echo -e "      Mode:              ${GREEN}Standalone${RESET} ${DIM}(single node)${RESET}"
+    fi
+    echo -e "      Server Port:       ${CYAN}${PORT}${RESET}"
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        echo -e "      Replication Port:  ${CYAN}${REPL_PORT}${RESET}"
+        echo -e "      Cluster Port:      ${CYAN}${CLUSTER_PORT}${RESET}"
+    fi
+    echo -e "      Install Directory: ${CYAN}${PREFIX}/bin${RESET}"
+    echo ""
+
+    # Section 2: Storage
+    echo -e "  ${WHITE}${BOLD}[${CYAN}2${WHITE}]${RESET} ${BOLD}STORAGE${RESET}"
+    if [[ -n "$DATA_DIR" ]]; then
+        echo -e "      Data Directory:    ${CYAN}${DATA_DIR}${RESET}"
+    else
+        echo -e "      Data Directory:    ${YELLOW}(auto-determined)${RESET}"
+    fi
+    if [[ "$BUFFER_POOL_SIZE" == "0" ]]; then
+        echo -e "      Buffer Pool:       ${CYAN}Auto${RESET} ${DIM}(system memory based)${RESET}"
+    else
+        echo -e "      Buffer Pool:       ${CYAN}${BUFFER_POOL_SIZE} pages${RESET}"
+    fi
+    echo -e "      Checkpoint:        ${CYAN}Every ${CHECKPOINT_SECS}s${RESET}"
+    echo ""
+
+    # Section 3: Security
+    echo -e "  ${WHITE}${BOLD}[${CYAN}3${WHITE}]${RESET} ${BOLD}SECURITY${RESET}"
+    if [[ "$ENCRYPTION_ENABLED" == "true" ]]; then
+        echo -e "      Data Encryption:   ${GREEN}Enabled${RESET} ${DIM}(AES-256-GCM)${RESET}"
+        if [[ -n "$ENCRYPTION_PASSPHRASE" ]]; then
+            echo -e "      Passphrase:        ${CYAN}(configured)${RESET}"
+        else
+            echo -e "      Passphrase:        ${YELLOW}(will be auto-generated)${RESET}"
+        fi
+    else
+        echo -e "      Data Encryption:   ${YELLOW}Disabled${RESET}"
+    fi
+    if [[ "$TLS_ENABLED" == "true" ]]; then
+        echo -e "      TLS/SSL:           ${GREEN}Enabled${RESET}"
+        if [[ "$TLS_AUTO_GEN" == "true" ]]; then
+            echo -e "      Certificates:      ${CYAN}Auto-generate${RESET}"
+        elif [[ -n "$TLS_CERT_FILE" ]]; then
+            echo -e "      Certificate:       ${CYAN}${TLS_CERT_FILE}${RESET}"
+        fi
+    else
+        echo -e "      TLS/SSL:           ${YELLOW}Disabled${RESET}"
+    fi
+    echo ""
+
+    # Section 4: Performance & Logging
+    echo -e "  ${WHITE}${BOLD}[${CYAN}4${WHITE}]${RESET} ${BOLD}PERFORMANCE & LOGGING${RESET}"
+    if [[ "$ENABLE_COMPRESSION" == "true" ]]; then
+        echo -e "      Compression:       ${GREEN}Enabled${RESET} ${DIM}(${COMPRESSION_ALGORITHM})${RESET}"
+    else
+        echo -e "      Compression:       ${YELLOW}Disabled${RESET}"
+    fi
+    if [[ "$ENABLE_ZERO_COPY" == "true" ]]; then
+        echo -e "      Zero-Copy:         ${GREEN}Enabled${RESET}"
+    else
+        echo -e "      Zero-Copy:         ${YELLOW}Disabled${RESET}"
+    fi
+    echo -e "      Log Level:         ${CYAN}${LOG_LEVEL}${RESET}"
+    if [[ "$LOG_JSON" == "true" ]]; then
+        echo -e "      Log Format:        ${CYAN}JSON${RESET}"
+    else
+        echo -e "      Log Format:        ${CYAN}Text${RESET}"
+    fi
+    echo ""
+
+    # Section 5: System Integration
+    echo -e "  ${WHITE}${BOLD}[${CYAN}5${WHITE}]${RESET} ${BOLD}SYSTEM INTEGRATION${RESET}"
+    if [[ "$INSTALL_SERVICE" == true ]]; then
+        echo -e "      System Service:    ${GREEN}Install${RESET} ${DIM}(${INIT_SYSTEM})${RESET}"
+    else
+        echo -e "      System Service:    ${YELLOW}Skip${RESET}"
+    fi
+    if [[ "$INIT_DATABASE" == true ]]; then
+        echo -e "      Initialize DB:     ${GREEN}Yes${RESET}"
+    else
+        echo -e "      Initialize DB:     ${YELLOW}No${RESET}"
+    fi
+    echo ""
+
+    # Show credentials reminder if encryption is enabled
+    if [[ "$ENCRYPTION_ENABLED" == "true" ]] && [[ -n "$ENCRYPTION_PASSPHRASE" ]]; then
+        echo -e "  ${YELLOW}${BOLD}⚠ ENCRYPTION PASSPHRASE${RESET}"
+        echo -e "      ${CYAN}${ENCRYPTION_PASSPHRASE}${RESET}"
+        echo -e "      ${DIM}(Save this securely - required for data access)${RESET}"
+        echo ""
+    fi
+}
+
+configure_section_deployment() {
+    print_section "Deployment Configuration"
+
+    echo -e "  ${BOLD}Current Mode:${RESET} ${CYAN}${SERVER_ROLE}${RESET}"
+    echo ""
+
+    if prompt_yes_no "Change deployment mode" "n"; then
+        wizard_step_server_role
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Network Ports${RESET}"
+    PORT=$(prompt_port "Server port" "$PORT")
+
+    if [[ "$SERVER_ROLE" == "cluster" ]]; then
+        REPL_PORT=$(prompt_port "Replication port" "$REPL_PORT")
+        CLUSTER_PORT=$(prompt_port "Cluster port" "$CLUSTER_PORT")
+
+        echo ""
+        if prompt_yes_no "Modify cluster peers" "n"; then
+            wizard_step_cluster_config
+        fi
+    fi
+
+    echo ""
+    print_success "Deployment configuration updated"
+}
+
+configure_section_storage() {
+    print_section "Storage Configuration"
+
+    echo -e "  ${BOLD}Data Storage Settings${RESET}"
+    echo ""
+
+    local new_data_dir
+    new_data_dir=$(prompt_value "Data directory" "${DATA_DIR}")
+    DATA_DIR=$(validate_path "$new_data_dir")
+
+    echo ""
+    BUFFER_POOL_SIZE=$(prompt_number "Buffer pool size in pages (0=auto)" "$BUFFER_POOL_SIZE" "0")
+    CHECKPOINT_SECS=$(prompt_number "Checkpoint interval in seconds" "$CHECKPOINT_SECS" "10")
+
+    echo ""
+    print_success "Storage configuration updated"
+}
+
+configure_section_security() {
+    print_section "Security Configuration"
+
+    echo -e "  ${BOLD}Data-at-Rest Encryption${RESET}"
+    echo -e "  ${DIM}Encrypt all data stored on disk using AES-256-GCM.${RESET}"
+    echo ""
+
+    if prompt_yes_no "Enable data-at-rest encryption" "$([[ "$ENCRYPTION_ENABLED" == "true" ]] && echo "y" || echo "n")"; then
+        ENCRYPTION_ENABLED="true"
+        echo ""
+        echo -e "  ${DIM}Leave empty to auto-generate a secure passphrase${RESET}"
+        local custom_pass
+        custom_pass=$(prompt_value "Encryption passphrase (Enter for auto-generate)" "")
+        if [[ -n "$custom_pass" ]]; then
+            ENCRYPTION_PASSPHRASE="$custom_pass"
+        else
+            # Will be auto-generated later
+            ENCRYPTION_PASSPHRASE=""
+        fi
+    else
+        ENCRYPTION_ENABLED="false"
+        ENCRYPTION_PASSPHRASE=""
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}TLS/SSL Encryption${RESET}"
+    echo -e "  ${DIM}Enable TLS for encrypted client-server communication.${RESET}"
+    echo ""
+
+    if prompt_yes_no "Enable TLS encryption" "$([[ "$TLS_ENABLED" == "true" ]] && echo "y" || echo "n")"; then
+        TLS_ENABLED="true"
+        echo ""
+        if prompt_yes_no "Auto-generate self-signed certificates" "$([[ "$TLS_AUTO_GEN" == "true" ]] && echo "y" || echo "n")"; then
+            TLS_AUTO_GEN="true"
+            TLS_CERT_FILE=""
+            TLS_KEY_FILE=""
+        else
+            TLS_AUTO_GEN="false"
+            TLS_CERT_FILE=$(prompt_value "TLS certificate file path" "$TLS_CERT_FILE")
+            TLS_KEY_FILE=$(prompt_value "TLS key file path" "$TLS_KEY_FILE")
+        fi
+    else
+        TLS_ENABLED="false"
+    fi
+
+    echo ""
+    print_success "Security configuration updated"
+}
+
+configure_section_performance() {
+    print_section "Performance & Logging Configuration"
+
+    echo -e "  ${BOLD}Performance Features${RESET}"
+    echo ""
+
+    if prompt_yes_no "Enable compression (WAL and replication)" "$([[ "$ENABLE_COMPRESSION" == "true" ]] && echo "y" || echo "n")"; then
+        ENABLE_COMPRESSION="true"
+        echo ""
+        echo -e "  ${BOLD}Compression Algorithm:${RESET}"
+        echo -e "    ${CYAN}1${RESET}) gzip   ${DIM}(balanced)${RESET}"
+        echo -e "    ${CYAN}2${RESET}) lz4    ${DIM}(fast)${RESET}"
+        echo -e "    ${CYAN}3${RESET}) snappy ${DIM}(fast)${RESET}"
+        echo -e "    ${CYAN}4${RESET}) zstd   ${DIM}(best compression)${RESET}"
+        echo ""
+        local algo_choice
+        algo_choice=$(prompt "Select algorithm" "1")
+        case "$algo_choice" in
+            1) COMPRESSION_ALGORITHM="gzip" ;;
+            2) COMPRESSION_ALGORITHM="lz4" ;;
+            3) COMPRESSION_ALGORITHM="snappy" ;;
+            4) COMPRESSION_ALGORITHM="zstd" ;;
+            *) COMPRESSION_ALGORITHM="gzip" ;;
+        esac
+    else
+        ENABLE_COMPRESSION="false"
+    fi
+
+    echo ""
+    if prompt_yes_no "Enable zero-copy buffer pooling" "$([[ "$ENABLE_ZERO_COPY" == "true" ]] && echo "y" || echo "n")"; then
+        ENABLE_ZERO_COPY="true"
+    else
+        ENABLE_ZERO_COPY="false"
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Logging Settings${RESET}"
+    echo ""
+
+    echo -e "  ${BOLD}Log Level:${RESET}"
+    echo -e "    ${CYAN}1${RESET}) debug  ${CYAN}2${RESET}) info  ${CYAN}3${RESET}) warn  ${CYAN}4${RESET}) error"
+    echo ""
+    local log_choice
+    log_choice=$(prompt "Select log level" "2")
+    case "$log_choice" in
+        1) LOG_LEVEL="debug" ;;
+        2) LOG_LEVEL="info" ;;
+        3) LOG_LEVEL="warn" ;;
+        4) LOG_LEVEL="error" ;;
+        *) LOG_LEVEL="info" ;;
+    esac
+
+    echo ""
+    if prompt_yes_no "Enable JSON log output" "$([[ "$LOG_JSON" == "true" ]] && echo "y" || echo "n")"; then
+        LOG_JSON="true"
+    else
+        LOG_JSON="false"
+    fi
+
+    echo ""
+    print_success "Performance & logging configuration updated"
+}
+
+configure_section_system() {
+    print_section "System Integration Configuration"
+
+    echo -e "  ${BOLD}System Service${RESET}"
+    echo -e "  ${DIM}Install FlyDB as a system service (${INIT_SYSTEM})${RESET}"
+    echo ""
+
+    if prompt_yes_no "Install system service" "$([[ "$INSTALL_SERVICE" == true ]] && echo "y" || echo "n")"; then
+        INSTALL_SERVICE=true
+    else
+        INSTALL_SERVICE=false
+    fi
+
+    echo ""
+    echo -e "  ${BOLD}Database Initialization${RESET}"
+    echo -e "  ${DIM}Create default database during installation${RESET}"
+    echo ""
+
+    if prompt_yes_no "Initialize default database" "$([[ "$INIT_DATABASE" == true ]] && echo "y" || echo "n")"; then
+        INIT_DATABASE=true
+    else
+        INIT_DATABASE=false
+    fi
+
+    echo ""
+    print_success "System integration configuration updated"
+}
+
+iterative_configuration_loop() {
+    while true; do
+        show_configuration_summary
+
+        echo -e "  ${BOLD}Options:${RESET}"
+        echo -e "    ${CYAN}1-5${RESET}  Edit a section"
+        echo -e "    ${GREEN}c${RESET}    Confirm and proceed with installation"
+        echo -e "    ${RED}q${RESET}    Quit installation"
+        echo ""
+
+        local choice
+        choice=$(prompt "Select option" "c")
+        choice=$(echo "$choice" | tr '[:upper:]' '[:lower:]' | xargs)
+
+        case "$choice" in
+            1)
+                configure_section_deployment
+                ;;
+            2)
+                configure_section_storage
+                ;;
+            3)
+                configure_section_security
+                ;;
+            4)
+                configure_section_performance
+                ;;
+            5)
+                configure_section_system
+                ;;
+            c|confirm|"")
+                # Proceed with installation
+                return 0
+                ;;
+            q|quit|cancel)
+                print_info "Installation cancelled"
+                exit 0
+                ;;
+            *)
+                print_warning "Invalid choice: $choice"
+                sleep 1
+                ;;
+        esac
+    done
+}
+
+
 # =============================================================================
 
 run_interactive_wizard() {
@@ -2114,6 +2542,14 @@ run_interactive_wizard() {
                 DATA_DIR="$HOME/.local/share/flydb"
             fi
         fi
+
+        # Auto-generate encryption passphrase if not provided
+        if [[ "$ENCRYPTION_ENABLED" == "true" ]] && [[ -z "$ENCRYPTION_PASSPHRASE" ]]; then
+            ENCRYPTION_PASSPHRASE=$(generate_secure_passphrase 32)
+        fi
+
+        # Show configuration summary and allow editing
+        iterative_configuration_loop
     else
         # Run full wizard
         wizard_step_server_role
@@ -2128,28 +2564,24 @@ run_interactive_wizard() {
         wizard_step_tls
         wizard_step_performance
         wizard_step_logging
-    fi
 
-    # Service and database initialization (always ask)
-    wizard_step_service
-    wizard_step_init_database
+        # Service and database initialization
+        wizard_step_service
+        wizard_step_init_database
+
+        # Auto-generate encryption passphrase if not provided
+        if [[ "$ENCRYPTION_ENABLED" == "true" ]] && [[ -z "$ENCRYPTION_PASSPHRASE" ]]; then
+            ENCRYPTION_PASSPHRASE=$(generate_secure_passphrase 32)
+        fi
+
+        # Show configuration summary and allow editing
+        iterative_configuration_loop
+    fi
 
     # Configuration file
-    echo ""
-    if prompt_yes_no "Create configuration file with these settings?" "y"; then
-        CREATE_CONFIG=true
-        # Show preview of configuration
-        if [[ "$use_defaults" == false ]]; then
-            preview_final_configuration
-        fi
-    else
-        CREATE_CONFIG=false
-    fi
+    CREATE_CONFIG=true
 
-    # Summary
-    print_installation_summary
-
-    # Confirmation
+    # Final confirmation
     echo ""
     if ! prompt_yes_no "Proceed with installation?"; then
         echo ""
@@ -3910,6 +4342,15 @@ main() {
     # Set default prefix if not specified
     if [[ -z "$PREFIX" ]]; then
         PREFIX=$(get_default_prefix)
+    fi
+
+    # Auto-generate encryption passphrase if encryption is enabled but no passphrase provided
+    if [[ "$ENCRYPTION_ENABLED" == "true" ]] && [[ -z "$ENCRYPTION_PASSPHRASE" ]]; then
+        ENCRYPTION_PASSPHRASE=$(generate_secure_passphrase 32)
+        if [[ -z "$ENCRYPTION_PASSPHRASE" ]]; then
+            print_warning "Failed to auto-generate encryption passphrase"
+            ENCRYPTION_ENABLED="false"
+        fi
     fi
 
     # Run interactive wizard or show summary
