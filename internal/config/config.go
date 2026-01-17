@@ -67,6 +67,7 @@ Environment Variables:
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -102,6 +103,14 @@ const (
 	EnvHeartbeatTimeout     = "FLYDB_HEARTBEAT_TIMEOUT_MS"
 	EnvElectionTimeout      = "FLYDB_ELECTION_TIMEOUT_MS"
 	EnvMinQuorum            = "FLYDB_MIN_QUORUM"
+
+	// Observability environment variables
+	EnvMetricsEnabled = "FLYDB_METRICS_ENABLED"
+	EnvMetricsAddr    = "FLYDB_METRICS_ADDR"
+	EnvHealthEnabled  = "FLYDB_HEALTH_ENABLED"
+	EnvHealthAddr     = "FLYDB_HEALTH_ADDR"
+	EnvAdminEnabled   = "FLYDB_ADMIN_ENABLED"
+	EnvAdminAddr      = "FLYDB_ADMIN_ADDR"
 )
 
 // GetDefaultDataDir returns the default directory for database storage.
@@ -125,10 +134,40 @@ func GetDefaultDataDir() string {
 }
 
 // Default configuration file paths (searched in order).
+// Supports both JSON (.json) and TOML (.conf) formats.
 var DefaultConfigPaths = []string{
+	"/etc/flydb/flydb.json",
 	"/etc/flydb/flydb.conf",
+	"$HOME/.config/flydb/flydb.json",
 	"$HOME/.config/flydb/flydb.conf",
+	"./flydb.json",
 	"./flydb.conf",
+}
+
+// MetricsConfig holds Prometheus metrics configuration.
+type MetricsConfig struct {
+	Enabled bool   `toml:"enabled" json:"enabled"` // Enable Prometheus metrics endpoint
+	Addr    string `toml:"addr" json:"addr"`       // Metrics HTTP server address (e.g., ":9094")
+}
+
+// HealthConfig holds health check endpoint configuration.
+type HealthConfig struct {
+	Enabled bool   `toml:"enabled" json:"enabled"` // Enable health check endpoints
+	Addr    string `toml:"addr" json:"addr"`       // Health check HTTP server address (e.g., ":9095")
+}
+
+// AdminConfig holds admin API configuration.
+type AdminConfig struct {
+	Enabled     bool   `toml:"enabled" json:"enabled"`           // Enable admin API
+	Addr        string `toml:"addr" json:"addr"`                 // Admin API HTTP server address (e.g., ":9096")
+	AuthEnabled bool   `toml:"auth_enabled" json:"auth_enabled"` // Require authentication for protected endpoints
+}
+
+// ObservabilityConfig holds all observability-related configuration.
+type ObservabilityConfig struct {
+	Metrics MetricsConfig `toml:"metrics" json:"metrics"` // Prometheus metrics configuration
+	Health  HealthConfig  `toml:"health" json:"health"`   // Health check configuration
+	Admin   AdminConfig   `toml:"admin" json:"admin"`     // Admin API configuration
 }
 
 // Config holds all configuration values for FlyDB.
@@ -200,6 +239,9 @@ type Config struct {
 	// Logging configuration
 	LogLevel string `toml:"log_level" json:"log_level"`
 	LogJSON  bool   `toml:"log_json" json:"log_json"`
+
+	// Observability configuration
+	Observability ObservabilityConfig `toml:"observability" json:"observability"`
 
 	// Authentication (not persisted to file for security)
 	AdminPassword string `toml:"-" json:"-"`
@@ -279,6 +321,23 @@ func DefaultConfig() *Config {
 		// Logging
 		LogLevel: "info",
 		LogJSON:  false,
+
+		// Observability
+		Observability: ObservabilityConfig{
+			Metrics: MetricsConfig{
+				Enabled: false,  // Disabled by default
+				Addr:    ":9094", // Prometheus metrics endpoint
+			},
+			Health: HealthConfig{
+				Enabled: true,   // Enabled by default for K8s probes
+				Addr:    ":9095", // Health check endpoint
+			},
+			Admin: AdminConfig{
+				Enabled:     false, // Disabled by default
+				Addr:        ":9096", // Admin API endpoint
+				AuthEnabled: true,  // Require auth when enabled
+			},
+		},
 	}
 }
 
@@ -420,7 +479,10 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// LoadFromFile loads configuration from a TOML file.
+// LoadFromFile loads configuration from a JSON or TOML file.
+// The format is auto-detected based on file extension:
+//   - .json: JSON format
+//   - .conf, .toml: TOML format (for backward compatibility)
 func (m *Manager) LoadFromFile(path string) error {
 	// Expand environment variables in path
 	path = os.ExpandEnv(path)
@@ -431,8 +493,19 @@ func (m *Manager) LoadFromFile(path string) error {
 	}
 
 	cfg := DefaultConfig()
-	if err := parseTOML(string(data), cfg); err != nil {
-		return fmt.Errorf("failed to parse config file: %w", err)
+
+	// Auto-detect format based on file extension
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext == ".json" {
+		// Parse as JSON
+		if err := json.Unmarshal(data, cfg); err != nil {
+			return fmt.Errorf("failed to parse JSON config file: %w", err)
+		}
+	} else {
+		// Parse as TOML (default for .conf, .toml, or no extension)
+		if err := parseTOML(string(data), cfg); err != nil {
+			return fmt.Errorf("failed to parse TOML config file: %w", err)
+		}
 	}
 
 	cfg.ConfigFile = path
@@ -546,6 +619,26 @@ func (m *Manager) LoadFromEnv() {
 		if q, err := strconv.Atoi(v); err == nil {
 			cfg.MinQuorum = q
 		}
+	}
+
+	// Observability configuration
+	if v := os.Getenv(EnvMetricsEnabled); v != "" {
+		cfg.Observability.Metrics.Enabled = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvMetricsAddr); v != "" {
+		cfg.Observability.Metrics.Addr = v
+	}
+	if v := os.Getenv(EnvHealthEnabled); v != "" {
+		cfg.Observability.Health.Enabled = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvHealthAddr); v != "" {
+		cfg.Observability.Health.Addr = v
+	}
+	if v := os.Getenv(EnvAdminEnabled); v != "" {
+		cfg.Observability.Admin.Enabled = strings.ToLower(v) == "true" || v == "1"
+	}
+	if v := os.Getenv(EnvAdminAddr); v != "" {
+		cfg.Observability.Admin.Addr = v
 	}
 
 	m.Set(cfg)
