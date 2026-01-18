@@ -43,46 +43,64 @@ type ErrorCode int
 
 const (
 	// Syntax errors (1000-1999)
-	ErrCodeSyntax           ErrorCode = 1000
-	ErrCodeUnexpectedToken  ErrorCode = 1001
-	ErrCodeMissingKeyword   ErrorCode = 1002
-	ErrCodeInvalidCommand   ErrorCode = 1003
-	ErrCodeMalformedQuery   ErrorCode = 1004
-	ErrCodeInvalidLiteral   ErrorCode = 1005
-	ErrCodeUnclosedString   ErrorCode = 1006
-	ErrCodeInvalidOperator  ErrorCode = 1007
+	ErrCodeSyntax          ErrorCode = 1000
+	ErrCodeUnexpectedToken ErrorCode = 1001
+	ErrCodeMissingKeyword  ErrorCode = 1002
+	ErrCodeInvalidCommand  ErrorCode = 1003
+	ErrCodeMalformedQuery  ErrorCode = 1004
+	ErrCodeInvalidLiteral  ErrorCode = 1005
+	ErrCodeUnclosedString  ErrorCode = 1006
+	ErrCodeInvalidOperator ErrorCode = 1007
 
 	// Execution errors (2000-2999)
-	ErrCodeExecution        ErrorCode = 2000
-	ErrCodeTableNotFound    ErrorCode = 2001
-	ErrCodeColumnNotFound   ErrorCode = 2002
-	ErrCodeTypeMismatch     ErrorCode = 2003
-	ErrCodeConstraintViolation ErrorCode = 2004
-	ErrCodeDuplicateKey     ErrorCode = 2005
-	ErrCodeNullViolation    ErrorCode = 2006
-	ErrCodeForeignKeyViolation ErrorCode = 2007
-	ErrCodeDivisionByZero   ErrorCode = 2008
-	ErrCodeOverflow         ErrorCode = 2009
+	ErrCodeExecution                 ErrorCode = 2000
+	ErrCodeTableNotFound             ErrorCode = 2001
+	ErrCodeColumnNotFound            ErrorCode = 2002
+	ErrCodeTypeMismatch              ErrorCode = 2003
+	ErrCodeConstraintViolation       ErrorCode = 2004
+	ErrCodeDuplicateKey              ErrorCode = 2005
+	ErrCodeNullViolation             ErrorCode = 2006
+	ErrCodeForeignKeyViolation       ErrorCode = 2007
+	ErrCodeDivisionByZero            ErrorCode = 2008
+	ErrCodeOverflow                  ErrorCode = 2009
+	ErrCodeTableAlreadyExists        ErrorCode = 2010
+	ErrCodeColumnAlreadyExists       ErrorCode = 2011
+	ErrCodeConstraintAlreadyExists   ErrorCode = 2012
+	ErrCodeConstraintNotFound        ErrorCode = 2013
+	ErrCodeIndexAlreadyExists        ErrorCode = 2014
+	ErrCodeIndexNotFound             ErrorCode = 2015
+	ErrCodeInternal                  ErrorCode = 2016
+	ErrCodeProcedureAlreadyExists    ErrorCode = 2017
+	ErrCodeProcedureNotFound         ErrorCode = 2018
+	ErrCodeViewAlreadyExists         ErrorCode = 2019
+	ErrCodeViewNotFound              ErrorCode = 2020
+	ErrCodeTriggerAlreadyExists      ErrorCode = 2021
+	ErrCodeTriggerNotFound           ErrorCode = 2022
+	ErrCodePreparedStatementExists   ErrorCode = 2023
+	ErrCodePreparedStatementNotFound ErrorCode = 2024
+	ErrCodeInvalidJSON               ErrorCode = 2025
+	ErrCodeJSONPathError             ErrorCode = 2026
+	ErrCodeParameterMismatch         ErrorCode = 2027
 
 	// Connection errors (3000-3999)
-	ErrCodeConnection       ErrorCode = 3000
-	ErrCodeConnectionLost   ErrorCode = 3001
-	ErrCodeTimeout          ErrorCode = 3002
-	ErrCodeProtocolError    ErrorCode = 3003
+	ErrCodeConnection        ErrorCode = 3000
+	ErrCodeConnectionLost    ErrorCode = 3001
+	ErrCodeTimeout           ErrorCode = 3002
+	ErrCodeProtocolError     ErrorCode = 3003
 	ErrCodeServerUnavailable ErrorCode = 3004
 
 	// Auth errors (4000-4999)
-	ErrCodeAuth             ErrorCode = 4000
-	ErrCodeAuthFailed       ErrorCode = 4001
-	ErrCodePermissionDenied ErrorCode = 4002
-	ErrCodeSessionExpired   ErrorCode = 4003
+	ErrCodeAuth               ErrorCode = 4000
+	ErrCodeAuthFailed         ErrorCode = 4001
+	ErrCodePermissionDenied   ErrorCode = 4002
+	ErrCodeSessionExpired     ErrorCode = 4003
 	ErrCodeInvalidCredentials ErrorCode = 4004
 
 	// Storage errors (5000-5999)
-	ErrCodeStorage          ErrorCode = 5000
-	ErrCodeWALCorrupted     ErrorCode = 5001
-	ErrCodeDiskFull         ErrorCode = 5002
-	ErrCodeIOError          ErrorCode = 5003
+	ErrCodeStorage           ErrorCode = 5000
+	ErrCodeWALCorrupted      ErrorCode = 5001
+	ErrCodeDiskFull          ErrorCode = 5002
+	ErrCodeIOError           ErrorCode = 5003
 	ErrCodeTransactionFailed ErrorCode = 5004
 
 	// Validation errors (6000-6999)
@@ -250,21 +268,115 @@ func NewExecutionError(message string) *FlyDBError {
 
 // TableNotFound creates an error for missing tables.
 func TableNotFound(table string) *FlyDBError {
+	msg := "table not found"
+	if table != "" {
+		msg = fmt.Sprintf("table not found: %s", table)
+	}
 	return &FlyDBError{
 		Code:     ErrCodeTableNotFound,
 		Category: CategoryExecution,
-		Message:  fmt.Sprintf("table not found: %s", table),
-		Hint:     "Use INTROSPECT TABLES to see available tables",
+		Message:  msg,
+		Hint:     "Use INSPECT TABLES to see available tables",
+	}
+}
+
+// TableAlreadyExists creates an error for duplicate tables.
+func TableAlreadyExists(table string) *FlyDBError {
+	msg := "table already exists"
+	if table != "" {
+		msg = fmt.Sprintf("table already exists: %s", table)
+	}
+	return &FlyDBError{
+		Code:     ErrCodeTableAlreadyExists,
+		Category: CategoryExecution,
+		Message:  msg,
 	}
 }
 
 // ColumnNotFound creates an error for missing columns.
 func ColumnNotFound(column, table string) *FlyDBError {
+	msg := "column not found"
+	if column != "" {
+		if table != "" {
+			msg = fmt.Sprintf("column '%s' not found in table '%s'", column, table)
+		} else {
+			msg = fmt.Sprintf("column not found: %s", column)
+		}
+	}
 	return &FlyDBError{
 		Code:     ErrCodeColumnNotFound,
 		Category: CategoryExecution,
-		Message:  fmt.Sprintf("column '%s' not found in table '%s'", column, table),
-		Hint:     fmt.Sprintf("Use INTROSPECT TABLE %s to see available columns", table),
+		Message:  msg,
+	}
+}
+
+// ColumnAlreadyExists creates an error for duplicate columns.
+func ColumnAlreadyExists(column string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeColumnAlreadyExists,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("column already exists: %s", column),
+	}
+}
+
+// ConstraintNotFound creates an error for missing constraints.
+func ConstraintNotFound(constraint string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeConstraintNotFound,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("constraint not found: %s", constraint),
+	}
+}
+
+// ConstraintAlreadyExists creates an error for duplicate constraints.
+func ConstraintAlreadyExists(constraint string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeConstraintAlreadyExists,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("constraint already exists: %s", constraint),
+	}
+}
+
+// IndexNotFound creates an error for missing indexes.
+func IndexNotFound(index, table string) *FlyDBError {
+	msg := "index not found"
+	if index != "" {
+		if table != "" {
+			msg = fmt.Sprintf("index '%s' not found on table '%s'", index, table)
+		} else {
+			msg = fmt.Sprintf("index not found: %s", index)
+		}
+	}
+	return &FlyDBError{
+		Code:     ErrCodeIndexNotFound,
+		Category: CategoryExecution,
+		Message:  msg,
+	}
+}
+
+// IndexAlreadyExists creates an error for duplicate indexes.
+func IndexAlreadyExists(index, table string) *FlyDBError {
+	msg := "index already exists"
+	if index != "" {
+		if table != "" {
+			msg = fmt.Sprintf("index '%s' already exists on table '%s'", index, table)
+		} else {
+			msg = fmt.Sprintf("index already exists: %s", index)
+		}
+	}
+	return &FlyDBError{
+		Code:     ErrCodeIndexAlreadyExists,
+		Category: CategoryExecution,
+		Message:  msg,
+	}
+}
+
+// InternalError creates a generic internal execution error.
+func InternalError(message string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeInternal,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("internal error: %s", message),
 	}
 }
 
@@ -294,6 +406,107 @@ func DuplicateKey(key, table string) *FlyDBError {
 		Category: CategoryExecution,
 		Message:  fmt.Sprintf("duplicate key value violates unique constraint on table '%s'", table),
 		Detail:   fmt.Sprintf("Key: %s", key),
+	}
+}
+
+// ProcedureAlreadyExists creates an error for duplicate procedures.
+func ProcedureAlreadyExists(procedure string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeProcedureAlreadyExists,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("procedure already exists: %s", procedure),
+	}
+}
+
+// ProcedureNotFound creates an error for missing procedures.
+func ProcedureNotFound(procedure string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeProcedureNotFound,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("procedure not found: %s", procedure),
+	}
+}
+
+// ViewAlreadyExists creates an error for duplicate views.
+func ViewAlreadyExists(view string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeViewAlreadyExists,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("view already exists: %s", view),
+	}
+}
+
+// ViewNotFound creates an error for missing views.
+func ViewNotFound(view string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeViewNotFound,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("view not found: %s", view),
+	}
+}
+
+// TriggerAlreadyExists creates an error for duplicate triggers.
+func TriggerAlreadyExists(trigger, table string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeTriggerAlreadyExists,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("trigger '%s' already exists on table '%s'", trigger, table),
+	}
+}
+
+// TriggerNotFound creates an error for missing triggers.
+func TriggerNotFound(trigger, table string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeTriggerNotFound,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("trigger '%s' not found on table '%s'", trigger, table),
+	}
+}
+
+// PreparedStatementAlreadyExists creates an error for duplicate prepared statements.
+func PreparedStatementAlreadyExists(name string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodePreparedStatementExists,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("prepared statement '%s' already exists", name),
+	}
+}
+
+// PreparedStatementNotFound creates an error for missing prepared statements.
+func PreparedStatementNotFound(name string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodePreparedStatementNotFound,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("prepared statement '%s' not found", name),
+	}
+}
+
+// InvalidJSON creates an error for invalid JSON documents.
+func InvalidJSON(detail string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeInvalidJSON,
+		Category: CategoryExecution,
+		Message:  "invalid JSON",
+		Detail:   detail,
+	}
+}
+
+// JSONPathError creates an error for JSON path navigation failures.
+func JSONPathError(detail string) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeJSONPathError,
+		Category: CategoryExecution,
+		Message:  "JSON path error",
+		Detail:   detail,
+	}
+}
+
+// ParameterMismatch creates an error for parameter count mismatches.
+func ParameterMismatch(expected, got int) *FlyDBError {
+	return &FlyDBError{
+		Code:     ErrCodeParameterMismatch,
+		Category: CategoryExecution,
+		Message:  fmt.Sprintf("parameter count mismatch: expected %d, got %d", expected, got),
 	}
 }
 
@@ -354,13 +567,16 @@ func AuthenticationFailed() *FlyDBError {
 	}
 }
 
-// PermissionDenied creates an error for permission denied.
+// PermissionDenied creates an error for unauthorized access.
 func PermissionDenied(resource string) *FlyDBError {
+	msg := "permission denied"
+	if resource != "" {
+		msg = fmt.Sprintf("permission denied: %s", resource)
+	}
 	return &FlyDBError{
 		Code:     ErrCodePermissionDenied,
 		Category: CategoryAuth,
-		Message:  "permission denied",
-		Detail:   fmt.Sprintf("Access to '%s' is not allowed", resource),
+		Message:  msg,
 		Hint:     "Contact your administrator to request access",
 	}
 }
@@ -646,4 +862,3 @@ func FormatErrorWithSQLSTATE(err error) string {
 	}
 	return fmt.Sprintf("[%s] ERROR: %v", SQLStateCLIError, err)
 }
-

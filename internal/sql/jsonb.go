@@ -50,9 +50,10 @@ package sql
 
 import (
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
+
+	ferrors "flydb/internal/errors"
 )
 
 // JSONExtract extracts a value from a JSON document at the given path.
@@ -65,7 +66,7 @@ func JSONExtract(jsonStr string, path string) (string, error) {
 
 	var data interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-		return "", fmt.Errorf("invalid JSON: %v", err)
+		return "", ferrors.InvalidJSON(err.Error())
 	}
 
 	// Parse and navigate the path
@@ -119,10 +120,10 @@ func JSONContains(left, right string) (bool, error) {
 
 	var leftData, rightData interface{}
 	if err := json.Unmarshal([]byte(left), &leftData); err != nil {
-		return false, fmt.Errorf("invalid left JSON: %v", err)
+		return false, ferrors.InvalidJSON("invalid left JSON: " + err.Error())
 	}
 	if err := json.Unmarshal([]byte(right), &rightData); err != nil {
-		return false, fmt.Errorf("invalid right JSON: %v", err)
+		return false, ferrors.InvalidJSON("invalid right JSON: " + err.Error())
 	}
 
 	return containsJSON(leftData, rightData), nil
@@ -195,7 +196,7 @@ func JSONArrayLength(jsonStr string) (int, error) {
 
 	var arr []interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &arr); err != nil {
-		return 0, fmt.Errorf("not a JSON array")
+		return 0, ferrors.InvalidJSON("not a JSON array")
 	}
 
 	return len(arr), nil
@@ -209,7 +210,7 @@ func JSONKeys(jsonStr string) (string, error) {
 
 	var data map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-		return "", fmt.Errorf("not a JSON object")
+		return "", ferrors.InvalidJSON("not a JSON object")
 	}
 
 	keys := make([]string, 0, len(data))
@@ -266,7 +267,7 @@ func JSONSet(jsonStr, path string, value interface{}) (string, error) {
 
 	var data interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-		return "", fmt.Errorf("invalid JSON: %v", err)
+		return "", ferrors.InvalidJSON(err.Error())
 	}
 
 	result, err := setPath(data, path, value)
@@ -289,7 +290,7 @@ func JSONRemove(jsonStr, path string) (string, error) {
 
 	var data interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-		return "", fmt.Errorf("invalid JSON: %v", err)
+		return "", ferrors.InvalidJSON(err.Error())
 	}
 
 	result, err := removePath(data, path)
@@ -315,10 +316,10 @@ func JSONMerge(json1, json2 string) (string, error) {
 
 	var data1, data2 map[string]interface{}
 	if err := json.Unmarshal([]byte(json1), &data1); err != nil {
-		return "", fmt.Errorf("first argument is not a JSON object")
+		return "", ferrors.InvalidJSON("first argument is not a JSON object")
 	}
 	if err := json.Unmarshal([]byte(json2), &data2); err != nil {
-		return "", fmt.Errorf("second argument is not a JSON object")
+		return "", ferrors.InvalidJSON("second argument is not a JSON object")
 	}
 
 	// Merge data2 into data1
@@ -341,7 +342,7 @@ func JSONArrayAppend(jsonStr string, value interface{}) (string, error) {
 
 	var arr []interface{}
 	if err := json.Unmarshal([]byte(jsonStr), &arr); err != nil {
-		return "", fmt.Errorf("not a JSON array")
+		return "", ferrors.InvalidJSON("not a JSON array")
 	}
 
 	arr = append(arr, value)
@@ -356,7 +357,7 @@ func JSONArrayAppend(jsonStr string, value interface{}) (string, error) {
 // JSONObject creates a JSON object from key-value pairs.
 func JSONObject(pairs ...string) (string, error) {
 	if len(pairs)%2 != 0 {
-		return "", fmt.Errorf("odd number of arguments")
+		return "", ferrors.NewExecutionError("json_object requires an even number of arguments")
 	}
 
 	data := make(map[string]interface{})
@@ -400,7 +401,6 @@ func JSONArray(values ...string) (string, error) {
 	return string(result), nil
 }
 
-
 // navigatePath navigates a JSON structure using a path expression.
 // Path syntax: $.key.subkey[0].field or key.subkey[0].field
 func navigatePath(data interface{}, path string) (interface{}, error) {
@@ -425,7 +425,7 @@ func navigatePath(data interface{}, path string) (interface{}, error) {
 			indexStr := part[1 : len(part)-1]
 			index, err := strconv.Atoi(indexStr)
 			if err != nil {
-				return nil, fmt.Errorf("invalid array index: %s", indexStr)
+				return nil, ferrors.JSONPathError("invalid array index: " + indexStr)
 			}
 
 			arr, ok := current.([]interface{})
@@ -565,7 +565,7 @@ func setPathRecursive(data interface{}, parts []string, value interface{}) (inte
 		indexStr := part[1 : len(part)-1]
 		index, err := strconv.Atoi(indexStr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid array index: %s", indexStr)
+			return nil, ferrors.JSONPathError("invalid array index: " + indexStr)
 		}
 
 		arr, ok := data.([]interface{})
@@ -635,7 +635,7 @@ func removePathRecursive(data interface{}, parts []string) (interface{}, error) 
 		indexStr := part[1 : len(part)-1]
 		index, err := strconv.Atoi(indexStr)
 		if err != nil {
-			return nil, fmt.Errorf("invalid array index: %s", indexStr)
+			return nil, ferrors.JSONPathError("invalid array index: " + indexStr)
 		}
 
 		arr, ok := data.([]interface{})

@@ -42,11 +42,12 @@ package sql
 import (
 	"encoding/base64"
 	"encoding/json"
-	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	ferrors "flydb/internal/errors"
 )
 
 // ColumnType represents the supported column types in FlyDB.
@@ -99,7 +100,7 @@ var decimalRegex = regexp.MustCompile(`^-?\d+(\.\d+)?$`)
 // ValidColumnTypes is the set of all valid column type names.
 var ValidColumnTypes = map[string]ColumnType{
 	"INT":       TypeINT,
-	"INTEGER":   TypeINT,   // Alias for INT
+	"INTEGER":   TypeINT, // Alias for INT
 	"BIGINT":    TypeBIGINT,
 	"SMALLINT":  TypeSMALLINT,
 	"TINYINT":   TypeSMALLINT, // Alias for SMALLINT
@@ -154,43 +155,43 @@ func ValidateValue(typeName string, value string) error {
 	case TypeINT:
 		_, err := strconv.ParseInt(value, 10, 32)
 		if err != nil {
-			return fmt.Errorf("invalid INT value: %s", value)
+			return ferrors.TypeMismatch("INT", value, "")
 		}
 
 	case TypeSMALLINT:
 		_, err := strconv.ParseInt(value, 10, 16)
 		if err != nil {
-			return fmt.Errorf("invalid SMALLINT value: %s", value)
+			return ferrors.TypeMismatch("SMALLINT", value, "")
 		}
 
 	case TypeBIGINT:
 		_, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
-			return fmt.Errorf("invalid BIGINT value: %s", value)
+			return ferrors.TypeMismatch("BIGINT", value, "")
 		}
 
 	case TypeSERIAL:
 		// SERIAL is auto-incrementing, but if a value is provided it must be a positive integer
 		v, err := strconv.ParseInt(value, 10, 64)
 		if err != nil || v < 0 {
-			return fmt.Errorf("invalid SERIAL value: %s (must be a positive integer)", value)
+			return ferrors.TypeMismatch("SERIAL", value, "").WithDetail("must be a positive integer")
 		}
 
 	case TypeFLOAT, TypeDOUBLE, TypeREAL:
 		_, err := strconv.ParseFloat(value, 64)
 		if err != nil {
-			return fmt.Errorf("invalid %s value: %s", colType, value)
+			return ferrors.TypeMismatch(string(colType), value, "")
 		}
 
 	case TypeDECIMAL:
 		if !decimalRegex.MatchString(value) {
-			return fmt.Errorf("invalid DECIMAL value: %s", value)
+			return ferrors.TypeMismatch("DECIMAL", value, "")
 		}
 
 	case TypeBOOLEAN:
 		upper := strings.ToUpper(value)
 		if upper != "TRUE" && upper != "FALSE" && upper != "1" && upper != "0" {
-			return fmt.Errorf("invalid BOOLEAN value: %s (use TRUE/FALSE)", value)
+			return ferrors.TypeMismatch("BOOLEAN", value, "").WithDetail("use TRUE/FALSE")
 		}
 
 	case TypeTIMESTAMP, TypeDATETIME:
@@ -199,43 +200,43 @@ func ValidateValue(typeName string, value string) error {
 			// Also try common formats
 			_, err = time.Parse("2006-01-02 15:04:05", value)
 			if err != nil {
-				return fmt.Errorf("invalid TIMESTAMP value: %s (use RFC3339 or YYYY-MM-DD HH:MM:SS)", value)
+				return ferrors.TypeMismatch("TIMESTAMP", value, "").WithDetail("use RFC3339 or YYYY-MM-DD HH:MM:SS")
 			}
 		}
 
 	case TypeDATE:
 		if !dateRegex.MatchString(value) {
-			return fmt.Errorf("invalid DATE value: %s (use YYYY-MM-DD)", value)
+			return ferrors.TypeMismatch("DATE", value, "").WithDetail("use YYYY-MM-DD")
 		}
 		_, err := time.Parse("2006-01-02", value)
 		if err != nil {
-			return fmt.Errorf("invalid DATE value: %s", value)
+			return ferrors.TypeMismatch("DATE", value, "")
 		}
 
 	case TypeTIME:
 		if !timeRegex.MatchString(value) {
-			return fmt.Errorf("invalid TIME value: %s (use HH:MM:SS)", value)
+			return ferrors.TypeMismatch("TIME", value, "").WithDetail("use HH:MM:SS")
 		}
 		_, err := time.Parse("15:04:05", value)
 		if err != nil {
-			return fmt.Errorf("invalid TIME value: %s", value)
+			return ferrors.TypeMismatch("TIME", value, "")
 		}
 
 	case TypeUUID:
 		if !uuidRegex.MatchString(value) {
-			return fmt.Errorf("invalid UUID value: %s", value)
+			return ferrors.TypeMismatch("UUID", value, "")
 		}
 
 	case TypeBLOB, TypeBYTEA, TypeBINARY, TypeVARBINARY:
 		// BLOB/BYTEA/BINARY values should be base64 encoded
 		_, err := base64.StdEncoding.DecodeString(value)
 		if err != nil {
-			return fmt.Errorf("invalid %s value: must be base64 encoded", colType)
+			return ferrors.TypeMismatch(string(colType), value, "").WithDetail("must be base64 encoded")
 		}
 
 	case TypeJSONB:
 		if !json.Valid([]byte(value)) {
-			return fmt.Errorf("invalid JSONB value: not valid JSON")
+			return ferrors.TypeMismatch("JSONB", value, "").WithDetail("not valid JSON")
 		}
 
 	case TypeTEXT, TypeVARCHAR, TypeCHAR, TypeCLOB, TypeNCHAR, TypeNVARCHAR, TypeNTEXT:
@@ -249,20 +250,20 @@ func ValidateValue(typeName string, value string) error {
 		cleanValue = strings.TrimPrefix(cleanValue, "£")
 		cleanValue = strings.ReplaceAll(cleanValue, ",", "")
 		if !decimalRegex.MatchString(cleanValue) {
-			return fmt.Errorf("invalid MONEY value: %s", value)
+			return ferrors.TypeMismatch("MONEY", value, "")
 		}
 
 	case TypeINTERVAL:
 		// INTERVAL accepts various interval formats (simplified validation)
 		// Examples: '1 day', '2 hours', '3 months', 'P1D' (ISO 8601)
 		if value == "" {
-			return fmt.Errorf("invalid INTERVAL value: empty string")
+			return ferrors.TypeMismatch("INTERVAL", value, "").WithDetail("empty string")
 		}
 		// Accept any non-empty string for now (full interval parsing is complex)
 		return nil
 
 	default:
-		return fmt.Errorf("unknown column type: %s", typeName)
+		return ferrors.NewExecutionError("unknown column type: " + typeName)
 	}
 
 	return nil
@@ -287,14 +288,14 @@ func NormalizeValue(typeName string, value string) (string, error) {
 		if upper == "FALSE" || upper == "0" {
 			return "false", nil
 		}
-		return "", fmt.Errorf("invalid BOOLEAN value: %s", value)
+		return "", ferrors.TypeMismatch("BOOLEAN", value, "")
 
 	case TypeTIMESTAMP, TypeDATETIME:
 		t, err := time.Parse(time.RFC3339, value)
 		if err != nil {
 			t, err = time.Parse("2006-01-02 15:04:05", value)
 			if err != nil {
-				return "", fmt.Errorf("invalid TIMESTAMP value: %s", value)
+				return "", ferrors.TypeMismatch("TIMESTAMP", value, "")
 			}
 		}
 		return t.Format(time.RFC3339), nil
@@ -302,14 +303,14 @@ func NormalizeValue(typeName string, value string) (string, error) {
 	case TypeDATE:
 		t, err := time.Parse("2006-01-02", value)
 		if err != nil {
-			return "", fmt.Errorf("invalid DATE value: %s", value)
+			return "", ferrors.TypeMismatch("DATE", value, "")
 		}
 		return t.Format("2006-01-02"), nil
 
 	case TypeTIME:
 		t, err := time.Parse("15:04:05", value)
 		if err != nil {
-			return "", fmt.Errorf("invalid TIME value: %s", value)
+			return "", ferrors.TypeMismatch("TIME", value, "")
 		}
 		return t.Format("15:04:05"), nil
 
@@ -321,7 +322,7 @@ func NormalizeValue(typeName string, value string) (string, error) {
 		// Compact the JSON
 		var v interface{}
 		if err := json.Unmarshal([]byte(value), &v); err != nil {
-			return "", fmt.Errorf("invalid JSONB value: %s", value)
+			return "", ferrors.TypeMismatch("JSONB", value, "")
 		}
 		compact, err := json.Marshal(v)
 		if err != nil {
@@ -399,4 +400,3 @@ func CompareValues(typeName string, a, b string) int {
 		return 0
 	}
 }
-

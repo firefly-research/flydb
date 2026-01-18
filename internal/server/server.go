@@ -28,28 +28,28 @@ efficiently.
 Connection Lifecycle:
 =====================
 
-  1. Client connects via TCP to the binary protocol port
-  2. Server spawns a goroutine to handle the connection
-  3. Client authenticates using the binary protocol
-  4. Client sends binary-framed messages (queries, prepared statements, etc.)
-  5. Server processes messages and sends binary-framed responses
-  6. Connection closes when client disconnects or errors occur
+ 1. Client connects via TCP to the binary protocol port
+ 2. Server spawns a goroutine to handle the connection
+ 3. Client authenticates using the binary protocol
+ 4. Client sends binary-framed messages (queries, prepared statements, etc.)
+ 5. Server processes messages and sends binary-framed responses
+ 6. Connection closes when client disconnects or errors occur
 
 Protocol:
 =========
 
 FlyDB uses a binary wire protocol with the following frame format:
 
-  ┌───────────┬─────────┬──────────┬───────────┬────────────┬─────────────────┐
-  │ Magic (1) │ Ver (1) │ Type (1) │ Flags (1) │ Length (4) │ Payload (var)   │
-  └───────────┴─────────┴──────────┴───────────┴────────────┴─────────────────┘
+	┌───────────┬─────────┬──────────┬───────────┬────────────┬─────────────────┐
+	│ Magic (1) │ Ver (1) │ Type (1) │ Flags (1) │ Length (4) │ Payload (var)   │
+	└───────────┴─────────┴──────────┴───────────┴────────────┴─────────────────┘
 
-  - Magic: 0xFD (identifies FlyDB protocol)
-  - Version: Protocol version (currently 0x01)
-  - Type: Message type (Query, Auth, Prepare, Execute, etc.)
-  - Flags: Reserved for compression/encryption
-  - Length: Payload length in bytes (max 16 MB)
-  - Payload: JSON-encoded message data
+	- Magic: 0xFD (identifies FlyDB protocol)
+	- Version: Protocol version (currently 0x01)
+	- Type: Message type (Query, Auth, Prepare, Execute, etc.)
+	- Flags: Reserved for compression/encryption
+	- Length: Payload length in bytes (max 16 MB)
+	- Payload: JSON-encoded message data
 
 Thread Safety:
 ==============
@@ -388,13 +388,13 @@ type serverQueryExecutor struct {
 }
 
 // Execute executes a query using the default database.
-func (e *serverQueryExecutor) Execute(query string) (string, error) {
-	return e.ExecuteInDatabase(query, "")
+func (e *serverQueryExecutor) Execute(query string, user string) (string, error) {
+	return e.ExecuteInDatabase(query, "", user)
 }
 
 // ExecuteInDatabase executes a query in the context of a specific database.
 // If database is empty, the default database is used.
-func (e *serverQueryExecutor) ExecuteInDatabase(query, database string) (string, error) {
+func (e *serverQueryExecutor) ExecuteInDatabase(query, database string, user string) (string, error) {
 	lexer := sql.NewLexer(query)
 	parser := sql.NewParser(lexer)
 	stmt, err := parser.Parse()
@@ -430,7 +430,13 @@ func (e *serverQueryExecutor) ExecuteInDatabase(query, database string) (string,
 
 	// Get the executor for the specified database
 	executor := e.getExecutorForDatabase(database)
-	return executor.Execute(stmt)
+
+	// Thread-safe: sql.Executor.Execute now handles user context if modified,
+	// but wait, sql.Executor.Execute doesn't take a user parameter yet.
+	// We need to set it on a cloned or thread-safe way.
+	// For now, let's use a mutex or a new approach.
+	// Actually, the best way is to pass user to executor.Execute.
+	return executor.ExecuteWithUser(stmt, user)
 }
 
 // getExecutorForDatabase returns the executor for the specified database.

@@ -1254,6 +1254,7 @@ func startREPL(config CLIConfig) {
 
 		addr = haClient.CurrentHost()
 		client = haClient.BinaryClient
+		isHAMode = true // Always use HAClient logic if it was created successfully
 
 		protocol := "tcp"
 		if config.UseTLS {
@@ -1265,6 +1266,9 @@ func startREPL(config CLIConfig) {
 	} else {
 		// Single host mode: use direct connection
 		addr = config.Hosts[0]
+
+		// Still create a haClient for internal use (caching credentials)
+		haClient = NewHAClient(config.Hosts, config.TargetPrimary, config.UseTLS, config.TLSInsecure, config.TLSCA, config.TLSCert, config.TLSKey)
 
 		// Show connection spinner
 		var spinner *cli.Spinner
@@ -1283,6 +1287,8 @@ func startREPL(config CLIConfig) {
 			}
 			cli.ErrConnectionFailed(config.Host, config.Port, err).Exit()
 		}
+		haClient.BinaryClient = client // Link to HAClient for credential management
+		haClient.currentHostIdx = 0    // Only one host in this mode
 
 		protocol := "tcp"
 		if config.UseTLS {
@@ -1513,6 +1519,12 @@ func startREPL(config CLIConfig) {
 					client = haClient.BinaryClient
 					addr = haClient.CurrentHost()
 					spinner.StopWithSuccess(fmt.Sprintf("Reconnected to %s", addr))
+
+					// Sync replState with the re-authenticated state if HAClient handled it
+					if haClient.lastAuth {
+						replState.Authenticated = true
+						replState.Username = haClient.authUsername
+					}
 				} else {
 					// Single host mode: retry the same address
 					newClient, reconnErr := connectWithRetry(addr, config.UseTLS, config.TLSInsecure, config.TLSCA, config.TLSCert, config.TLSKey)
@@ -1522,7 +1534,18 @@ func startREPL(config CLIConfig) {
 						os.Exit(1)
 					}
 					client = newClient
+					haClient.BinaryClient = client // Re-link
 					spinner.StopWithSuccess("Reconnected successfully!")
+
+					// Re-authenticate if we have cached credentials
+					if haClient.lastAuth && haClient.authUsername != "" {
+						_, err := haClient.Auth(haClient.authUsername, haClient.authPassword)
+						if err == nil {
+							cli.PrintSuccess("Re-authenticated successfully")
+							replState.Authenticated = true
+							replState.Username = haClient.authUsername
+						}
+					}
 				}
 
 				// Retry the command
@@ -1873,12 +1896,23 @@ func isConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
-	errStr := err.Error()
-	return strings.Contains(errStr, "connection") ||
-		strings.Contains(errStr, "EOF") ||
+	errStr := strings.ToLower(err.Error())
+
+	// If it contains "eof", it might be a SQL syntax error like "expected (, found EOF".
+	// We should only consider it a connection error if it's strictly "eof" or "io: read/write on closed pipe" etc.
+	// SQL errors usually have a structured format or are longer.
+	if strings.Contains(errStr, "syntax error") || strings.Contains(errStr, "execution error") {
+		return false
+	}
+
+	// Common Go net package error strings:
+	return (errStr == "eof") ||
 		strings.Contains(errStr, "broken pipe") ||
 		strings.Contains(errStr, "reset by peer") ||
-		strings.Contains(errStr, "timeout")
+		strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "network is unreachable")
 }
 
 // processCommand handles a user command and returns the response.

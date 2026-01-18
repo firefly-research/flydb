@@ -27,16 +27,17 @@ UPDATE, or DELETE operations on tables.
 Trigger Execution Flow:
 =======================
 
-  1. A DML operation (INSERT, UPDATE, DELETE) is initiated
-  2. BEFORE triggers are executed (if any)
-  3. The DML operation is performed
-  4. AFTER triggers are executed (if any)
+ 1. A DML operation (INSERT, UPDATE, DELETE) is initiated
+ 2. BEFORE triggers are executed (if any)
+ 3. The DML operation is performed
+ 4. AFTER triggers are executed (if any)
 
 Trigger Storage:
 ================
 
 Triggers are stored in the KVStore with the key format:
-  trigger:<table>:<name> → Trigger JSON
+
+	trigger:<table>:<name> → Trigger JSON
 
 This allows efficient lookup of all triggers for a specific table.
 
@@ -55,6 +56,8 @@ import (
 	"flydb/internal/storage"
 	"fmt"
 	"sync"
+
+	ferrors "flydb/internal/errors"
 )
 
 const triggerKeyPrefix = "trigger:"
@@ -117,19 +120,19 @@ func (tm *TriggerManager) CreateTrigger(trigger *Trigger) error {
 	// Check if trigger already exists
 	if tm.triggers[trigger.TableName] != nil {
 		if _, exists := tm.triggers[trigger.TableName][trigger.Name]; exists {
-			return fmt.Errorf("trigger %s already exists on table %s", trigger.Name, trigger.TableName)
+			return ferrors.TriggerAlreadyExists(trigger.Name, trigger.TableName)
 		}
 	}
 
 	// Serialize and store the trigger
 	data, err := json.Marshal(trigger)
 	if err != nil {
-		return fmt.Errorf("failed to serialize trigger: %v", err)
+		return ferrors.InternalError("failed to serialize trigger").WithCause(err)
 	}
 
 	key := triggerKeyPrefix + trigger.TableName + ":" + trigger.Name
 	if err := tm.store.Put(key, data); err != nil {
-		return fmt.Errorf("failed to store trigger: %v", err)
+		return ferrors.NewStorageError("failed to store trigger").WithCause(err)
 	}
 
 	// Add to in-memory cache
@@ -149,16 +152,16 @@ func (tm *TriggerManager) DropTrigger(tableName, triggerName string) error {
 
 	// Check if trigger exists
 	if tm.triggers[tableName] == nil {
-		return fmt.Errorf("trigger %s does not exist on table %s", triggerName, tableName)
+		return ferrors.TriggerNotFound(triggerName, tableName)
 	}
 	if _, exists := tm.triggers[tableName][triggerName]; !exists {
-		return fmt.Errorf("trigger %s does not exist on table %s", triggerName, tableName)
+		return ferrors.TriggerNotFound(triggerName, tableName)
 	}
 
 	// Remove from storage
 	key := triggerKeyPrefix + tableName + ":" + triggerName
 	if err := tm.store.Delete(key); err != nil {
-		return fmt.Errorf("failed to delete trigger: %v", err)
+		return ferrors.NewStorageError("failed to delete trigger").WithCause(err)
 	}
 
 	// Remove from in-memory cache
@@ -233,7 +236,7 @@ func (tm *TriggerManager) DropAllTriggersForTable(tableName string) error {
 	for triggerName := range tm.triggers[tableName] {
 		key := triggerKeyPrefix + tableName + ":" + triggerName
 		if err := tm.store.Delete(key); err != nil {
-			errs = append(errs, fmt.Errorf("failed to delete trigger %s: %v", triggerName, err))
+			errs = append(errs, ferrors.NewStorageError(fmt.Sprintf("failed to delete trigger %s", triggerName)).WithCause(err))
 		}
 	}
 
@@ -244,4 +247,3 @@ func (tm *TriggerManager) DropAllTriggersForTable(tableName string) error {
 	}
 	return nil
 }
-

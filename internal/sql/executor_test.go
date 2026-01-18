@@ -700,7 +700,6 @@ func TestExecutorGroupByWithHaving(t *testing.T) {
 	}
 }
 
-
 // ============================================================================
 // Constraint Tests
 // ============================================================================
@@ -738,8 +737,8 @@ func TestPrimaryKeyConstraint(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for duplicate primary key, got none")
 	}
-	if err != nil && !strings.Contains(err.Error(), "duplicate primary key value") {
-		t.Errorf("Expected 'duplicate primary key value' error, got: %v", err)
+	if err != nil && !strings.Contains(err.Error(), "violates unique constraint") {
+		t.Errorf("Expected 'violates unique constraint' error, got: %v", err)
 	}
 
 	// Insert with different primary key - should succeed
@@ -832,8 +831,8 @@ func TestUniqueConstraint(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for duplicate unique value, got none")
 	}
-	if err != nil && !strings.Contains(err.Error(), "duplicate value for unique column") {
-		t.Errorf("Expected 'duplicate value for unique column' error, got: %v", err)
+	if err != nil && !strings.Contains(err.Error(), "violates unique constraint") {
+		t.Errorf("Expected 'violates unique constraint' error, got: %v", err)
 	}
 
 	// Insert with different email - should succeed
@@ -903,8 +902,8 @@ func TestForeignKeyConstraint(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for invalid foreign key, got none")
 	}
-	if err != nil && !strings.Contains(err.Error(), "foreign key constraint violation") {
-		t.Errorf("Expected 'foreign key constraint violation' error, got: %v", err)
+	if err != nil && !strings.Contains(err.Error(), "constraint violation: FOREIGN KEY") {
+		t.Errorf("Expected 'constraint violation: FOREIGN KEY' error, got: %v", err)
 	}
 }
 
@@ -973,8 +972,8 @@ func TestForeignKeyUpdateValidation(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for invalid foreign key on UPDATE, got none")
 	}
-	if err != nil && !strings.Contains(err.Error(), "foreign key constraint violation") {
-		t.Errorf("Expected 'foreign key constraint violation' error, got: %v", err)
+	if err != nil && !strings.Contains(err.Error(), "constraint violation: FOREIGN KEY") {
+		t.Errorf("Expected 'constraint violation: FOREIGN KEY' error, got: %v", err)
 	}
 }
 
@@ -1034,8 +1033,8 @@ func TestTableLevelForeignKeyConstraint(t *testing.T) {
 	if err == nil {
 		t.Error("Expected error for invalid table-level foreign key, got none")
 	}
-	if err != nil && !strings.Contains(err.Error(), "foreign key constraint violation") {
-		t.Errorf("Expected 'foreign key constraint violation' error, got: %v", err)
+	if err != nil && !strings.Contains(err.Error(), "constraint violation: FOREIGN KEY") {
+		t.Errorf("Expected 'constraint violation: FOREIGN KEY' error, got: %v", err)
 	}
 
 	// Try to delete department with dependent employee - should fail (default RESTRICT)

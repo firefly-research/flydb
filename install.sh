@@ -3678,8 +3678,8 @@ print_post_install() {
         in_path=true
     fi
 
-    # Installation Summary
-    echo -e "${BOLD}Installation Summary:${RESET}"
+    # 1. Installation Summary
+    echo -e "${BOLD}1. Installation Summary:${RESET}"
     separator 70
     print_kv "Version" "${FLYDB_VERSION}"
     print_kv "Installation Path" "${bin_dir}"
@@ -3690,14 +3690,58 @@ print_post_install() {
     print_kv "Server Role" "${SERVER_ROLE}"
     echo ""
 
-    # Quick Start Section
-    echo -e "${BOLD}Quick Start:${RESET}"
+    # 2. Encryption Passphrase (if enabled and auto-generated) - CRITICAL
+    if [[ "$ENCRYPTION_ENABLED" == "true" ]] && [[ -n "$ENCRYPTION_PASSPHRASE" ]]; then
+        echo -e "  ${RED}${BOLD}⚠  2. IMPORTANT: SAVE YOUR ENCRYPTION PASSPHRASE${RESET}"
+        separator 70
+        echo ""
+        echo -e "    ${YELLOW}Your auto-generated encryption passphrase:${RESET}"
+        echo ""
+        echo -e "    ${CYAN}${BOLD}${ENCRYPTION_PASSPHRASE}${RESET}"
+        echo ""
+        echo -e "    ${RED}${BOLD}⚠  This passphrase is NOT stored in the configuration file!${RESET}"
+        echo -e "    ${DIM}For security reasons, you must provide it via environment variable.${RESET}"
+        echo ""
+        echo -e "    ${BOLD}To start FlyDB with encryption:${RESET}"
+        echo ""
+        echo -e "    ${GREEN}export FLYDB_ENCRYPTION_PASSPHRASE=\"${ENCRYPTION_PASSPHRASE}\"${RESET}"
+        if [[ "$in_path" == true ]]; then
+            echo -e "    ${GREEN}flydb --config ${config_dir}/flydb.json${RESET}"
+        else
+            echo -e "    ${GREEN}${bin_dir}/flydb --config ${config_dir}/flydb.json${RESET}"
+        fi
+        echo ""
+        echo -e "    ${YELLOW}${BOLD}Save this passphrase in a secure location (password manager, vault, etc.)${RESET}"
+        echo -e "    ${YELLOW}${BOLD}Without it, you will NOT be able to access your encrypted data!${RESET}"
+        echo ""
+    fi
+
+    # 3. TLS Security Details
+    if [[ "$TLS_ENABLED" == "true" ]]; then
+        echo -e "  ${BOLD}3. TLS Security Details:${RESET}"
+        separator 70
+        echo ""
+        echo -e "    ${GREEN}✓${RESET} TLS encryption is enabled for all client connections"
+        if [[ "$TLS_AUTO_GEN" == "true" ]]; then
+            echo -e "    ${YELLOW}ℹ${RESET} Certificates are auto-generated and self-signed"
+            echo -e "    ${DIM}Cert Location: ${config_dir}/certs/${RESET}"
+            echo -e "    ${DIM}To use these certs with other clients, download the CA certificate.${RESET}"
+        else
+            echo -e "    ${BLUE}ℹ${RESET} Using custom certificates from:"
+            echo -e "    ${DIM}• Cert: ${TLS_CERT_FILE}${RESET}"
+            echo -e "    ${DIM}• Key:  ${TLS_KEY_FILE}${RESET}"
+        fi
+        echo ""
+    fi
+
+    # 4. Quick Start
+    echo -e "${BOLD}4. Quick Start Guide:${RESET}"
     separator 70
     echo ""
 
-    # Show how to start the daemon
+    # 4a. Start FlyDB
     if [[ "$SERVER_ROLE" == "standalone" ]]; then
-        echo -e "  ${BOLD}Start FlyDB daemon (standalone mode):${RESET}"
+        echo -e "  ${BOLD}Step A: Start FlyDB daemon (standalone mode):${RESET}"
         echo ""
         if [[ "$CREATE_CONFIG" == true ]]; then
             echo -e "    ${CYAN}# Using configuration file:${RESET}"
@@ -3716,7 +3760,7 @@ print_post_install() {
         fi
     else
         # Cluster mode
-        echo -e "  ${BOLD}Start FlyDB daemon (cluster mode):${RESET}"
+        echo -e "  ${BOLD}Step A: Start FlyDB daemon (cluster mode):${RESET}"
         echo ""
         if [[ "$CLUSTER_BOOTSTRAP" == "true" ]] || [[ -z "$CLUSTER_PEERS" ]]; then
             echo -e "    ${CYAN}# Bootstrap first node (becomes leader):${RESET}"
@@ -3736,14 +3780,13 @@ print_post_install() {
     fi
     echo ""
 
-    # Service Management (if installed)
+    # 4b. Service Management
     if [[ "$INSTALL_SERVICE" == true ]]; then
-        echo -e "  ${BOLD}Or use systemd service:${RESET}"
+        echo -e "  ${BOLD}Step B: (Optional) Run as a background service:${RESET}"
         echo ""
         if [[ "$INIT_SYSTEM" == "systemd" ]]; then
             echo -e "    ${CYAN}sudo systemctl start flydb${RESET}     # Start the service"
             echo -e "    ${CYAN}sudo systemctl enable flydb${RESET}    # Enable at boot"
-            echo -e "    ${CYAN}sudo systemctl status flydb${RESET}    # Check status"
             echo -e "    ${CYAN}sudo journalctl -u flydb -f${RESET}    # View logs"
         elif [[ "$INIT_SYSTEM" == "launchd" ]]; then
             if [[ $EUID -eq 0 ]]; then
@@ -3759,8 +3802,8 @@ print_post_install() {
         echo ""
     fi
 
-    # Connect with SQL shell
-    echo -e "  ${BOLD}Connect with SQL shell:${RESET}"
+    # 4c. Connect
+    echo -e "  ${BOLD}Step C: Connect with SQL shell:${RESET}"
     echo ""
     local fsql_cmd="fsql"
     if [[ "$in_path" != true ]]; then
@@ -3769,10 +3812,10 @@ print_post_install() {
 
     if [[ "$TLS_ENABLED" == "true" ]]; then
         if [[ "$TLS_AUTO_GEN" == "true" ]]; then
-            echo -e "    ${CYAN}# Option 1: Securely using the auto-generated CA certificate (recommended)${RESET}"
+            echo -e "    ${CYAN}# Securely using the auto-generated CA certificate (recommended):${RESET}"
             echo -e "    ${GREEN}${fsql_cmd} --tls-ca ${config_dir}/certs/server.crt${RESET}"
             echo ""
-            echo -e "    ${CYAN}# Option 2: Skip verification (easier for development)${RESET}"
+            echo -e "    ${CYAN}# Or skip verification for local development:${RESET}"
             echo -e "    ${GREEN}${fsql_cmd} --tls-insecure${RESET}"
         else
             echo -e "    ${GREEN}${fsql_cmd}${RESET}"
@@ -3781,36 +3824,17 @@ print_post_install() {
         echo -e "    ${GREEN}${fsql_cmd} --no-tls${RESET}         ${DIM}(TLS is disabled on server)${RESET}"
     fi
     echo ""
-    echo -e "  ${CYAN}# Note: You will need to authenticate after connecting:${RESET}"
-    echo -e "  ${CYAN}# AUTH admin <password>${RESET}"
+    echo -e "    ${YELLOW}Note: Authentication is required after connecting:${RESET}"
+    echo -e "    ${CYAN}flydb:default> AUTH admin <password>${RESET}"
     echo ""
 
-    # TLS Section (if enabled)
-    if [[ "$TLS_ENABLED" == "true" ]]; then
-        echo -e "  ${BOLD}TLS Security Details:${RESET}"
-        separator 70
-        echo ""
-        echo -e "    ${GREEN}✓${RESET} TLS encryption is enabled for all client connections"
-        if [[ "$TLS_AUTO_GEN" == "true" ]]; then
-            echo -e "    ${YELLOW}ℹ${RESET} Certificates are auto-generated and self-signed"
-            echo -e "    ${DIM}Cert Location: ${config_dir}/certs/${RESET}"
-            echo -e "    ${DIM}To use these certs with other clients, download the CA certificate.${RESET}"
-        else
-            echo -e "    ${BLUE}ℹ${RESET} Using custom certificates from:"
-            echo -e "    ${DIM}• Cert: ${TLS_CERT_FILE}${RESET}"
-            echo -e "    ${DIM}• Key:  ${TLS_KEY_FILE}${RESET}"
-        fi
-        echo ""
-    fi
-
-    # Cluster-specific instructions
+    # 5. Cluster Setup (if applicable)
     if [[ "$SERVER_ROLE" == "cluster" ]]; then
-        echo -e "  ${BOLD}Cluster Setup:${RESET}"
+        echo -e "  ${BOLD}5. Cluster Management:${RESET}"
         separator 70
         echo ""
 
         if [[ "$CLUSTER_BOOTSTRAP" == "true" ]] || [[ -z "$CLUSTER_PEERS" ]]; then
-            # Bootstrap mode - this is the first node
             local this_host
             this_host=$(hostname 2>/dev/null || echo "localhost")
             echo -e "    ${GREEN}✓${RESET} This node is bootstrapped as the cluster leader"
@@ -3831,66 +3855,32 @@ print_post_install() {
                 echo -e "    ${CYAN}${bin_dir}/fsql -c \"SHOW CLUSTER STATUS\"${RESET}"
             fi
         else
-            # Join mode - connecting to existing cluster
             echo -e "    ${BLUE}ℹ${RESET} This node will join cluster via: ${CLUSTER_PEERS}"
             echo ""
-            echo -e "    ${DIM}The node will automatically:${RESET}"
-            echo -e "    ${DIM}• Discover other cluster members${RESET}"
-            echo -e "    ${DIM}• Sync data from the cluster${RESET}"
-            echo -e "    ${DIM}• Participate in leader elections${RESET}"
+            echo -e "    ${DIM}The node will automatically sync data and participate in elections.${RESET}"
         fi
         echo ""
     fi
 
-    # Encryption Passphrase Warning (if enabled and auto-generated)
-    if [[ "$ENCRYPTION_ENABLED" == "true" ]] && [[ -n "$ENCRYPTION_PASSPHRASE" ]]; then
-        echo -e "  ${RED}${BOLD}⚠  IMPORTANT: SAVE YOUR ENCRYPTION PASSPHRASE${RESET}"
-        separator 70
-        echo ""
-        echo -e "    ${YELLOW}Your auto-generated encryption passphrase:${RESET}"
-        echo ""
-        echo -e "    ${CYAN}${BOLD}${ENCRYPTION_PASSPHRASE}${RESET}"
-        echo ""
-        echo -e "    ${RED}${BOLD}⚠  This passphrase is NOT stored in the configuration file!${RESET}"
-        echo -e "    ${DIM}For security reasons, you must provide it via environment variable.${RESET}"
-        echo ""
-        echo -e "    ${BOLD}To start FlyDB with encryption:${RESET}"
-        echo ""
-        echo -e "    ${GREEN}export FLYDB_ENCRYPTION_PASSPHRASE=\"${ENCRYPTION_PASSPHRASE}\"${RESET}"
-        if [[ "$in_path" == true ]]; then
-            echo -e "    ${GREEN}flydb${RESET}"
-        else
-            echo -e "    ${GREEN}${bin_dir}/flydb${RESET}"
-        fi
-        echo ""
-        echo -e "    ${YELLOW}${BOLD}Save this passphrase in a secure location (password manager, vault, etc.)${RESET}"
-        echo -e "    ${YELLOW}${BOLD}Without it, you will NOT be able to access your encrypted data!${RESET}"
-        echo ""
-    fi
-
-    # Configuration Section
-    echo -e "  ${BOLD}Configuration:${RESET}"
+    # 6. Configuration
+    echo -e "  ${BOLD}6. Configuration:${RESET}"
     separator 70
     echo ""
     if [[ "$CREATE_CONFIG" == true ]]; then
         echo -e "    ${CYAN}# Edit configuration:${RESET}"
         echo -e "    ${GREEN}${EDITOR:-vi} ${config_dir}/flydb.json${RESET}"
         echo ""
-        if [[ "$ENCRYPTION_ENABLED" == "true" ]]; then
-            echo -e "    ${DIM}# Note: Encryption passphrase is NOT in config file${RESET}"
-            echo -e "    ${DIM}# It must be provided via FLYDB_ENCRYPTION_PASSPHRASE environment variable${RESET}"
-            echo ""
-        fi
     fi
-    echo -e "    ${CYAN}# View all options:${RESET}"
+    echo -e "    ${CYAN}# View all server options:${RESET}"
     if [[ "$in_path" == true ]]; then
         echo -e "    ${GREEN}flydb --help${RESET}"
     else
         echo -e "    ${GREEN}${bin_dir}/flydb --help${RESET}"
     fi
     echo ""
-    # Documentation and Support
-    echo -e "  ${BOLD}Documentation & Support:${RESET}"
+
+    # 7. Documentation and Support
+    echo -e "  ${BOLD}7. Documentation & Support:${RESET}"
     separator 70
     echo ""
     print_kv "Getting Started" "https://flydb.dev/docs/getting-started" 25
@@ -3900,11 +3890,10 @@ print_post_install() {
     print_kv "Report Issues" "https://github.com/${GITHUB_REPO}/issues" 25
     echo ""
 
-    # Add to PATH reminder
+    # PATH reminder
     if [[ "$in_path" != true ]]; then
-        echo -e "  ${YELLOW}⚠${RESET}  ${YELLOW}Add FlyDB to your PATH for easier access:${RESET}"
+        echo -e "  ${YELLOW}⚠  Final Tip: Add FlyDB to your PATH for easier access:${RESET}"
         echo ""
-        echo -e "    ${DIM}# Add to ~/.bashrc or ~/.zshrc:${RESET}"
         echo -e "    ${CYAN}export PATH=\"${bin_dir}:\$PATH\"${RESET}"
         echo ""
     fi

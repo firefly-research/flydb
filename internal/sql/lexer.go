@@ -60,11 +60,11 @@ Keywords:
 
 The following words are recognized as keywords (case-insensitive):
 
-  DDL: CREATE, TABLE, TEXT, INT
-  DML: SELECT, INSERT, INTO, VALUES, UPDATE, SET, DELETE
-  Clauses: FROM, WHERE, JOIN, ON, ORDER, LIMIT, ASC, DESC
-  Auth: USER, IDENTIFIED, BY, GRANT, TO
-  Special: NULL
+	DDL: CREATE, TABLE, TEXT, INT
+	DML: SELECT, INSERT, INTO, VALUES, UPDATE, SET, DELETE
+	Clauses: FROM, WHERE, JOIN, ON, ORDER, LIMIT, ASC, DESC
+	Auth: USER, IDENTIFIED, BY, GRANT, TO
+	Special: NULL
 
 Identifier Rules:
 =================
@@ -80,8 +80,9 @@ String Literals:
 ================
 
 String literals are enclosed in single quotes:
-  'hello world'
-  'user@example.com'
+
+	'hello world'
+	'user@example.com'
 
 The Lexer does not currently support escape sequences.
 
@@ -111,42 +112,45 @@ type TokenType int
 // Token type constants.
 // These are used to identify what kind of token was recognized.
 const (
-	TokenEOF          TokenType = iota // End of input
-	TokenIdent                         // Identifier (table name, column name)
-	TokenString                        // String literal ('hello')
-	TokenNumber                        // Numeric literal (123)
-	TokenKeyword                       // SQL keyword (SELECT, FROM, etc.)
-	TokenComma                         // Comma (,)
-	TokenLParen                        // Left parenthesis (()
-	TokenRParen                        // Right parenthesis ())
-	TokenEqual                         // Equals sign (=)
-	TokenLessThan                      // Less than (<)
-	TokenGreaterThan                   // Greater than (>)
-	TokenLessEqual                     // Less than or equal (<=)
-	TokenGreaterEqual                  // Greater than or equal (>=)
-	TokenNotEqual                      // Not equal (<> or !=)
-	TokenPlus                          // Plus (+)
-	TokenMinus                         // Minus (-)
-	TokenStar                          // Asterisk/multiply (*)
-	TokenSlash                         // Divide (/)
-	TokenPercent                       // Modulo (%)
-	TokenConcat                        // String concatenation (||)
-	TokenSemicolon                     // Semicolon (;)
-	TokenDot                           // Dot (.)
-	TokenJSONArrow                     // JSON field access (->)
-	TokenJSONArrowText                 // JSON field access as text (->>)
-	TokenJSONContains                  // JSON contains (@>)
-	TokenJSONContainedBy               // JSON contained by (<@)
-	TokenJSONKeyExists                 // JSON key exists (?)
-	TokenJSONAllKeysExist              // JSON all keys exist (?&)
-	TokenJSONAnyKeyExists              // JSON any key exists (?|)
+	TokenEOF              TokenType = iota // End of input
+	TokenIdent                             // Identifier (table name, column name)
+	TokenString                            // String literal ('hello')
+	TokenNumber                            // Numeric literal (123)
+	TokenKeyword                           // SQL keyword (SELECT, FROM, etc.)
+	TokenComma                             // Comma (,)
+	TokenLParen                            // Left parenthesis (()
+	TokenRParen                            // Right parenthesis ())
+	TokenEqual                             // Equals sign (=)
+	TokenLessThan                          // Less than (<)
+	TokenGreaterThan                       // Greater than (>)
+	TokenLessEqual                         // Less than or equal (<=)
+	TokenGreaterEqual                      // Greater than or equal (>=)
+	TokenNotEqual                          // Not equal (<> or !=)
+	TokenPlus                              // Plus (+)
+	TokenMinus                             // Minus (-)
+	TokenStar                              // Asterisk/multiply (*)
+	TokenSlash                             // Divide (/)
+	TokenPercent                           // Modulo (%)
+	TokenConcat                            // String concatenation (||)
+	TokenSemicolon                         // Semicolon (;)
+	TokenDot                               // Dot (.)
+	TokenJSONArrow                         // JSON field access (->)
+	TokenJSONArrowText                     // JSON field access as text (->>)
+	TokenJSONContains                      // JSON contains (@>)
+	TokenJSONContainedBy                   // JSON contained by (<@)
+	TokenJSONKeyExists                     // JSON key exists (?)
+	TokenJSONAllKeysExist                  // JSON all keys exist (?&)
+	TokenJSONAnyKeyExists                  // JSON any key exists (?|)
 )
 
 // Token represents a single lexical unit from the input.
-// It contains the token type and the literal value from the input.
+// It contains the token type, the literal value from the input,
+// and the position where it was found.
 type Token struct {
-	Type  TokenType // The category of this token
-	Value string    // The literal value from the input
+	Type   TokenType // The category of this token
+	Value  string    // The literal value from the input
+	Line   int       // Line number where the token starts (1-based)
+	Column int       // Column number where the token starts (1-based)
 }
 
 // Lexer transforms an input string into a stream of tokens.
@@ -158,6 +162,8 @@ type Token struct {
 type Lexer struct {
 	input string // The SQL input string
 	pos   int    // Current position in the input
+	line  int    // Current line number
+	col   int    // Current column number
 }
 
 // NewLexer creates a new Lexer for the given input string.
@@ -168,7 +174,11 @@ type Lexer struct {
 //
 // Returns a new Lexer ready to produce tokens.
 func NewLexer(input string) *Lexer {
-	return &Lexer{input: input}
+	return &Lexer{
+		input: input,
+		line:  1,
+		col:   1,
+	}
 }
 
 // NextToken advances the lexer and returns the next token.
@@ -187,9 +197,13 @@ func (l *Lexer) NextToken() Token {
 	// Skip any whitespace before the next token.
 	l.skipWhitespace()
 
+	// Capture the start position of the token.
+	startLine := l.line
+	startCol := l.col
+
 	// Check for end of input.
 	if l.pos >= len(l.input) {
-		return Token{Type: TokenEOF}
+		return Token{Type: TokenEOF, Line: startLine, Column: startCol}
 	}
 
 	ch := l.input[l.pos]
@@ -205,7 +219,7 @@ func (l *Lexer) NextToken() Token {
 			l.input[l.pos] == '_' ||
 			l.input[l.pos] == '*' ||
 			l.input[l.pos] == '.') {
-			l.pos++
+			l.advance()
 		}
 
 		lit := l.input[start:l.pos]
@@ -297,11 +311,11 @@ func (l *Lexer) NextToken() Token {
 			"JSON_EXTRACT", "JSON_EXTRACT_TEXT", "JSON_ARRAY_LENGTH", "JSON_KEYS",
 			"JSON_TYPEOF", "JSON_VALID", "JSON_SET", "JSON_REMOVE", "JSON_MERGE",
 			"JSON_ARRAY_APPEND", "JSON_OBJECT", "JSON_ARRAY":
-			return Token{Type: TokenKeyword, Value: upper}
+			return Token{Type: TokenKeyword, Value: upper, Line: startLine, Column: startCol}
 		}
 
 		// Not a keyword - return as identifier.
-		return Token{Type: TokenIdent, Value: lit}
+		return Token{Type: TokenIdent, Value: lit, Line: startLine, Column: startCol}
 	}
 
 	// Number: starts with digit.
@@ -311,130 +325,130 @@ func (l *Lexer) NextToken() Token {
 
 		// Consume all digits before decimal point.
 		for l.pos < len(l.input) && unicode.IsDigit(rune(l.input[l.pos])) {
-			l.pos++
+			l.advance()
 		}
 
 		// Check for decimal point followed by more digits.
 		if l.pos < len(l.input) && l.input[l.pos] == '.' {
 			// Look ahead to ensure there's at least one digit after the decimal point.
 			if l.pos+1 < len(l.input) && unicode.IsDigit(rune(l.input[l.pos+1])) {
-				l.pos++ // Consume the decimal point.
+				l.advance() // Consume the decimal point.
 				// Consume all digits after decimal point.
 				for l.pos < len(l.input) && unicode.IsDigit(rune(l.input[l.pos])) {
-					l.pos++
+					l.advance()
 				}
 			}
 		}
 
-		return Token{Type: TokenNumber, Value: l.input[start:l.pos]}
+		return Token{Type: TokenNumber, Value: l.input[start:l.pos], Line: startLine, Column: startCol}
 	}
 
 	// String literal: enclosed in single quotes.
 	// Example: 'hello world'
 	if ch == '\'' {
-		l.pos++ // Skip opening quote
+		l.advance() // Skip opening quote
 		start := l.pos
 
 		// Consume until closing quote.
 		for l.pos < len(l.input) && l.input[l.pos] != '\'' {
-			l.pos++
+			l.advance()
 		}
 
 		lit := l.input[start:l.pos]
 
 		// Skip closing quote if present.
 		if l.pos < len(l.input) {
-			l.pos++
+			l.advance()
 		}
 
-		return Token{Type: TokenString, Value: lit}
+		return Token{Type: TokenString, Value: lit, Line: startLine, Column: startCol}
 	}
 
 	// Handle $N parameter placeholders for prepared statements.
 	// Example: $1, $2, $10
 	if ch == '$' {
 		start := l.pos
-		l.pos++ // Skip the $
+		l.advance() // Skip the $
 
 		// Consume digits after $
 		for l.pos < len(l.input) && unicode.IsDigit(rune(l.input[l.pos])) {
-			l.pos++
+			l.advance()
 		}
 
 		// Return the entire placeholder as an identifier
-		return Token{Type: TokenIdent, Value: l.input[start:l.pos]}
+		return Token{Type: TokenIdent, Value: l.input[start:l.pos], Line: startLine, Column: startCol}
 	}
 
 	// Multi-character operators (check before single-character).
 	if ch == '<' {
-		l.pos++
+		l.advance()
 		if l.pos < len(l.input) {
 			switch l.input[l.pos] {
 			case '=':
-				l.pos++
-				return Token{Type: TokenLessEqual, Value: "<="}
+				l.advance()
+				return Token{Type: TokenLessEqual, Value: "<=", Line: startLine, Column: startCol}
 			case '>':
-				l.pos++
-				return Token{Type: TokenNotEqual, Value: "<>"}
+				l.advance()
+				return Token{Type: TokenNotEqual, Value: "<>", Line: startLine, Column: startCol}
 			case '@':
 				// JSON contained by operator (<@)
-				l.pos++
-				return Token{Type: TokenJSONContainedBy, Value: "<@"}
+				l.advance()
+				return Token{Type: TokenJSONContainedBy, Value: "<@", Line: startLine, Column: startCol}
 			}
 		}
-		return Token{Type: TokenLessThan, Value: "<"}
+		return Token{Type: TokenLessThan, Value: "<", Line: startLine, Column: startCol}
 	}
 	if ch == '>' {
-		l.pos++
+		l.advance()
 		if l.pos < len(l.input) && l.input[l.pos] == '=' {
-			l.pos++
-			return Token{Type: TokenGreaterEqual, Value: ">="}
+			l.advance()
+			return Token{Type: TokenGreaterEqual, Value: ">=", Line: startLine, Column: startCol}
 		}
-		return Token{Type: TokenGreaterThan, Value: ">"}
+		return Token{Type: TokenGreaterThan, Value: ">", Line: startLine, Column: startCol}
 	}
 	if ch == '@' {
-		l.pos++
+		l.advance()
 		if l.pos < len(l.input) && l.input[l.pos] == '>' {
 			// JSON contains operator (@>)
-			l.pos++
-			return Token{Type: TokenJSONContains, Value: "@>"}
+			l.advance()
+			return Token{Type: TokenJSONContains, Value: "@>", Line: startLine, Column: startCol}
 		}
 		// Single @ is not a valid SQL operator, return EOF
-		return Token{Type: TokenEOF}
+		return Token{Type: TokenEOF, Line: startLine, Column: startCol}
 	}
 	if ch == '?' {
-		l.pos++
+		l.advance()
 		if l.pos < len(l.input) {
 			switch l.input[l.pos] {
 			case '&':
 				// JSON all keys exist operator (?&)
-				l.pos++
-				return Token{Type: TokenJSONAllKeysExist, Value: "?&"}
+				l.advance()
+				return Token{Type: TokenJSONAllKeysExist, Value: "?&", Line: startLine, Column: startCol}
 			case '|':
 				// JSON any key exists operator (?|)
-				l.pos++
-				return Token{Type: TokenJSONAnyKeyExists, Value: "?|"}
+				l.advance()
+				return Token{Type: TokenJSONAnyKeyExists, Value: "?|", Line: startLine, Column: startCol}
 			}
 		}
-		return Token{Type: TokenJSONKeyExists, Value: "?"}
+		return Token{Type: TokenJSONKeyExists, Value: "?", Line: startLine, Column: startCol}
 	}
 	if ch == '!' {
-		l.pos++
+		l.advance()
 		if l.pos < len(l.input) && l.input[l.pos] == '=' {
-			l.pos++
-			return Token{Type: TokenNotEqual, Value: "!="}
+			l.advance()
+			return Token{Type: TokenNotEqual, Value: "!=", Line: startLine, Column: startCol}
 		}
 		// Single ! is not a valid SQL operator, return EOF
-		return Token{Type: TokenEOF}
+		return Token{Type: TokenEOF, Line: startLine, Column: startCol}
 	}
 	if ch == '|' {
-		l.pos++
+		l.advance()
 		if l.pos < len(l.input) && l.input[l.pos] == '|' {
-			l.pos++
-			return Token{Type: TokenConcat, Value: "||"}
+			l.advance()
+			return Token{Type: TokenConcat, Value: "||", Line: startLine, Column: startCol}
 		}
 		// Single | is not commonly used in SQL, return EOF
-		return Token{Type: TokenEOF}
+		return Token{Type: TokenEOF, Line: startLine, Column: startCol}
 	}
 	// Handle comments and JSON arrow operators
 	if ch == '-' {
@@ -442,78 +456,96 @@ func (l *Lexer) NextToken() Token {
 			next := l.input[l.pos+1]
 			if next == '-' {
 				// Single-line comment: skip until end of line
-				l.pos += 2
+				l.advance()
+				l.advance()
 				for l.pos < len(l.input) && l.input[l.pos] != '\n' {
-					l.pos++
+					l.advance()
 				}
 				// Skip the newline and continue lexing
 				if l.pos < len(l.input) {
-					l.pos++
+					l.advance()
 				}
 				return l.NextToken()
 			}
 			if next == '>' {
 				// JSON arrow operators (-> or ->>)
-				l.pos += 2
+				l.advance()
+				l.advance()
 				if l.pos < len(l.input) && l.input[l.pos] == '>' {
-					l.pos++
-					return Token{Type: TokenJSONArrowText, Value: "->>"}
+					l.advance()
+					return Token{Type: TokenJSONArrowText, Value: "->>", Line: startLine, Column: startCol}
 				}
-				return Token{Type: TokenJSONArrow, Value: "->"}
+				return Token{Type: TokenJSONArrow, Value: "->", Line: startLine, Column: startCol}
 			}
 		}
-		l.pos++
-		return Token{Type: TokenMinus, Value: "-"}
+		l.advance()
+		return Token{Type: TokenMinus, Value: "-", Line: startLine, Column: startCol}
 	}
 	if ch == '/' {
 		if l.pos+1 < len(l.input) && l.input[l.pos+1] == '*' {
 			// Multi-line comment: skip until */
-			l.pos += 2
+			l.advance()
+			l.advance()
 			for l.pos+1 < len(l.input) {
 				if l.input[l.pos] == '*' && l.input[l.pos+1] == '/' {
-					l.pos += 2
+					l.advance()
+					l.advance()
 					break
 				}
-				l.pos++
+				l.advance()
 			}
 			return l.NextToken()
 		}
-		l.pos++
-		return Token{Type: TokenSlash, Value: "/"}
+		l.advance()
+		return Token{Type: TokenSlash, Value: "/", Line: startLine, Column: startCol}
 	}
 
 	// Single-character tokens.
-	l.pos++
+	l.advance()
 	switch ch {
 	case ',':
-		return Token{Type: TokenComma, Value: ","}
+		return Token{Type: TokenComma, Value: ",", Line: startLine, Column: startCol}
 	case '(':
-		return Token{Type: TokenLParen, Value: "("}
+		return Token{Type: TokenLParen, Value: "(", Line: startLine, Column: startCol}
 	case ')':
-		return Token{Type: TokenRParen, Value: ")"}
+		return Token{Type: TokenRParen, Value: ")", Line: startLine, Column: startCol}
 	case '=':
-		return Token{Type: TokenEqual, Value: "="}
+		return Token{Type: TokenEqual, Value: "=", Line: startLine, Column: startCol}
 	case '+':
-		return Token{Type: TokenPlus, Value: "+"}
+		return Token{Type: TokenPlus, Value: "+", Line: startLine, Column: startCol}
 	case '*':
-		return Token{Type: TokenStar, Value: "*"}
+		return Token{Type: TokenStar, Value: "*", Line: startLine, Column: startCol}
 	case '%':
-		return Token{Type: TokenPercent, Value: "%"}
+		return Token{Type: TokenPercent, Value: "%", Line: startLine, Column: startCol}
 	case ';':
-		return Token{Type: TokenSemicolon, Value: ";"}
+		return Token{Type: TokenSemicolon, Value: ";", Line: startLine, Column: startCol}
 	case '.':
-		return Token{Type: TokenDot, Value: "."}
+		return Token{Type: TokenDot, Value: ".", Line: startLine, Column: startCol}
 	}
 
 	// Unknown character - return EOF.
 	// A production lexer would return an error token here.
-	return Token{Type: TokenEOF}
+	return Token{Type: TokenEOF, Line: startLine, Column: startCol}
+}
+
+// advance moves the lexer's position forward by one character
+// and updates the line and column counters.
+func (l *Lexer) advance() {
+	if l.pos < len(l.input) {
+		if l.input[l.pos] == '\n' {
+			l.line++
+			l.col = 1
+		} else {
+			l.col++
+		}
+		l.pos++
+	}
 }
 
 // skipWhitespace advances the position past any whitespace characters.
 // Whitespace includes spaces, tabs, newlines, and other Unicode space characters.
 func (l *Lexer) skipWhitespace() {
 	for l.pos < len(l.input) && unicode.IsSpace(rune(l.input[l.pos])) {
-		l.pos++
+		l.advance()
 	}
 }

@@ -71,15 +71,15 @@ Key interfaces:
 Connection Lifecycle:
 =====================
 
-  1. Client connects (TCP or TLS)
-  2. Handler reads authentication message
-  3. Handler validates credentials via Authenticator
-  4. Handler enters message loop:
-     a. Read message header
-     b. Read message payload
-     c. Route to appropriate handler
-     d. Send response
-  5. Connection closes (client disconnect or error)
+ 1. Client connects (TCP or TLS)
+ 2. Handler reads authentication message
+ 3. Handler validates credentials via Authenticator
+ 4. Handler enters message loop:
+    a. Read message header
+    b. Read message payload
+    c. Route to appropriate handler
+    d. Send response
+ 5. Connection closes (client disconnect or error)
 
 Thread Safety:
 ==============
@@ -126,7 +126,7 @@ var log = logging.NewLogger("protocol")
 
 // QueryExecutor is the interface for executing SQL queries.
 type QueryExecutor interface {
-	Execute(query string) (string, error)
+	Execute(query string, user string) (string, error)
 }
 
 // DatabaseAwareQueryExecutor extends QueryExecutor with database context support.
@@ -135,7 +135,7 @@ type DatabaseAwareQueryExecutor interface {
 	QueryExecutor
 	// ExecuteInDatabase executes a query in the context of a specific database.
 	// If database is empty, the default database is used.
-	ExecuteInDatabase(query, database string) (string, error)
+	ExecuteInDatabase(query, database string, user string) (string, error)
 }
 
 // PreparedStatementManager is the interface for managing prepared statements.
@@ -197,14 +197,14 @@ type DatabaseManager interface {
 
 // connectionState holds per-connection state.
 type connectionState struct {
-	authenticated    bool
-	username         string
-	sessionID        string
-	transactionID    string
-	autoCommit       bool
-	isolationLevel   int
-	readOnly         bool
-	currentDatabase  string // Current database for this connection
+	authenticated   bool
+	username        string
+	sessionID       string
+	transactionID   string
+	autoCommit      bool
+	isolationLevel  int
+	readOnly        bool
+	currentDatabase string // Current database for this connection
 }
 
 // BinaryHandler handles binary protocol connections.
@@ -221,8 +221,8 @@ type BinaryHandler struct {
 	connections map[net.Conn]*connectionState
 
 	// Zero-copy buffer pool for efficient memory management
-	bufferPool    *BufferPool
-	useZeroCopy   bool
+	bufferPool  *BufferPool
+	useZeroCopy bool
 }
 
 // NewBinaryHandler creates a new binary protocol handler.
@@ -367,96 +367,117 @@ func (h *BinaryHandler) HandleConnection(conn net.Conn) {
 			continue
 		}
 
-		var success bool
-		switch header.Type {
-		case MsgAuth:
-			authenticated = h.handleAuth(writer, payload, remoteAddr, connState)
-			success = authenticated
+		// Handle the command with panic recovery to prevent connection drops.
+		h.handleRequestWithRecovery(writer, *header, payload, remoteAddr, connState, reqCtx, &authenticated)
+	}
+}
 
-		case MsgQuery:
-			success = h.handleQuery(writer, payload, remoteAddr, connState)
-
-		case MsgPrepare:
-			success = h.handlePrepare(writer, payload, remoteAddr)
-
-		case MsgExecute:
-			success = h.handleExecute(writer, payload, remoteAddr)
-
-		case MsgDeallocate:
-			success = h.handleDeallocate(writer, payload, remoteAddr)
-
-		case MsgPing:
-			h.handlePing(writer)
-			success = true
-
-		// Cursor operations for ODBC/JDBC driver support
-		case MsgCursorOpen:
-			success = h.handleCursorOpen(writer, payload, remoteAddr)
-
-		case MsgCursorFetch:
-			success = h.handleCursorFetch(writer, payload, remoteAddr)
-
-		case MsgCursorClose:
-			success = h.handleCursorClose(writer, payload, remoteAddr)
-
-		// Metadata operations for ODBC/JDBC driver support
-		case MsgGetTables:
-			success = h.handleGetTables(writer, payload, remoteAddr)
-
-		case MsgGetColumns:
-			success = h.handleGetColumns(writer, payload, remoteAddr)
-
-		case MsgGetPrimaryKeys:
-			success = h.handleGetPrimaryKeys(writer, payload, remoteAddr)
-
-		case MsgGetForeignKeys:
-			success = h.handleGetForeignKeys(writer, payload, remoteAddr)
-
-		case MsgGetIndexes:
-			success = h.handleGetIndexes(writer, payload, remoteAddr)
-
-		case MsgGetTypeInfo:
-			success = h.handleGetTypeInfo(writer, remoteAddr)
-
-		// Transaction operations
-		case MsgBeginTx:
-			success = h.handleBeginTx(writer, payload, remoteAddr, connState)
-
-		case MsgCommitTx:
-			success = h.handleCommitTx(writer, remoteAddr, connState)
-
-		case MsgRollbackTx:
-			success = h.handleRollbackTx(writer, remoteAddr, connState)
-
-		// Session operations
-		case MsgSetOption:
-			success = h.handleSetOption(writer, payload, remoteAddr, connState)
-
-		case MsgGetOption:
-			success = h.handleGetOption(writer, payload, remoteAddr, connState)
-
-		case MsgGetServerInfo:
-			success = h.handleGetServerInfo(writer, remoteAddr)
-
-		// Database operations for ODBC/JDBC driver support
-		case MsgUseDatabase:
-			success = h.handleUseDatabase(writer, payload, remoteAddr, connState)
-
-		case MsgGetDatabases:
-			success = h.handleGetDatabases(writer, payload, remoteAddr)
-
-		default:
-			reqCtx.LogError(log, "unknown message type")
-			h.sendError(writer, 400, "unknown message type")
-			continue
+// handleRequestWithRecovery handles a single request and recovers from any panics.
+func (h *BinaryHandler) handleRequestWithRecovery(
+	w *bufio.Writer,
+	header Header,
+	payload []byte,
+	remoteAddr string,
+	state *connectionState,
+	reqCtx *logging.RequestContext,
+	authenticated *bool,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("Panic handling request", "remote_addr", remoteAddr, "panic", r, "header_type", header.Type)
+			h.sendError(w, 500, fmt.Sprintf("internal server error: panic: %v", r))
 		}
+	}()
 
-		// Log the completed request
-		if success {
-			reqCtx.LogComplete(log, "success")
-		} else {
-			reqCtx.LogError(log, "command failed")
-		}
+	var success bool
+	switch header.Type {
+	case MsgAuth:
+		*authenticated = h.handleAuth(w, payload, remoteAddr, state)
+		success = *authenticated
+
+	case MsgQuery:
+		success = h.handleQuery(w, payload, remoteAddr, state)
+
+	case MsgPrepare:
+		success = h.handlePrepare(w, payload, remoteAddr)
+
+	case MsgExecute:
+		success = h.handleExecute(w, payload, remoteAddr)
+
+	case MsgDeallocate:
+		success = h.handleDeallocate(w, payload, remoteAddr)
+
+	case MsgPing:
+		h.handlePing(w)
+		success = true
+
+	// Cursor operations for ODBC/JDBC driver support
+	case MsgCursorOpen:
+		success = h.handleCursorOpen(w, payload, remoteAddr)
+
+	case MsgCursorFetch:
+		success = h.handleCursorFetch(w, payload, remoteAddr)
+
+	case MsgCursorClose:
+		success = h.handleCursorClose(w, payload, remoteAddr)
+
+	// Metadata operations for ODBC/JDBC driver support
+	case MsgGetTables:
+		success = h.handleGetTables(w, payload, remoteAddr)
+
+	case MsgGetColumns:
+		success = h.handleGetColumns(w, payload, remoteAddr)
+
+	case MsgGetPrimaryKeys:
+		success = h.handleGetPrimaryKeys(w, payload, remoteAddr)
+
+	case MsgGetForeignKeys:
+		success = h.handleGetForeignKeys(w, payload, remoteAddr)
+
+	case MsgGetIndexes:
+		success = h.handleGetIndexes(w, payload, remoteAddr)
+
+	case MsgGetTypeInfo:
+		success = h.handleGetTypeInfo(w, remoteAddr)
+
+	// Transaction operations
+	case MsgBeginTx:
+		success = h.handleBeginTx(w, payload, remoteAddr, state)
+
+	case MsgCommitTx:
+		success = h.handleCommitTx(w, remoteAddr, state)
+
+	case MsgRollbackTx:
+		success = h.handleRollbackTx(w, remoteAddr, state)
+
+	// Session operations
+	case MsgSetOption:
+		success = h.handleSetOption(w, payload, remoteAddr, state)
+
+	case MsgGetOption:
+		success = h.handleGetOption(w, payload, remoteAddr, state)
+
+	case MsgGetServerInfo:
+		success = h.handleGetServerInfo(w, remoteAddr)
+
+	// Database operations for ODBC/JDBC driver support
+	case MsgUseDatabase:
+		success = h.handleUseDatabase(w, payload, remoteAddr, state)
+
+	case MsgGetDatabases:
+		success = h.handleGetDatabases(w, payload, remoteAddr)
+
+	default:
+		reqCtx.LogError(log, "unknown message type")
+		h.sendError(w, 400, "unknown message type")
+		success = false
+	}
+
+	// Log the completed request
+	if success {
+		reqCtx.LogComplete(log, "success")
+	} else {
+		reqCtx.LogError(log, "command failed")
 	}
 }
 
@@ -597,15 +618,15 @@ func (h *BinaryHandler) handleQuery(w *bufio.Writer, payload []byte, remoteAddr 
 	// Use database-aware executor if available, otherwise fall back to default
 	var result string
 	if dbExec, ok := h.executor.(DatabaseAwareQueryExecutor); ok {
-		result, err = dbExec.ExecuteInDatabase(queryMsg.Query, state.currentDatabase)
+		result, err = dbExec.ExecuteInDatabase(queryMsg.Query, state.currentDatabase, state.username)
 	} else {
-		result, err = h.executor.Execute(queryMsg.Query)
+		result, err = h.executor.Execute(queryMsg.Query, state.username)
 	}
 
 	if err != nil {
 		log.Debug("Binary query error", "remote_addr", remoteAddr, "error", err)
 		h.sendError(w, 500, err.Error())
-		return false
+		return true // Keep connection alive on query errors
 	}
 
 	// Check if this was a USE statement and update connection state
@@ -657,7 +678,7 @@ func (h *BinaryHandler) handlePrepare(w *bufio.Writer, payload []byte, remoteAdd
 	if err != nil {
 		log.Debug("Prepare error", "remote_addr", remoteAddr, "error", err)
 		h.sendError(w, 500, err.Error())
-		return false
+		return true // Keep connection alive
 	}
 
 	resultMsg := &PrepareResultMessage{
@@ -689,7 +710,7 @@ func (h *BinaryHandler) handleExecute(w *bufio.Writer, payload []byte, remoteAdd
 	if err != nil {
 		log.Debug("Execute error", "remote_addr", remoteAddr, "error", err)
 		h.sendError(w, 500, err.Error())
-		return false
+		return true // Keep connection alive
 	}
 
 	resultMsg := &QueryResultMessage{

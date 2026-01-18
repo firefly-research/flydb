@@ -23,24 +23,24 @@ Prepared Statements Overview:
 Prepared statements allow queries to be compiled once and executed multiple times
 with different parameter values. This provides several benefits:
 
-  1. Performance: The query is parsed and validated only once
-  2. Security: Parameters are properly escaped, preventing SQL injection
-  3. Efficiency: Reduced parsing overhead for repeated queries
+ 1. Performance: The query is parsed and validated only once
+ 2. Security: Parameters are properly escaped, preventing SQL injection
+ 3. Efficiency: Reduced parsing overhead for repeated queries
 
 Usage:
 ======
 
-  1. PREPARE: Compile a query with parameter placeholders ($1, $2, etc.)
-  2. EXECUTE: Run the prepared query with specific parameter values
-  3. DEALLOCATE: Remove the prepared statement when no longer needed
+ 1. PREPARE: Compile a query with parameter placeholders ($1, $2, etc.)
+ 2. EXECUTE: Run the prepared query with specific parameter values
+ 3. DEALLOCATE: Remove the prepared statement when no longer needed
 
 Example:
 ========
 
-  PREPARE get_user AS SELECT * FROM users WHERE id = $1
-  EXECUTE get_user USING 42
-  EXECUTE get_user USING 100
-  DEALLOCATE get_user
+	PREPARE get_user AS SELECT * FROM users WHERE id = $1
+	EXECUTE get_user USING 42
+	EXECUTE get_user USING 100
+	DEALLOCATE get_user
 */
 package sql
 
@@ -49,13 +49,15 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+
+	ferrors "flydb/internal/errors"
 )
 
 // PreparedStatement represents a compiled prepared statement.
 type PreparedStatement struct {
-	Name       string   // Statement name
-	Query      string   // Original query with placeholders
-	ParamCount int      // Number of parameters
+	Name       string    // Statement name
+	Query      string    // Original query with placeholders
+	ParamCount int       // Number of parameters
 	ParsedStmt Statement // Cached parsed statement (for non-parameterized queries)
 }
 
@@ -84,7 +86,7 @@ func (m *PreparedStatementManager) Prepare(name, query string) error {
 
 	// Check if statement already exists
 	if _, exists := m.statements[name]; exists {
-		return fmt.Errorf("prepared statement '%s' already exists", name)
+		return ferrors.PreparedStatementAlreadyExists(name)
 	}
 
 	// Count parameters
@@ -115,12 +117,12 @@ func (m *PreparedStatementManager) Execute(name string, params []interface{}) (s
 	m.mu.RUnlock()
 
 	if !exists {
-		return "", fmt.Errorf("prepared statement '%s' not found", name)
+		return "", ferrors.PreparedStatementNotFound(name)
 	}
 
 	// Validate parameter count
 	if len(params) != stmt.ParamCount {
-		return "", fmt.Errorf("expected %d parameters, got %d", stmt.ParamCount, len(params))
+		return "", ferrors.ParameterMismatch(stmt.ParamCount, len(params))
 	}
 
 	// Substitute parameters into the query
@@ -136,7 +138,7 @@ func (m *PreparedStatementManager) Execute(name string, params []interface{}) (s
 	parser := NewParser(lexer)
 	parsedStmt, err := parser.Parse()
 	if err != nil {
-		return "", fmt.Errorf("failed to parse prepared statement: %v", err)
+		return "", ferrors.InternalError("failed to parse prepared statement").WithCause(err)
 	}
 
 	return m.executor.Execute(parsedStmt)
@@ -162,7 +164,7 @@ func (m *PreparedStatementManager) Deallocate(name string) error {
 	defer m.mu.Unlock()
 
 	if _, exists := m.statements[name]; !exists {
-		return fmt.Errorf("prepared statement '%s' not found", name)
+		return ferrors.PreparedStatementNotFound(name)
 	}
 
 	delete(m.statements, name)
@@ -218,4 +220,3 @@ func validatePreparedStatement(query string) error {
 	}
 	return nil
 }
-

@@ -24,10 +24,10 @@ The Catalog is FlyDB's schema registry. It maintains metadata about all
 tables in the database, including their names and column definitions.
 
 The Catalog serves several purposes:
-  1. Schema validation during INSERT (column count matching)
-  2. Column name resolution during SELECT
-  3. Table existence checking for all operations
-  4. Schema persistence across server restarts
+ 1. Schema validation during INSERT (column count matching)
+ 2. Column name resolution during SELECT
+ 3. Table existence checking for all operations
+ 4. Schema persistence across server restarts
 
 Storage Strategy:
 =================
@@ -66,10 +66,11 @@ package sql
 
 import (
 	"encoding/json"
-	"errors"
 	"time"
 
 	"flydb/internal/storage"
+
+	ferrors "flydb/internal/errors"
 )
 
 // schemaKeyPrefix is the storage key prefix for table schemas.
@@ -325,7 +326,7 @@ func (c *Catalog) CreateTable(name string, cols []ColumnDef) error {
 func (c *Catalog) CreateTableWithConstraints(name string, cols []ColumnDef, constraints []TableConstraint) error {
 	// Check if the table already exists.
 	if _, exists := c.Tables[name]; exists {
-		return errors.New("table exists")
+		return ferrors.TableAlreadyExists("")
 	}
 
 	// Initialize auto-increment sequences for applicable columns
@@ -370,7 +371,7 @@ func (c *Catalog) CreateTableWithConstraints(name string, cols []ColumnDef, cons
 func (c *Catalog) GetNextAutoIncrement(tableName, columnName string) (int64, error) {
 	schema, ok := c.Tables[tableName]
 	if !ok {
-		return 0, errors.New("table not found")
+		return 0, ferrors.TableNotFound("")
 	}
 
 	if schema.AutoIncSeq == nil {
@@ -399,7 +400,7 @@ func (c *Catalog) GetNextAutoIncrement(tableName, columnName string) (int64, err
 func (c *Catalog) UpdateAutoIncrement(tableName, columnName string, value int64) error {
 	schema, ok := c.Tables[tableName]
 	if !ok {
-		return errors.New("table not found")
+		return ferrors.TableNotFound("")
 	}
 
 	if schema.AutoIncSeq == nil {
@@ -439,7 +440,7 @@ func (c *Catalog) UpdateAutoIncrement(tableName, columnName string, value int64)
 //
 //	schema, ok := catalog.GetTable("users")
 //	if !ok {
-//	    return errors.New("table not found")
+//	    return ferrors.TableNotFound("")
 //	}
 func (c *Catalog) GetTable(name string) (TableSchema, bool) {
 	// Check the in-memory cache first (fast path).
@@ -466,16 +467,16 @@ func (c *Catalog) GetTable(name string) (TableSchema, bool) {
 // CreateProcedure creates a new stored procedure and persists it to storage.
 func (c *Catalog) CreateProcedure(proc StoredProcedure) error {
 	if _, exists := c.Procedures[proc.Name]; exists {
-		return errors.New("procedure already exists: " + proc.Name)
+		return ferrors.ProcedureAlreadyExists(proc.Name)
 	}
 
 	// Persist to storage
 	data, err := json.Marshal(proc)
 	if err != nil {
-		return err
+		return ferrors.InternalError("failed to serialize procedure").WithCause(err)
 	}
 	if err := c.store.Put("procedure:"+proc.Name, data); err != nil {
-		return err
+		return ferrors.NewStorageError("failed to store procedure").WithCause(err)
 	}
 
 	// Add to cache
@@ -492,12 +493,12 @@ func (c *Catalog) GetProcedure(name string) (StoredProcedure, bool) {
 // DropProcedure removes a stored procedure.
 func (c *Catalog) DropProcedure(name string) error {
 	if _, exists := c.Procedures[name]; !exists {
-		return errors.New("procedure not found: " + name)
+		return ferrors.ProcedureNotFound(name)
 	}
 
 	// Remove from storage
 	if err := c.store.Delete("procedure:" + name); err != nil {
-		return err
+		return ferrors.NewStorageError("failed to delete procedure").WithCause(err)
 	}
 
 	// Remove from cache
@@ -519,13 +520,13 @@ func (c *Catalog) DropProcedure(name string) error {
 func (c *Catalog) AddColumn(tableName string, col ColumnDef) error {
 	schema, ok := c.Tables[tableName]
 	if !ok {
-		return errors.New("table not found: " + tableName)
+		return ferrors.TableNotFound(tableName)
 	}
 
 	// Check if column already exists
 	for _, existingCol := range schema.Columns {
 		if existingCol.Name == col.Name {
-			return errors.New("column already exists: " + col.Name)
+			return ferrors.ColumnAlreadyExists(col.Name)
 		}
 	}
 
@@ -568,7 +569,7 @@ func (c *Catalog) AddColumn(tableName string, col ColumnDef) error {
 func (c *Catalog) DropColumn(tableName, columnName string) error {
 	schema, ok := c.Tables[tableName]
 	if !ok {
-		return errors.New("table not found: " + tableName)
+		return ferrors.TableNotFound(tableName)
 	}
 
 	// Find and remove the column
@@ -578,7 +579,7 @@ func (c *Catalog) DropColumn(tableName, columnName string) error {
 		if col.Name == columnName {
 			// Check if it's a primary key
 			if col.IsPrimaryKey() {
-				return errors.New("cannot drop primary key column: " + columnName)
+				return ferrors.ConstraintViolation("PRIMARY KEY", "cannot drop primary key column: "+columnName)
 			}
 			found = true
 			continue
@@ -587,7 +588,7 @@ func (c *Catalog) DropColumn(tableName, columnName string) error {
 	}
 
 	if !found {
-		return errors.New("column not found: " + columnName)
+		return ferrors.ColumnNotFound(columnName, tableName)
 	}
 
 	schema.Columns = newColumns
@@ -626,13 +627,13 @@ func (c *Catalog) DropColumn(tableName, columnName string) error {
 func (c *Catalog) RenameColumn(tableName, oldName, newName string) error {
 	schema, ok := c.Tables[tableName]
 	if !ok {
-		return errors.New("table not found: " + tableName)
+		return ferrors.TableNotFound(tableName)
 	}
 
 	// Check if new name already exists
 	for _, col := range schema.Columns {
 		if col.Name == newName {
-			return errors.New("column already exists: " + newName)
+			return ferrors.ColumnAlreadyExists(newName)
 		}
 	}
 
@@ -647,7 +648,7 @@ func (c *Catalog) RenameColumn(tableName, oldName, newName string) error {
 	}
 
 	if !found {
-		return errors.New("column not found: " + oldName)
+		return ferrors.ColumnNotFound(oldName, tableName)
 	}
 
 	// Update auto-increment sequence key if applicable
@@ -687,7 +688,7 @@ func (c *Catalog) RenameColumn(tableName, oldName, newName string) error {
 func (c *Catalog) ModifyColumn(tableName, columnName, newType string, newConstraints []ColumnConstraint) error {
 	schema, ok := c.Tables[tableName]
 	if !ok {
-		return errors.New("table not found: " + tableName)
+		return ferrors.TableNotFound(tableName)
 	}
 
 	// Find and modify the column
@@ -714,7 +715,7 @@ func (c *Catalog) ModifyColumn(tableName, columnName, newType string, newConstra
 	}
 
 	if !found {
-		return errors.New("column not found: " + columnName)
+		return ferrors.ColumnNotFound(columnName, tableName)
 	}
 
 	// Update modification time
@@ -744,14 +745,14 @@ func (c *Catalog) ModifyColumn(tableName, columnName, newType string, newConstra
 func (c *Catalog) AddConstraint(tableName string, constraint TableConstraint) error {
 	schema, ok := c.Tables[tableName]
 	if !ok {
-		return errors.New("table not found: " + tableName)
+		return ferrors.TableNotFound(tableName)
 	}
 
 	// Check if a constraint with this name already exists
 	if constraint.Name != "" {
 		for _, existing := range schema.Constraints {
 			if existing.Name == constraint.Name {
-				return errors.New("constraint already exists: " + constraint.Name)
+				return ferrors.ConstraintAlreadyExists(constraint.Name)
 			}
 		}
 	}
@@ -766,7 +767,7 @@ func (c *Catalog) AddConstraint(tableName string, constraint TableConstraint) er
 			}
 		}
 		if !found {
-			return errors.New("column not found: " + colName)
+			return ferrors.ColumnNotFound(colName, tableName)
 		}
 	}
 
@@ -798,7 +799,7 @@ func (c *Catalog) AddConstraint(tableName string, constraint TableConstraint) er
 func (c *Catalog) DropConstraint(tableName, constraintName string) error {
 	schema, ok := c.Tables[tableName]
 	if !ok {
-		return errors.New("table not found: " + tableName)
+		return ferrors.TableNotFound(tableName)
 	}
 
 	// Find and remove the constraint
@@ -813,7 +814,7 @@ func (c *Catalog) DropConstraint(tableName, constraintName string) error {
 	}
 
 	if !found {
-		return errors.New("constraint not found: " + constraintName)
+		return ferrors.ConstraintNotFound(constraintName)
 	}
 
 	schema.Constraints = newConstraints
@@ -840,7 +841,7 @@ func (c *Catalog) DropConstraint(tableName, constraintName string) error {
 //   - The table cannot be removed from storage
 func (c *Catalog) DropTable(tableName string) error {
 	if _, ok := c.Tables[tableName]; !ok {
-		return errors.New("table not found: " + tableName)
+		return ferrors.TableNotFound(tableName)
 	}
 
 	// Remove from storage
@@ -867,12 +868,12 @@ func (c *Catalog) DropTable(tableName string) error {
 func (c *Catalog) CreateView(name, querySQL string) error {
 	// Check if a view with this name already exists
 	if _, exists := c.Views[name]; exists {
-		return errors.New("view already exists: " + name)
+		return ferrors.ViewAlreadyExists(name)
 	}
 
 	// Check if a table with this name already exists
 	if _, exists := c.Tables[name]; exists {
-		return errors.New("table with this name already exists: " + name)
+		return ferrors.TableAlreadyExists(name)
 	}
 
 	view := ViewDefinition{
@@ -883,10 +884,10 @@ func (c *Catalog) CreateView(name, querySQL string) error {
 	// Persist to storage
 	data, err := json.Marshal(view)
 	if err != nil {
-		return err
+		return ferrors.InternalError("failed to serialize view").WithCause(err)
 	}
 	if err := c.store.Put(viewKeyPrefix+name, data); err != nil {
-		return err
+		return ferrors.NewStorageError("failed to store view").WithCause(err)
 	}
 
 	// Add to cache
@@ -917,12 +918,12 @@ func (c *Catalog) GetView(name string) (ViewDefinition, bool) {
 //   - The view cannot be removed from storage
 func (c *Catalog) DropView(name string) error {
 	if _, ok := c.Views[name]; !ok {
-		return errors.New("view not found: " + name)
+		return ferrors.ViewNotFound(name)
 	}
 
 	// Remove from storage
 	if err := c.store.Delete(viewKeyPrefix + name); err != nil {
-		return err
+		return ferrors.NewStorageError("failed to delete view").WithCause(err)
 	}
 
 	// Remove from cache

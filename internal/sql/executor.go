@@ -127,6 +127,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	ferrors "flydb/internal/errors"
 )
 
 // AuditManager defines the interface for audit logging.
@@ -406,37 +408,23 @@ func (e *Executor) SetUser(user string) {
 	e.currentUser = user
 }
 
+// ExecuteWithUser executes a statement with a specific user context.
+func (e *Executor) ExecuteWithUser(stmt Statement, user string) (string, error) {
+	// Create a shallow copy of the executor to avoid race conditions on currentUser
+	// when multiple connections use the same executor.
+	ephemeral := *e
+	ephemeral.currentUser = user
+	return ephemeral.Execute(stmt)
+}
+
 // Execute runs the given SQL statement and returns the result as a string.
-// This is the main entry point for statement execution.
-//
-// The execution process:
-//  1. Determine the statement type via type switch
-//  2. Check permissions for the operation
-//  3. Delegate to the appropriate handler method
-//  4. Return the result or error
-//
-// Parameters:
-//   - stmt: The parsed AST node to execute
-//
-// Returns:
-//   - result: A string representation of the result (e.g., "INSERT OK", query results)
-//   - error: Any error that occurred during execution
-//
-// Supported statement types:
-//   - CreateTableStmt: Creates a new table (admin only)
-//   - CreateUserStmt: Creates a new user (admin only)
-//   - GrantStmt: Grants permissions (admin only)
-//   - InsertStmt: Inserts a row (requires table access)
-//   - UpdateStmt: Updates rows (requires table access)
-//   - DeleteStmt: Deletes rows (requires table access)
-//   - SelectStmt: Queries data (requires table access)
 func (e *Executor) Execute(stmt Statement) (string, error) {
 	switch s := stmt.(type) {
 	case *CreateTableStmt:
 		// CREATE TABLE requires admin privileges.
 		// This prevents regular users from modifying the schema.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeCreate(s)
 
@@ -444,7 +432,7 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 		// CREATE USER requires admin privileges.
 		// Only admins can create new database users.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeCreateUser(s)
 
@@ -452,7 +440,7 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 		// GRANT requires admin privileges.
 		// Only admins can assign permissions to users.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeGrant(s)
 
@@ -460,42 +448,42 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 		// REVOKE requires admin privileges.
 		// Only admins can remove permissions from users.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeRevoke(s)
 
 	case *CreateRoleStmt:
 		// CREATE ROLE requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeCreateRole(s)
 
 	case *DropRoleStmt:
 		// DROP ROLE requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeDropRole(s)
 
 	case *GrantRoleStmt:
 		// GRANT role requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeGrantRole(s)
 
 	case *RevokeRoleStmt:
 		// REVOKE role requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeRevokeRole(s)
 
 	case *DropUserStmt:
 		// DROP USER requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeDropUser(s)
 
@@ -503,7 +491,7 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 		// ALTER USER requires admin privileges.
 		// Only admins can modify user accounts.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeAlterUser(s)
 
@@ -561,14 +549,14 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 	case *CreateIndexStmt:
 		// CREATE INDEX requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeCreateIndex(s)
 
 	case *DropIndexStmt:
 		// DROP INDEX requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeDropIndex(s)
 
@@ -585,7 +573,7 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 		// INSPECT requires admin privileges for security.
 		// Only admins can view database metadata.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeInspect(s)
 
@@ -601,7 +589,7 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 	case *CreateProcedureStmt:
 		// CREATE PROCEDURE requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeCreateProcedure(s)
 
@@ -611,70 +599,70 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 	case *DropProcedureStmt:
 		// DROP PROCEDURE requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeDropProcedure(s)
 
 	case *AlterTableStmt:
 		// ALTER TABLE requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeAlterTable(s)
 
 	case *CreateViewStmt:
 		// CREATE VIEW requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeCreateView(s)
 
 	case *DropViewStmt:
 		// DROP VIEW requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeDropView(s)
 
 	case *CreateTriggerStmt:
 		// CREATE TRIGGER requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeCreateTrigger(s)
 
 	case *DropTriggerStmt:
 		// DROP TRIGGER requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeDropTrigger(s)
 
 	case *DropTableStmt:
 		// DROP TABLE requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeDropTable(s)
 
 	case *TruncateTableStmt:
 		// TRUNCATE TABLE requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeTruncateTable(s)
 
 	case *CreateDatabaseStmt:
 		// CREATE DATABASE requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeCreateDatabase(s)
 
 	case *DropDatabaseStmt:
 		// DROP DATABASE requires admin privileges.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		return e.executeDropDatabase(s)
 
@@ -682,18 +670,18 @@ func (e *Executor) Execute(stmt Statement) (string, error) {
 		// USE DATABASE is handled at the server level, not executor level.
 		// This case returns an error because USE should be intercepted by the server
 		// before reaching the executor.
-		return "", errors.New("USE statement must be handled by the server")
+		return "", ferrors.InternalError("USE statement must be handled by the server")
 
 	case *ExportAuditStmt:
 		// EXPORT AUDIT requires admin privileges.
 		// Only admins can export audit logs for security and compliance.
 		if e.currentUser != "" && e.currentUser != "admin" {
-			return "", errors.New("permission denied: EXPORT AUDIT requires admin privileges")
+			return "", ferrors.PermissionDenied("EXPORT AUDIT").WithDetail("requires admin privileges")
 		}
 		return e.executeExportAudit(s)
 	}
 
-	return "", errors.New("unknown statement")
+	return "", ferrors.NewExecutionError("unknown statement")
 }
 
 // checkAccess verifies if the current user has access to the specified table.
@@ -731,7 +719,7 @@ func (e *Executor) checkAccessWithPrivilege(table string, privilege auth.Privile
 	// Note: Database context is managed at the server level, so we use "*" for database-agnostic checks
 	check := e.auth.CheckPrivilege(e.currentUser, privilege, "*", table)
 	if !check.Allowed {
-		return fmt.Errorf("permission denied: %s on table %s", privilege, table)
+		return ferrors.PermissionDenied("on table " + table).WithDetail(string(privilege))
 	}
 	return nil
 }
@@ -907,13 +895,13 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 			return "CREATE TABLE OK", nil
 		}
 		e.logAuditEvent("CREATE_TABLE", "table", stmt.TableName, operation, "FAILED", "table exists", time.Since(start).Milliseconds())
-		return "", fmt.Errorf("table exists")
+		return "", ferrors.TableAlreadyExists(stmt.TableName)
 	}
 
 	// Validate column types before creating the table
 	for _, col := range stmt.Columns {
 		if !IsValidType(col.Type) {
-			return "", fmt.Errorf("invalid column type: %s (valid types: INT, TEXT, BOOLEAN, FLOAT, TIMESTAMP, DATE, BLOB, UUID, JSONB, SERIAL, BIGINT, DECIMAL, NUMERIC, TIME, VARCHAR)", col.Type)
+			return "", ferrors.TypeMismatch(col.Type, "", col.Name).WithDetail("invalid column type")
 		}
 	}
 
@@ -922,7 +910,7 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 		if fk := col.GetForeignKey(); fk != nil {
 			refTable, ok := e.catalog.GetTable(fk.Table)
 			if !ok {
-				return "", fmt.Errorf("foreign key references non-existent table: %s", fk.Table)
+				return "", ferrors.TableNotFound(fk.Table)
 			}
 			// Verify the referenced column exists
 			found := false
@@ -933,7 +921,7 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 				}
 			}
 			if !found {
-				return "", fmt.Errorf("foreign key references non-existent column: %s.%s", fk.Table, fk.Column)
+				return "", ferrors.ColumnNotFound(fk.Column, fk.Table)
 			}
 		}
 	}
@@ -943,7 +931,7 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 		if constraint.Type == ConstraintForeignKey && constraint.ForeignKey != nil {
 			refTable, ok := e.catalog.GetTable(constraint.ForeignKey.Table)
 			if !ok {
-				return "", fmt.Errorf("foreign key references non-existent table: %s", constraint.ForeignKey.Table)
+				return "", ferrors.TableNotFound(constraint.ForeignKey.Table)
 			}
 			// Verify the referenced column exists
 			found := false
@@ -954,7 +942,7 @@ func (e *Executor) executeCreate(stmt *CreateTableStmt) (string, error) {
 				}
 			}
 			if !found {
-				return "", fmt.Errorf("foreign key references non-existent column: %s.%s", constraint.ForeignKey.Table, constraint.ForeignKey.Column)
+				return "", ferrors.ColumnNotFound(constraint.ForeignKey.Column, constraint.ForeignKey.Table)
 			}
 		}
 	}
@@ -1005,7 +993,7 @@ func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 	// Validate that the table exists.
 	table, ok := e.catalog.GetTable(stmt.TableName)
 	if !ok {
-		return "", errors.New("table not found")
+		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// Determine which rows to insert
@@ -1016,7 +1004,7 @@ func (e *Executor) executeInsert(stmt *InsertStmt) (string, error) {
 	}
 
 	if len(rowsToInsert) == 0 {
-		return "", errors.New("no values to insert")
+		return "", ferrors.NewExecutionError("no values to insert")
 	}
 
 	insertedCount := 0
@@ -1123,7 +1111,7 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 	var columnValueMap map[string]string
 	if len(columns) > 0 {
 		if len(columns) != len(values) {
-			return nil, "", errors.New("column count does not match value count")
+			return nil, "", ferrors.ParameterMismatch(len(columns), len(values))
 		}
 		columnValueMap = make(map[string]string)
 		for i, col := range columns {
@@ -1143,14 +1131,14 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 				// Generate auto-increment value
 				nextVal, err := e.catalog.GetNextAutoIncrement(table.Name, col.Name)
 				if err != nil {
-					return nil, "", fmt.Errorf("failed to generate auto-increment value for %s: %v", col.Name, err)
+					return nil, "", ferrors.InternalError(fmt.Sprintf("failed to generate auto-increment value for %s", col.Name)).WithCause(err)
 				}
 				value = fmt.Sprintf("%d", nextVal)
 			} else if defaultVal, hasDefault := col.GetDefaultValue(); hasDefault {
 				// Evaluate the default value (handles functions like NOW(), CURRENT_TIMESTAMP, etc.)
 				value = e.evaluateFunctionValue(defaultVal)
 			} else if col.IsNotNull() {
-				return nil, "", fmt.Errorf("no value provided for NOT NULL column %s", col.Name)
+				return nil, "", ferrors.NewExecutionError(fmt.Sprintf("no value provided for NOT NULL column %s", col.Name))
 			} else {
 				value = "NULL"
 			}
@@ -1160,7 +1148,7 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 			expectedCols := len(table.Columns) - len(autoIncCols)
 
 			if len(values) != len(table.Columns) && len(values) != expectedCols {
-				return nil, "", errors.New("column count mismatch")
+				return nil, "", ferrors.ParameterMismatch(len(table.Columns), len(values))
 			}
 
 			valueIdx := 0
@@ -1180,7 +1168,7 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 				} else {
 					nextVal, err := e.catalog.GetNextAutoIncrement(table.Name, col.Name)
 					if err != nil {
-						return nil, "", fmt.Errorf("failed to generate auto-increment value for %s: %v", col.Name, err)
+						return nil, "", ferrors.InternalError(fmt.Sprintf("failed to generate auto-increment value for %s", col.Name)).WithCause(err)
 					}
 					value = fmt.Sprintf("%d", nextVal)
 				}
@@ -1192,32 +1180,32 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 					// Evaluate the default value (handles functions like NOW(), CURRENT_TIMESTAMP, etc.)
 					value = e.evaluateFunctionValue(defaultVal)
 				} else {
-					return nil, "", fmt.Errorf("no value provided for column %s", col.Name)
+					return nil, "", ferrors.NewExecutionError(fmt.Sprintf("no value provided for column %s", col.Name))
 				}
 			}
 		}
 
 		// Check NOT NULL constraint
 		if col.IsNotNull() && (value == "" || value == "NULL") {
-			return nil, "", fmt.Errorf("column %s cannot be NULL", col.Name)
+			return nil, "", ferrors.NewExecutionError(fmt.Sprintf("column %s cannot be NULL", col.Name))
 		}
 
 		// Validate and normalize the value
 		if value != "" && value != "NULL" {
 			if err := ValidateValue(col.Type, value); err != nil {
-				return nil, "", fmt.Errorf("column %s: %v", col.Name, err)
+				return nil, "", ferrors.TypeMismatch(col.Type, value, col.Name)
 			}
 
 			// Validate encoding for TEXT/VARCHAR columns
 			if e.encoder != nil && isTextType(col.Type) {
 				if err := e.encoder.Validate(value); err != nil {
-					return nil, "", fmt.Errorf("column %s: encoding error: %v", col.Name, err)
+					return nil, "", ferrors.InternalError(fmt.Sprintf("column %s: encoding error", col.Name)).WithCause(err)
 				}
 			}
 
 			normalized, err := NormalizeValue(col.Type, value)
 			if err != nil {
-				return nil, "", fmt.Errorf("column %s: %v", col.Name, err)
+				return nil, "", ferrors.NewExecutionError(fmt.Sprintf("failed to normalize column %s", col.Name)).WithCause(err)
 			}
 			normalizedValues[i] = normalized
 		} else {
@@ -1248,7 +1236,7 @@ func (e *Executor) prepareInsertRow(table TableSchema, columns []string, values 
 func (e *Executor) insertSingleRow(table TableSchema, tableName string, normalizedValues []string) error {
 	// Execute BEFORE INSERT triggers
 	if err := e.executeTriggers(tableName, TriggerTimingBefore, TriggerEventInsert); err != nil {
-		return fmt.Errorf("BEFORE INSERT trigger failed: %v", err)
+		return ferrors.NewExecutionError("BEFORE INSERT trigger failed").WithCause(err)
 	}
 
 	// Generate a unique row ID
@@ -1274,10 +1262,10 @@ func (e *Executor) insertSingleRow(table TableSchema, tableName string, normaliz
 	// Store the row
 	data, err := json.Marshal(row)
 	if err != nil {
-		return err
+		return ferrors.InternalError("failed to marshal row").WithCause(err)
 	}
 	if err := e.store.Put(rowKey, data); err != nil {
-		return err
+		return ferrors.NewStorageError("failed to store row").WithCause(err)
 	}
 
 	// Update indexes
@@ -1292,7 +1280,7 @@ func (e *Executor) insertSingleRow(table TableSchema, tableName string, normaliz
 
 	// Execute AFTER INSERT triggers
 	if err := e.executeTriggers(tableName, TriggerTimingAfter, TriggerEventInsert); err != nil {
-		return fmt.Errorf("AFTER INSERT trigger failed: %v", err)
+		return ferrors.NewExecutionError("AFTER INSERT trigger failed").WithCause(err)
 	}
 
 	return nil
@@ -1326,9 +1314,9 @@ func (e *Executor) checkUniqueConstraintsWithConflict(table TableSchema, values 
 				if existingVal, ok := row[col.Name]; ok {
 					if fmt.Sprintf("%v", existingVal) == newValue {
 						if col.IsPrimaryKey() {
-							return rowKey, fmt.Errorf("duplicate primary key value for column %s: %s", col.Name, newValue)
+							return rowKey, ferrors.DuplicateKey(fmt.Sprintf("%s=%s", col.Name, newValue), table.Name)
 						}
-						return rowKey, fmt.Errorf("duplicate value for unique column %s: %s", col.Name, newValue)
+						return rowKey, ferrors.DuplicateKey(fmt.Sprintf("%s=%s", col.Name, newValue), table.Name)
 					}
 				}
 			}
@@ -1403,9 +1391,9 @@ func (e *Executor) checkUniqueConstraints(table TableSchema, values []string, ex
 				if existingVal, ok := row[col.Name]; ok {
 					if fmt.Sprintf("%v", existingVal) == newValue {
 						if col.IsPrimaryKey() {
-							return fmt.Errorf("duplicate primary key value for column %s: %s", col.Name, newValue)
+							return ferrors.DuplicateKey(fmt.Sprintf("%s=%s", col.Name, newValue), table.Name)
 						}
-						return fmt.Errorf("duplicate value for unique column %s: %s", col.Name, newValue)
+						return ferrors.DuplicateKey(fmt.Sprintf("%s=%s", col.Name, newValue), table.Name)
 					}
 				}
 			}
@@ -1457,9 +1445,9 @@ func (e *Executor) checkUniqueConstraints(table TableSchema, values []string, ex
 					}
 					if match {
 						if constraint.Type == ConstraintPrimaryKey {
-							return fmt.Errorf("duplicate primary key value for columns %v", constraint.Columns)
+							return ferrors.DuplicateKey(strings.Join(newKeyParts, ","), table.Name).WithDetail(fmt.Sprintf("columns %v", constraint.Columns))
 						}
-						return fmt.Errorf("duplicate value for unique constraint on columns %v", constraint.Columns)
+						return ferrors.DuplicateKey(strings.Join(newKeyParts, ","), table.Name).WithDetail(fmt.Sprintf("columns %v", constraint.Columns))
 					}
 				}
 			}
@@ -1501,7 +1489,7 @@ func (e *Executor) checkForeignKeyConstraints(table TableSchema, values []string
 		// Check if the referenced value exists
 		refTable, ok := e.catalog.GetTable(fk.RefTable)
 		if !ok {
-			return fmt.Errorf("foreign key references non-existent table: %s", fk.RefTable)
+			return ferrors.TableNotFound(fk.RefTable)
 		}
 
 		// Scan the referenced table for the value
@@ -1527,7 +1515,7 @@ func (e *Executor) checkForeignKeyConstraints(table TableSchema, values []string
 		}
 
 		if !found {
-			return fmt.Errorf("foreign key constraint violation: value %s not found in %s.%s", fkValue, refTable.Name, fk.RefColumn)
+			return ferrors.ConstraintViolation("FOREIGN KEY", fmt.Sprintf("value %s not found in %s.%s", fkValue, refTable.Name, fk.RefColumn))
 		}
 	}
 
@@ -1552,7 +1540,7 @@ func (e *Executor) checkCheckConstraints(table TableSchema, values []string) err
 		}
 
 		if !e.evaluateCheckExpr(checkExpr, value) {
-			return fmt.Errorf("CHECK constraint violation on column %s", col.Name)
+			return ferrors.ConstraintViolation("CHECK", fmt.Sprintf("CHECK constraint violation on column %s", col.Name))
 		}
 	}
 
@@ -1621,7 +1609,7 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 	// Get table schema for type validation
 	table, ok := e.catalog.GetTable(stmt.TableName)
 	if !ok {
-		return "", errors.New("table not found")
+		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// Build a map of column names to types for validation
@@ -1635,33 +1623,33 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 	for col, val := range stmt.Updates {
 		colType, exists := colTypes[col]
 		if !exists {
-			return "", fmt.Errorf("column not found: %s", col)
+			return "", ferrors.ColumnNotFound(col, stmt.TableName)
 		}
 
 		// Evaluate function values like NOW(), CURRENT_TIMESTAMP, etc.
 		evaluatedVal := e.evaluateFunctionValue(val)
 
 		if err := ValidateValue(colType, evaluatedVal); err != nil {
-			return "", fmt.Errorf("column %s: %v", col, err)
+			return "", ferrors.TypeMismatch(colType, evaluatedVal, col)
 		}
 
 		// Validate encoding for TEXT/VARCHAR columns
 		if e.encoder != nil && isTextType(colType) {
 			if err := e.encoder.Validate(evaluatedVal); err != nil {
-				return "", fmt.Errorf("column %s: encoding error: %v", col, err)
+				return "", ferrors.InternalError(fmt.Sprintf("column %s: encoding error", col)).WithCause(err)
 			}
 		}
 
 		normalized, err := NormalizeValue(colType, evaluatedVal)
 		if err != nil {
-			return "", fmt.Errorf("column %s: %v", col, err)
+			return "", ferrors.NewExecutionError(fmt.Sprintf("failed to normalize column %s", col)).WithCause(err)
 		}
 		normalizedUpdates[col] = normalized
 	}
 
 	// Execute BEFORE UPDATE triggers
 	if err := e.executeTriggers(stmt.TableName, TriggerTimingBefore, TriggerEventUpdate); err != nil {
-		return "", fmt.Errorf("BEFORE UPDATE trigger failed: %v", err)
+		return "", ferrors.NewExecutionError("BEFORE UPDATE trigger failed").WithCause(err)
 	}
 
 	// Scan all rows in the table.
@@ -1718,7 +1706,7 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 			for _, col := range table.Columns {
 				if col.Name == colName && col.IsNotNull() {
 					if newVal == "" || newVal == "NULL" {
-						return "", fmt.Errorf("column %s cannot be NULL", colName)
+						return "", ferrors.NewExecutionError(fmt.Sprintf("column %s cannot be NULL", colName))
 					}
 				}
 			}
@@ -1749,7 +1737,7 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 					checkExpr := col.GetCheckConstraint()
 					if checkExpr != nil && newVal != "" && newVal != "NULL" {
 						if !e.evaluateCheckExpr(checkExpr, newVal) {
-							return "", fmt.Errorf("CHECK constraint violation on column %s", colName)
+							return "", ferrors.ConstraintViolation("CHECK", fmt.Sprintf("CHECK constraint violation on column %s", colName))
 						}
 					}
 				}
@@ -1785,7 +1773,7 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 
 	// Execute AFTER UPDATE triggers
 	if err := e.executeTriggers(stmt.TableName, TriggerTimingAfter, TriggerEventUpdate); err != nil {
-		return "", fmt.Errorf("AFTER UPDATE trigger failed: %v", err)
+		return "", ferrors.NewExecutionError("AFTER UPDATE trigger failed").WithCause(err)
 	}
 
 	// Invalidate cache for this table since data has changed
@@ -1813,7 +1801,7 @@ func (e *Executor) executeUpdate(stmt *UpdateStmt) (string, error) {
 func (e *Executor) executeDelete(stmt *DeleteStmt) (string, error) {
 	// Execute BEFORE DELETE triggers
 	if err := e.executeTriggers(stmt.TableName, TriggerTimingBefore, TriggerEventDelete); err != nil {
-		return "", fmt.Errorf("BEFORE DELETE trigger failed: %v", err)
+		return "", ferrors.NewExecutionError("BEFORE DELETE trigger failed").WithCause(err)
 	}
 
 	// Scan all rows in the table.
@@ -1877,7 +1865,7 @@ func (e *Executor) executeDelete(stmt *DeleteStmt) (string, error) {
 
 	// Execute AFTER DELETE triggers
 	if err := e.executeTriggers(stmt.TableName, TriggerTimingAfter, TriggerEventDelete); err != nil {
-		return "", fmt.Errorf("AFTER DELETE trigger failed: %v", err)
+		return "", ferrors.NewExecutionError("AFTER DELETE trigger failed").WithCause(err)
 	}
 
 	// Invalidate cache for this table since data has changed
@@ -1941,12 +1929,12 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 
 				switch onDelete {
 				case ReferentialActionRestrict, ReferentialActionNoAction:
-					return fmt.Errorf("cannot delete: row is referenced by %s.%s", tblName, fk.Column)
+					return ferrors.ConstraintViolation("FOREIGN KEY", fmt.Sprintf("cannot delete: row is referenced by %s.%s", tblName, fk.Column))
 
 				case ReferentialActionCascade:
 					// Delete the dependent row
 					if err := e.store.Delete(key); err != nil {
-						return fmt.Errorf("cascade delete failed: %v", err)
+						return ferrors.NewStorageError("cascade delete failed").WithCause(err)
 					}
 					// Recursively handle cascades from this deleted row
 					if err := e.handleForeignKeyReferencesOnDelete(tblName, refRow); err != nil {
@@ -1966,7 +1954,7 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 					// Check if the column allows NULL
 					for _, col := range schema.Columns {
 						if col.Name == fk.Column && col.IsNotNull() {
-							return fmt.Errorf("cannot set null: column %s.%s has NOT NULL constraint", tblName, fk.Column)
+							return ferrors.ConstraintViolation("NOT NULL", fmt.Sprintf("cannot set null: column %s.%s has NOT NULL constraint", tblName, fk.Column))
 						}
 					}
 					// Set the foreign key column to NULL
@@ -1977,7 +1965,7 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 					refRow[fk.Column] = nil
 					newData, _ := json.Marshal(refRow)
 					if err := e.store.Put(key, newData); err != nil {
-						return fmt.Errorf("set null failed: %v", err)
+						return ferrors.NewStorageError("set null failed").WithCause(err)
 					}
 					// Update indexes
 					if e.indexMgr != nil {
@@ -1998,7 +1986,7 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 								// Evaluate the default value (handles functions like NOW(), CURRENT_TIMESTAMP, etc.)
 								defaultValue = e.evaluateDefaultValue(defVal)
 							} else {
-								return fmt.Errorf("cannot set default: column %s.%s has no default value", tblName, fk.Column)
+								return ferrors.ConstraintViolation("DEFAULT", fmt.Sprintf("cannot set default: column %s.%s has no default value", tblName, fk.Column))
 							}
 							break
 						}
@@ -2011,7 +1999,7 @@ func (e *Executor) handleForeignKeyReferencesOnDelete(tableName string, row map[
 					refRow[fk.Column] = defaultValue
 					newData, _ := json.Marshal(refRow)
 					if err := e.store.Put(key, newData); err != nil {
-						return fmt.Errorf("set default failed: %v", err)
+						return ferrors.NewStorageError("set default failed").WithCause(err)
 					}
 					// Update indexes
 					if e.indexMgr != nil {
@@ -2117,7 +2105,7 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 
 				switch onUpdate {
 				case ReferentialActionRestrict, ReferentialActionNoAction:
-					return fmt.Errorf("cannot update: row is referenced by %s.%s", tblName, fk.Column)
+					return ferrors.ConstraintViolation("FOREIGN KEY", fmt.Sprintf("cannot update: row is referenced by %s.%s", tblName, fk.Column))
 
 				case ReferentialActionCascade:
 					// Update the foreign key to the new value
@@ -2128,7 +2116,7 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 					refRow[fk.Column] = newValueStr
 					newData, _ := json.Marshal(refRow)
 					if err := e.store.Put(key, newData); err != nil {
-						return fmt.Errorf("cascade update failed: %v", err)
+						return ferrors.NewStorageError("cascade update failed").WithCause(err)
 					}
 					// Update indexes
 					if e.indexMgr != nil {
@@ -2144,7 +2132,7 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 					// Check if the column allows NULL
 					for _, col := range schema.Columns {
 						if col.Name == fk.Column && col.IsNotNull() {
-							return fmt.Errorf("cannot set null: column %s.%s has NOT NULL constraint", tblName, fk.Column)
+							return ferrors.ConstraintViolation("NOT NULL", fmt.Sprintf("cannot set null: column %s.%s has NOT NULL constraint", tblName, fk.Column))
 						}
 					}
 					// Set the foreign key column to NULL
@@ -2155,7 +2143,7 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 					refRow[fk.Column] = nil
 					newData, _ := json.Marshal(refRow)
 					if err := e.store.Put(key, newData); err != nil {
-						return fmt.Errorf("set null failed: %v", err)
+						return ferrors.NewStorageError("set null failed").WithCause(err)
 					}
 					// Update indexes
 					if e.indexMgr != nil {
@@ -2171,7 +2159,7 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 								// Evaluate the default value (handles functions like NOW(), CURRENT_TIMESTAMP, etc.)
 								defaultValue = e.evaluateDefaultValue(defVal)
 							} else {
-								return fmt.Errorf("cannot set default: column %s.%s has no default value", tblName, fk.Column)
+								return ferrors.ConstraintViolation("DEFAULT", fmt.Sprintf("cannot set default: column %s.%s has no default value", tblName, fk.Column))
 							}
 							break
 						}
@@ -2184,7 +2172,7 @@ func (e *Executor) handleForeignKeyReferencesOnUpdate(tableName string, oldRow, 
 					refRow[fk.Column] = defaultValue
 					newData, _ := json.Marshal(refRow)
 					if err := e.store.Put(key, newData); err != nil {
-						return fmt.Errorf("set default failed: %v", err)
+						return ferrors.NewStorageError("set default failed").WithCause(err)
 					}
 					// Update indexes
 					if e.indexMgr != nil {
@@ -2257,7 +2245,7 @@ func (e *Executor) checkCircularCascadeDependencies(newTableName string, columns
 			} else if recStack[dependent] {
 				// Found a cycle - build the cycle path for the error message
 				cyclePath := append(path, dependent)
-				return fmt.Errorf("circular CASCADE dependency detected: %s", strings.Join(cyclePath, " -> "))
+				return ferrors.ConstraintViolation("CASCADE", fmt.Sprintf("circular CASCADE dependency detected: %s", strings.Join(cyclePath, " -> ")))
 			}
 		}
 
@@ -2321,7 +2309,7 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 	// Validate that the primary table exists.
 	table, ok := e.catalog.GetTable(stmt.TableName)
 	if !ok {
-		return "", errors.New("table not found")
+		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// Expand "*" to all columns from the table schema.
@@ -2339,7 +2327,7 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 	if e.currentUser != "" && e.currentUser != "admin" {
 		allowed, authRLS := e.auth.CheckPermission(e.currentUser, stmt.TableName)
 		if !allowed {
-			return "", errors.New("permission denied")
+			return "", ferrors.PermissionDenied("")
 		}
 		if authRLS != nil {
 			rls = &Condition{Column: authRLS.Column, Value: authRLS.Value}
@@ -2379,7 +2367,7 @@ func (e *Executor) executeSelect(stmt *SelectStmt) (string, error) {
 	if stmt.Join != nil {
 		_, ok := e.catalog.GetTable(stmt.Join.TableName)
 		if !ok {
-			return "", errors.New("join table not found")
+			return "", ferrors.TableNotFound("")
 		}
 		p := "row:" + stmt.Join.TableName + ":"
 		joinRows, err = e.store.Scan(p)
@@ -2667,13 +2655,12 @@ func (e *Executor) executeUnion(stmt *UnionStmt) (string, error) {
 	// Execute the left SELECT
 	leftResult, err := e.executeSelect(stmt.Left)
 	if err != nil {
-		return "", fmt.Errorf("error executing left side of UNION: %v", err)
+		return "", ferrors.NewExecutionError("error executing left side of UNION").WithCause(err)
 	}
 
-	// Execute the right SELECT
 	rightResult, err := e.executeSelect(stmt.Right)
 	if err != nil {
-		return "", fmt.Errorf("error executing right side of UNION: %v", err)
+		return "", ferrors.NewExecutionError("error executing right side of UNION").WithCause(err)
 	}
 
 	// Extract header from left result (use left side's column names)
@@ -2740,13 +2727,12 @@ func (e *Executor) executeIntersect(stmt *IntersectStmt) (string, error) {
 	// Execute the left SELECT
 	leftResult, err := e.executeSelect(stmt.Left)
 	if err != nil {
-		return "", fmt.Errorf("error executing left side of INTERSECT: %v", err)
+		return "", ferrors.NewExecutionError("error executing left side of INTERSECT").WithCause(err)
 	}
 
-	// Execute the right SELECT
 	rightResult, err := e.executeSelect(stmt.Right)
 	if err != nil {
-		return "", fmt.Errorf("error executing right side of INTERSECT: %v", err)
+		return "", ferrors.NewExecutionError("error executing right side of INTERSECT").WithCause(err)
 	}
 
 	// Extract header from left result
@@ -2802,13 +2788,12 @@ func (e *Executor) executeExcept(stmt *ExceptStmt) (string, error) {
 	// Execute the left SELECT
 	leftResult, err := e.executeSelect(stmt.Left)
 	if err != nil {
-		return "", fmt.Errorf("error executing left side of EXCEPT: %v", err)
+		return "", ferrors.NewExecutionError("error executing left side of EXCEPT").WithCause(err)
 	}
 
-	// Execute the right SELECT
 	rightResult, err := e.executeSelect(stmt.Right)
 	if err != nil {
-		return "", fmt.Errorf("error executing right side of EXCEPT: %v", err)
+		return "", ferrors.NewExecutionError("error executing right side of EXCEPT").WithCause(err)
 	}
 
 	// Extract header from left result
@@ -3743,7 +3728,7 @@ func extractSubqueryValues(result string) []string {
 // Returns an error if a transaction is already active.
 func (e *Executor) executeBegin() (string, error) {
 	if e.tx != nil && e.tx.IsActive() {
-		return "", errors.New("transaction already in progress")
+		return "", ferrors.InternalError("transaction already in progress")
 	}
 
 	e.tx = storage.NewTransaction(e.store)
@@ -3754,7 +3739,7 @@ func (e *Executor) executeBegin() (string, error) {
 // Returns an error if no transaction is active.
 func (e *Executor) executeCommit() (string, error) {
 	if e.tx == nil || !e.tx.IsActive() {
-		return "", errors.New("no transaction in progress")
+		return "", ferrors.InternalError("no transaction in progress")
 	}
 
 	err := e.tx.Commit()
@@ -3771,7 +3756,7 @@ func (e *Executor) executeCommit() (string, error) {
 // Returns an error if no transaction is active.
 func (e *Executor) executeRollback(stmt *RollbackStmt) (string, error) {
 	if e.tx == nil || !e.tx.IsActive() {
-		return "", errors.New("no transaction in progress")
+		return "", ferrors.InternalError("no transaction in progress")
 	}
 
 	// Check if rolling back to a savepoint
@@ -3796,7 +3781,7 @@ func (e *Executor) executeRollback(stmt *RollbackStmt) (string, error) {
 // executeSavepoint creates a savepoint within the current transaction.
 func (e *Executor) executeSavepoint(stmt *SavepointStmt) (string, error) {
 	if e.tx == nil || !e.tx.IsActive() {
-		return "", errors.New("no transaction in progress")
+		return "", ferrors.InternalError("no transaction in progress")
 	}
 
 	err := e.tx.CreateSavepoint(stmt.Name)
@@ -3810,7 +3795,7 @@ func (e *Executor) executeSavepoint(stmt *SavepointStmt) (string, error) {
 // executeReleaseSavepoint releases a savepoint.
 func (e *Executor) executeReleaseSavepoint(stmt *ReleaseSavepointStmt) (string, error) {
 	if e.tx == nil || !e.tx.IsActive() {
-		return "", errors.New("no transaction in progress")
+		return "", ferrors.InternalError("no transaction in progress")
 	}
 
 	err := e.tx.ReleaseSavepoint(stmt.Name)
@@ -3826,7 +3811,7 @@ func (e *Executor) executeCreateIndex(stmt *CreateIndexStmt) (string, error) {
 	// Verify the table exists
 	_, ok := e.catalog.GetTable(stmt.TableName)
 	if !ok {
-		return "", errors.New("table not found: " + stmt.TableName)
+		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// Check if index already exists
@@ -3837,7 +3822,7 @@ func (e *Executor) executeCreateIndex(stmt *CreateIndexStmt) (string, error) {
 			// IF NOT EXISTS specified, silently succeed
 			return "CREATE INDEX OK", nil
 		}
-		return "", errors.New("index already exists on column: " + stmt.ColumnName)
+		return "", ferrors.IndexAlreadyExists("", stmt.ColumnName)
 	}
 
 	// Create the index
@@ -3860,7 +3845,7 @@ func (e *Executor) executeDropIndex(stmt *DropIndexStmt) (string, error) {
 		if stmt.IfExists {
 			return "DROP INDEX OK", nil
 		}
-		return "", errors.New("table not found: " + stmt.TableName)
+		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// The index name format is "table:column", but we need to find the column
@@ -3870,7 +3855,7 @@ func (e *Executor) executeDropIndex(stmt *DropIndexStmt) (string, error) {
 
 	// First, try to find the index by scanning all indexes for this table
 	if e.indexMgr == nil {
-		return "", errors.New("index manager not initialized")
+		return "", ferrors.InternalError("index manager not initialized")
 	}
 
 	// Drop the index - the IndexManager.DropIndex expects table and column
@@ -3905,7 +3890,7 @@ func (e *Executor) executeDropIndex(stmt *DropIndexStmt) (string, error) {
 		if stmt.IfExists {
 			return "DROP INDEX OK", nil
 		}
-		return "", errors.New("index not found: " + stmt.IndexName)
+		return "", ferrors.IndexNotFound("", stmt.IndexName)
 	}
 
 	// Drop the index
@@ -4490,7 +4475,7 @@ func (e *Executor) executeInspect(stmt *InspectStmt) (string, error) {
 	case "AUDIT_STATS":
 		return e.inspectAuditStats()
 	default:
-		return "", fmt.Errorf("unknown inspect target: %s", stmt.Target)
+		return "", ferrors.NewSyntaxError(fmt.Sprintf("unknown inspect target: %s", stmt.Target))
 	}
 }
 
@@ -4802,7 +4787,7 @@ func (e *Executor) inspectUser(username string) (string, error) {
 	// Get user data
 	userData, err := e.store.Get("_sys_users:" + username)
 	if err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", ferrors.NewAuthError(fmt.Sprintf("user not found: %s", username))
 	}
 
 	var user struct {
@@ -4884,7 +4869,7 @@ func (e *Executor) inspectUser(username string) (string, error) {
 func (e *Executor) inspectUserRoles(username string) (string, error) {
 	// Verify user exists
 	if _, err := e.store.Get("_sys_users:" + username); err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", ferrors.NewAuthError(fmt.Sprintf("user not found: %s", username))
 	}
 
 	userRoles, err := e.auth.GetUserRoles(username)
@@ -4922,7 +4907,7 @@ func (e *Executor) inspectUserRoles(username string) (string, error) {
 func (e *Executor) inspectUserPrivileges(username string) (string, error) {
 	// Verify user exists
 	if _, err := e.store.Get("_sys_users:" + username); err != nil {
-		return "", fmt.Errorf("user not found: %s", username)
+		return "", ferrors.NewAuthError(fmt.Sprintf("user not found: %s", username))
 	}
 
 	// Get user roles
@@ -4999,7 +4984,7 @@ func (e *Executor) inspectPrivileges() (string, error) {
 func (e *Executor) inspectTable(tableName string) (string, error) {
 	table, ok := e.catalog.GetTable(tableName)
 	if !ok {
-		return "", fmt.Errorf("table not found: %s", tableName)
+		return "", ferrors.TableNotFound(tableName)
 	}
 
 	var results []string
@@ -5235,7 +5220,7 @@ func (e *Executor) executeCreateProcedure(stmt *CreateProcedureStmt) (string, er
 			// IF NOT EXISTS specified, silently succeed
 			return "CREATE PROCEDURE OK", nil
 		} else {
-			return "", fmt.Errorf("procedure already exists: %s", stmt.Name)
+			return "", ferrors.ProcedureAlreadyExists(stmt.Name)
 		}
 	}
 
@@ -5256,13 +5241,13 @@ func (e *Executor) executeCreateProcedure(stmt *CreateProcedureStmt) (string, er
 func (e *Executor) executeCall(stmt *CallStmt) (string, error) {
 	proc, ok := e.catalog.GetProcedure(stmt.ProcedureName)
 	if !ok {
-		return "", fmt.Errorf("procedure not found: %s", stmt.ProcedureName)
+		return "", ferrors.ProcedureNotFound(stmt.ProcedureName)
 	}
 
 	// Validate argument count
 	if len(stmt.Arguments) != len(proc.Parameters) {
-		return "", fmt.Errorf("procedure %s expects %d arguments, got %d",
-			stmt.ProcedureName, len(proc.Parameters), len(stmt.Arguments))
+		return "", ferrors.ParameterMismatch(len(proc.Parameters), len(stmt.Arguments)).
+			WithDetail(fmt.Sprintf("procedure %s expects %d arguments, got %d", stmt.ProcedureName, len(proc.Parameters), len(stmt.Arguments)))
 	}
 
 	// Execute each statement in the procedure body
@@ -5280,12 +5265,12 @@ func (e *Executor) executeCall(stmt *CallStmt) (string, error) {
 		parser := NewParser(lexer)
 		parsedStmt, err := parser.Parse()
 		if err != nil {
-			return "", fmt.Errorf("error parsing procedure statement: %v", err)
+			return "", ferrors.NewExecutionError("error parsing procedure statement").WithCause(err)
 		}
 
 		result, err := e.Execute(parsedStmt)
 		if err != nil {
-			return "", fmt.Errorf("error executing procedure statement: %v", err)
+			return "", ferrors.NewExecutionError("error executing procedure statement").WithCause(err)
 		}
 		results = append(results, result)
 	}
@@ -5303,7 +5288,7 @@ func (e *Executor) executeDropProcedure(stmt *DropProcedureStmt) (string, error)
 		if stmt.IfExists {
 			return "DROP PROCEDURE OK", nil
 		}
-		return "", fmt.Errorf("procedure not found: %s", stmt.Name)
+		return "", ferrors.ProcedureNotFound(stmt.Name)
 	}
 
 	if err := e.catalog.DropProcedure(stmt.Name); err != nil {
@@ -5323,25 +5308,25 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 	// Verify the table exists
 	table, ok := e.catalog.GetTable(stmt.TableName)
 	if !ok {
-		return "", errors.New("table not found: " + stmt.TableName)
+		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	switch stmt.Action {
 	case AlterActionAddColumn:
 		if stmt.ColumnDef == nil {
-			return "", errors.New("column definition required for ADD COLUMN")
+			return "", ferrors.MissingRequired("column definition")
 		}
 
 		// Validate the column type
 		if !IsValidType(stmt.ColumnDef.Type) {
-			return "", fmt.Errorf("invalid column type: %s", stmt.ColumnDef.Type)
+			return "", ferrors.TypeMismatch(stmt.ColumnDef.Type, "", "")
 		}
 
 		// Validate foreign key references if present
 		if fk := stmt.ColumnDef.GetForeignKey(); fk != nil {
 			refTable, ok := e.catalog.GetTable(fk.Table)
 			if !ok {
-				return "", fmt.Errorf("foreign key references non-existent table: %s", fk.Table)
+				return "", ferrors.TableNotFound(fk.Table)
 			}
 			found := false
 			for _, refCol := range refTable.Columns {
@@ -5351,7 +5336,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 				}
 			}
 			if !found {
-				return "", fmt.Errorf("foreign key references non-existent column: %s.%s", fk.Table, fk.Column)
+				return "", ferrors.ColumnNotFound(fk.Column, fk.Table)
 			}
 		}
 
@@ -5397,7 +5382,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 
 	case AlterActionDropColumn:
 		if stmt.ColumnName == "" {
-			return "", errors.New("column name required for DROP COLUMN")
+			return "", ferrors.MissingRequired("column name")
 		}
 
 		// Drop the column from the schema
@@ -5435,7 +5420,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 
 	case AlterActionRenameColumn:
 		if stmt.ColumnName == "" || stmt.NewColumnName == "" {
-			return "", errors.New("old and new column names required for RENAME COLUMN")
+			return "", ferrors.MissingRequired("column names")
 		}
 
 		// Rename the column in the schema
@@ -5477,12 +5462,12 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 
 	case AlterActionModifyColumn:
 		if stmt.ColumnName == "" || stmt.NewColumnType == "" {
-			return "", errors.New("column name and new type required for MODIFY COLUMN")
+			return "", ferrors.MissingRequired("column name or type")
 		}
 
 		// Validate the new column type
 		if !IsValidType(stmt.NewColumnType) {
-			return "", fmt.Errorf("invalid column type: %s", stmt.NewColumnType)
+			return "", ferrors.TypeMismatch(stmt.NewColumnType, "", "")
 		}
 
 		// Get the current column definition
@@ -5494,7 +5479,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 			}
 		}
 		if currentCol == nil {
-			return "", errors.New("column not found: " + stmt.ColumnName)
+			return "", ferrors.ColumnNotFound(stmt.ColumnName, stmt.TableName)
 		}
 
 		// Determine new constraints
@@ -5524,14 +5509,14 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 
 	case AlterActionAddConstraint:
 		if stmt.Constraint == nil {
-			return "", errors.New("constraint definition required for ADD CONSTRAINT")
+			return "", ferrors.MissingRequired("constraint definition")
 		}
 
 		// Validate foreign key references if present
 		if stmt.Constraint.Type == ConstraintForeignKey && stmt.Constraint.ForeignKey != nil {
 			refTable, ok := e.catalog.GetTable(stmt.Constraint.ForeignKey.Table)
 			if !ok {
-				return "", fmt.Errorf("foreign key references non-existent table: %s", stmt.Constraint.ForeignKey.Table)
+				return "", ferrors.TableNotFound(stmt.Constraint.ForeignKey.Table)
 			}
 			found := false
 			for _, refCol := range refTable.Columns {
@@ -5541,7 +5526,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 				}
 			}
 			if !found {
-				return "", fmt.Errorf("foreign key references non-existent column: %s.%s", stmt.Constraint.ForeignKey.Table, stmt.Constraint.ForeignKey.Column)
+				return "", ferrors.ColumnNotFound(stmt.Constraint.ForeignKey.Column, stmt.Constraint.ForeignKey.Table)
 			}
 		}
 
@@ -5565,7 +5550,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 
 	case AlterActionDropConstraint:
 		if stmt.ConstraintName == "" {
-			return "", errors.New("constraint name required for DROP CONSTRAINT")
+			return "", ferrors.MissingRequired("constraint name")
 		}
 
 		// Drop the constraint from the catalog
@@ -5585,7 +5570,7 @@ func (e *Executor) executeAlterTable(stmt *AlterTableStmt) (string, error) {
 		return "ALTER TABLE OK", nil
 
 	default:
-		return "", fmt.Errorf("unknown ALTER TABLE action: %s", stmt.Action)
+		return "", ferrors.NewSyntaxError(fmt.Sprintf("unknown ALTER TABLE action: %s", stmt.Action))
 	}
 }
 
@@ -5608,7 +5593,7 @@ func (e *Executor) executeCreateView(stmt *CreateViewStmt) (string, error) {
 			// IF NOT EXISTS specified, silently succeed
 			return "CREATE VIEW OK", nil
 		} else {
-			return "", fmt.Errorf("view already exists: %s", stmt.ViewName)
+			return "", ferrors.ViewAlreadyExists(stmt.ViewName)
 		}
 	}
 
@@ -5617,7 +5602,7 @@ func (e *Executor) executeCreateView(stmt *CreateViewStmt) (string, error) {
 		if _, ok := e.catalog.GetTable(stmt.Query.TableName); !ok {
 			// Check if it's a view
 			if _, ok := e.catalog.GetView(stmt.Query.TableName); !ok {
-				return "", fmt.Errorf("table or view not found: %s", stmt.Query.TableName)
+				return "", ferrors.TableNotFound(stmt.Query.TableName)
 			}
 		}
 	}
@@ -5645,7 +5630,7 @@ func (e *Executor) executeDropView(stmt *DropViewStmt) (string, error) {
 		if stmt.IfExists {
 			return "DROP VIEW OK", nil
 		}
-		return "", fmt.Errorf("view not found: %s", stmt.ViewName)
+		return "", ferrors.ViewNotFound(stmt.ViewName)
 	}
 
 	if err := e.catalog.DropView(stmt.ViewName); err != nil {
@@ -5663,7 +5648,7 @@ func (e *Executor) executeDropView(stmt *DropViewStmt) (string, error) {
 func (e *Executor) executeCreateTrigger(stmt *CreateTriggerStmt) (string, error) {
 	// Validate that the table exists
 	if _, ok := e.catalog.GetTable(stmt.TableName); !ok {
-		return "", fmt.Errorf("table not found: %s", stmt.TableName)
+		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// Check if trigger already exists
@@ -5677,7 +5662,7 @@ func (e *Executor) executeCreateTrigger(stmt *CreateTriggerStmt) (string, error)
 			// IF NOT EXISTS specified, silently succeed
 			return "CREATE TRIGGER OK", nil
 		} else {
-			return "", fmt.Errorf("trigger already exists: %s", stmt.TriggerName)
+			return "", ferrors.TriggerAlreadyExists(stmt.TriggerName, stmt.TableName)
 		}
 	}
 
@@ -5709,7 +5694,7 @@ func (e *Executor) executeDropTrigger(stmt *DropTriggerStmt) (string, error) {
 		if stmt.IfExists {
 			return "DROP TRIGGER OK", nil
 		}
-		return "", fmt.Errorf("trigger not found: %s", stmt.TriggerName)
+		return "", ferrors.TriggerNotFound(stmt.TriggerName, stmt.TableName)
 	}
 
 	if err := e.triggerMgr.DropTrigger(stmt.TableName, stmt.TriggerName); err != nil {
@@ -5739,7 +5724,7 @@ func (e *Executor) executeDropTable(stmt *DropTableStmt) (string, error) {
 		if stmt.IfExists {
 			return "DROP TABLE OK", nil
 		}
-		return "", errors.New("table not found: " + stmt.TableName)
+		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// Check for foreign key references from other tables
@@ -5751,7 +5736,7 @@ func (e *Executor) executeDropTable(stmt *DropTableStmt) (string, error) {
 		for _, col := range tableSchema.Columns {
 			for _, constraint := range col.Constraints {
 				if constraint.Type == ConstraintForeignKey && constraint.ForeignKey != nil && constraint.ForeignKey.Table == stmt.TableName {
-					return "", fmt.Errorf("cannot drop table %s: referenced by foreign key in table %s", stmt.TableName, tableName)
+					return "", ferrors.ConstraintViolation("FOREIGN KEY", fmt.Sprintf("cannot drop table %s: referenced by foreign key in table %s", stmt.TableName, tableName))
 				}
 			}
 		}
@@ -5761,7 +5746,7 @@ func (e *Executor) executeDropTable(stmt *DropTableStmt) (string, error) {
 	prefix := "row:" + stmt.TableName + ":"
 	rows, err := e.store.Scan(prefix)
 	if err != nil {
-		return "", fmt.Errorf("failed to scan table rows: %v", err)
+		return "", ferrors.NewStorageError("failed to scan table rows").WithCause(err)
 	}
 
 	for key, rowData := range rows {
@@ -5828,7 +5813,7 @@ func (e *Executor) executeTruncateTable(stmt *TruncateTableStmt) (string, error)
 	// Check if table exists
 	table, ok := e.catalog.GetTable(stmt.TableName)
 	if !ok {
-		return "", errors.New("table not found: " + stmt.TableName)
+		return "", ferrors.TableNotFound(stmt.TableName)
 	}
 
 	// Check for foreign key references from other tables
@@ -5843,7 +5828,7 @@ func (e *Executor) executeTruncateTable(stmt *TruncateTableStmt) (string, error)
 					refPrefix := "row:" + tableName + ":"
 					refRows, err := e.store.Scan(refPrefix)
 					if err == nil && len(refRows) > 0 {
-						return "", fmt.Errorf("cannot truncate table %s: referenced by foreign key in table %s with existing data", stmt.TableName, tableName)
+						return "", ferrors.ConstraintViolation("FOREIGN KEY", fmt.Sprintf("cannot truncate table %s: referenced by foreign key in table %s with existing data", stmt.TableName, tableName))
 					}
 				}
 			}
@@ -5854,7 +5839,7 @@ func (e *Executor) executeTruncateTable(stmt *TruncateTableStmt) (string, error)
 	prefix := "row:" + stmt.TableName + ":"
 	rows, err := e.store.Scan(prefix)
 	if err != nil {
-		return "", fmt.Errorf("failed to scan table rows: %v", err)
+		return "", ferrors.NewStorageError("failed to scan table rows").WithCause(err)
 	}
 
 	for key, rowData := range rows {
@@ -5902,12 +5887,12 @@ func (e *Executor) executeTriggers(tableName string, timing TriggerTiming, event
 		parser := NewParser(lexer)
 		stmt, err := parser.Parse()
 		if err != nil {
-			return fmt.Errorf("trigger %s: failed to parse action SQL: %v", trigger.Name, err)
+			return ferrors.NewExecutionError(fmt.Sprintf("trigger %s: failed to parse action SQL", trigger.Name)).WithCause(err)
 		}
 
 		_, err = e.Execute(stmt)
 		if err != nil {
-			return fmt.Errorf("trigger %s: failed to execute action: %v", trigger.Name, err)
+			return ferrors.NewExecutionError(fmt.Sprintf("trigger %s: failed to execute action", trigger.Name)).WithCause(err)
 		}
 	}
 
@@ -6006,12 +5991,12 @@ func (e *Executor) executeViewQuery(outerStmt *SelectStmt, view ViewDefinition) 
 	parser := NewParser(lexer)
 	parsedStmt, err := parser.Parse()
 	if err != nil {
-		return "", fmt.Errorf("failed to parse view query: %v", err)
+		return "", ferrors.NewSyntaxError("failed to parse view query").WithCause(err)
 	}
 
 	viewQuery, ok := parsedStmt.(*SelectStmt)
 	if !ok {
-		return "", errors.New("view query is not a SELECT statement")
+		return "", ferrors.NewSyntaxError("view query is not a SELECT statement")
 	}
 
 	// Apply column selection from outer query
@@ -6067,7 +6052,7 @@ func parseDateTime(s string) (time.Time, error) {
 		}
 	}
 
-	return time.Time{}, fmt.Errorf("unable to parse date/time: %s", s)
+	return time.Time{}, ferrors.TypeMismatch("TIMESTAMP", s, "").WithDetail("unable to parse date/time")
 }
 
 // =============================================================================
@@ -6077,7 +6062,7 @@ func parseDateTime(s string) (time.Time, error) {
 // executeCreateDatabase creates a new database.
 func (e *Executor) executeCreateDatabase(stmt *CreateDatabaseStmt) (string, error) {
 	if e.dbMgr == nil {
-		return "", errors.New("database manager not initialized")
+		return "", ferrors.InternalError("database manager not initialized")
 	}
 
 	opts := storage.DefaultCreateDatabaseOptions()
@@ -6096,7 +6081,7 @@ func (e *Executor) executeCreateDatabase(stmt *CreateDatabaseStmt) (string, erro
 // executeDropDatabase drops a database.
 func (e *Executor) executeDropDatabase(stmt *DropDatabaseStmt) (string, error) {
 	if e.dbMgr == nil {
-		return "", errors.New("database manager not initialized")
+		return "", ferrors.InternalError("database manager not initialized")
 	}
 
 	err := e.dbMgr.DropDatabase(stmt.DatabaseName)
@@ -6110,7 +6095,7 @@ func (e *Executor) executeDropDatabase(stmt *DropDatabaseStmt) (string, error) {
 // inspectDatabases returns information about all databases.
 func (e *Executor) inspectDatabases() (string, error) {
 	if e.dbMgr == nil {
-		return "", errors.New("database manager not initialized")
+		return "", ferrors.InternalError("database manager not initialized")
 	}
 
 	databases := e.dbMgr.ListDatabases()
@@ -6131,7 +6116,7 @@ func (e *Executor) inspectDatabases() (string, error) {
 // inspectDatabase returns information about a specific database.
 func (e *Executor) inspectDatabase(dbName string) (string, error) {
 	if e.dbMgr == nil {
-		return "", errors.New("database manager not initialized")
+		return "", ferrors.InternalError("database manager not initialized")
 	}
 
 	meta, err := e.dbMgr.GetDatabaseMetadata(dbName)
@@ -6182,14 +6167,14 @@ func (e *Executor) inspectAudit(stmt *InspectStmt) (string, error) {
 		case "status":
 			opts.Status = stmt.Where.Value
 		default:
-			return "", fmt.Errorf("unsupported WHERE column for INSPECT AUDIT: %s (supported: username, event_type, database, status)", stmt.Where.Column)
+			return "", ferrors.NewSyntaxError(fmt.Sprintf("unsupported WHERE column for INSPECT AUDIT: %s (supported: username, event_type, database, status)", stmt.Where.Column))
 		}
 	}
 
 	// Query audit logs
 	rawEvents, err := e.auditMgr.QueryLogs(opts)
 	if err != nil {
-		return "", fmt.Errorf("failed to query audit logs: %w", err)
+		return "", ferrors.InternalError("failed to query audit logs").WithCause(err)
 	}
 
 	// Cast to AuditEvent
@@ -6241,12 +6226,12 @@ func (e *Executor) inspectAudit(stmt *InspectStmt) (string, error) {
 // This command requires admin privileges and is checked at the Execute level.
 func (e *Executor) inspectAuditStats() (string, error) {
 	if e.auditMgr == nil {
-		return "", errors.New("audit trail is not enabled")
+		return "", ferrors.InternalError("audit trail is not enabled")
 	}
 
 	stats, err := e.auditMgr.GetStats()
 	if err != nil {
-		return "", fmt.Errorf("failed to get audit statistics: %w", err)
+		return "", ferrors.InternalError("failed to get audit statistics").WithCause(err)
 	}
 
 	// Format statistics as key-value pairs
@@ -6276,7 +6261,7 @@ func (e *Executor) inspectAuditStats() (string, error) {
 // This command requires admin privileges and is checked at the Execute level.
 func (e *Executor) executeExportAudit(stmt *ExportAuditStmt) (string, error) {
 	if e.auditMgr == nil {
-		return "", errors.New("audit trail is not enabled")
+		return "", ferrors.InternalError("audit trail is not enabled")
 	}
 
 	// Build query options from the statement
@@ -6296,7 +6281,7 @@ func (e *Executor) executeExportAudit(stmt *ExportAuditStmt) (string, error) {
 		case "status":
 			opts.Status = stmt.Where.Value
 		default:
-			return "", fmt.Errorf("unsupported WHERE column for EXPORT AUDIT: %s (supported: username, event_type, database, status)", stmt.Where.Column)
+			return "", ferrors.NewSyntaxError(fmt.Sprintf("unsupported WHERE column for EXPORT AUDIT: %s (supported: username, event_type, database, status)", stmt.Where.Column))
 		}
 	}
 
@@ -6308,7 +6293,7 @@ func (e *Executor) executeExportAudit(stmt *ExportAuditStmt) (string, error) {
 	// Export audit logs
 	err := e.auditMgr.ExportLogs(stmt.Filename, format, opts)
 	if err != nil {
-		return "", fmt.Errorf("failed to export audit logs: %w", err)
+		return "", ferrors.InternalError("failed to export audit logs").WithCause(err)
 	}
 
 	return fmt.Sprintf("EXPORT AUDIT OK: %s", stmt.Filename), nil
