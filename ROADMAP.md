@@ -485,7 +485,7 @@ storage:
 
 We welcome contributions! If you'd like to work on a planned feature or propose a new one:
 
-1. Check the [Issues](https://github.com/firefly-oss/flydb/issues) for existing discussions
+1. Check the [Issues](https://github.com/firefly-research/flydb/issues) for existing discussions
 2. Open a new issue to discuss your proposal
 3. Submit a pull request with your implementation
 

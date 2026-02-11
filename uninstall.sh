@@ -24,7 +24,7 @@
 set -euo pipefail
 
 readonly SCRIPT_VERSION="01.26.17"
-readonly GITHUB_REPO="firefly-oss/flydb"
+readonly GITHUB_REPO="firefly-research/flydb"
 
 # =============================================================================
 # Configuration
