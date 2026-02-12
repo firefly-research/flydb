@@ -25,7 +25,7 @@ set -euo pipefail
 
 readonly SCRIPT_VERSION="01.26.17"
 readonly FLYDB_VERSION="${FLYDB_VERSION:-01.26.17}"
-readonly GITHUB_REPO="firefly-research/flydb"
+readonly GITHUB_REPO="fireflyresearch/flydb"
 readonly DOWNLOAD_BASE_URL="https://github.com/${GITHUB_REPO}/releases/download"
 
 # Default values (can be overridden by CLI args or interactive prompts)

@@ -949,7 +949,7 @@ func printUsage() {
 	fmt.Printf("    %s          Disable colored output\n", cli.Info("NO_COLOR"))
 	fmt.Println()
 
-	fmt.Println("  " + cli.Dimmed("For more information, visit: https://github.com/firefly-research/flydb"))
+	fmt.Println("  " + cli.Dimmed("For more information, visit: https://github.com/fireflyresearch/flydb"))
 	fmt.Println()
 }
 

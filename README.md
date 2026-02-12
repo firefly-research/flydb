@@ -12,10 +12,10 @@ _/ ____\  | ___.__. __| _/\_ |__
   <p><strong>The Lightweight, Embeddable SQL Database for Go Applications</strong></p>
 
   <p>
-    <a href="https://github.com/firefly-research/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.17-blue.svg" alt="Version"></a>
-    <a href="https://github.com/firefly-research/flydb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="License"></a>
+    <a href="https://github.com/fireflyresearch/flydb/releases"><img src="https://img.shields.io/badge/version-01.26.17-blue.svg" alt="Version"></a>
+    <a href="https://github.com/fireflyresearch/flydb/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-green.svg" alt="License"></a>
     <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24%2B-00ADD8?logo=go" alt="Go Version"></a>
-    <a href="https://github.com/firefly-research/flydb"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg" alt="Platform"></a>
+    <a href="https://github.com/fireflyresearch/flydb"><img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-lightgrey.svg" alt="Platform"></a>
   </p>
 </div>
 
@@ -442,13 +442,13 @@ RLS predicates are automatically applied to all queries, ensuring data isolation
 Install FlyDB with a single command. The installer automatically detects your platform and downloads the appropriate pre-built binaries:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/firefly-research/flydb/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/fireflyresearch/flydb/main/install.sh | bash
 ```
 
 To install with specific options (non-interactive):
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/firefly-research/flydb/main/install.sh | bash -s -- --prefix ~/.local --yes
+curl -sSL https://raw.githubusercontent.com/fireflyresearch/flydb/main/install.sh | bash -s -- --prefix ~/.local --yes
 ```
 
 ### Installation Options
@@ -470,7 +470,7 @@ curl -sSL https://raw.githubusercontent.com/firefly-research/flydb/main/install.
 If you prefer to build from source or need to modify the code:
 
 ```bash
-git clone https://github.com/firefly-research/flydb.git
+git clone https://github.com/fireflyresearch/flydb.git
 cd flydb
 
 # Option 1: Use the installer (recommended)

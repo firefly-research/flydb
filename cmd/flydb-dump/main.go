@@ -431,7 +431,7 @@ func printUsage() {
 	fmt.Printf("  %-36s %s\n", cli.Info("FLYDB_ENCRYPTION_PASSPHRASE"), "Encryption passphrase (local mode)")
 	fmt.Println()
 
-	fmt.Println("  " + cli.Dimmed("For more information, visit: https://github.com/firefly-research/flydb"))
+	fmt.Println("  " + cli.Dimmed("For more information, visit: https://github.com/fireflyresearch/flydb"))
 	fmt.Println()
 }
 
